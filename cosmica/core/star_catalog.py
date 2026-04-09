@@ -1,14 +1,17 @@
 """Star Catalog — query Vizier for reference stars (Gaia DR3).
 
 Provides access to star catalogs for photometry and plate solving.
-Uses TAP queries to Vizier or direct HTTP fallback.
+Uses CDS TAP/Vizier for catalog queries, ASTAP CLI or astrometry.net for solving.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import subprocess
+import time
+import urllib.parse
 import urllib.request
 import urllib.error
 from dataclasses import dataclass
@@ -38,109 +41,109 @@ def query_gaia_dr3(
     radius_deg: float = 0.5,
     max_stars: int = 500,
 ) -> list[StarCatalogEntry]:
-    """Query Gaia DR3 stars around a given position.
-
-    Uses the Vizier TAP service for Gaia DR3 (I/355/gaiadr3).
+    """Query Gaia DR3 stars around a given position via CDS TAP.
 
     Parameters
     ----------
-    ra_deg : float
-        Right Ascension of field center in degrees (J2000).
-    dec_deg : float
-        Declination of field center in degrees (J2000).
+    ra_deg, dec_deg : float
+        Field center in degrees (J2000).
     radius_deg : float
-        Search radius in degrees.
+        Search radius in degrees (max 2.0).
     max_stars : int
-        Maximum number of stars to return.
-
-    Returns
-    -------
-    list[StarCatalogEntry]
-        Stars in the field with available photometry.
+        Maximum stars to return.
     """
-    log.info(
-        "Querying Gaia DR3: RA=%.4f, Dec=%.4f, radius=%.3f deg",
-        ra_deg,
-        dec_deg,
-        radius_deg,
-    )
+    radius_deg = min(radius_deg, 2.0)
 
-    if shutil.which("astap_cli") is not None:
-        return _query_gaia_vizier_tap(ra_deg, dec_deg, radius_deg, max_stars)
-    else:
-        return _query_gaia_vizier_tap(ra_deg, dec_deg, radius_deg, max_stars)
+    # Check cache
+    cache_key = f"gaia_{ra_deg:.4f}_{dec_deg:.4f}_{radius_deg:.3f}_{max_stars}.json"
+    cache_path = CATALOG_CACHE_DIR / cache_key
+    if cache_path.exists():
+        try:
+            with open(cache_path) as f:
+                raw = json.load(f)
+            stars = [StarCatalogEntry(**s) for s in raw]
+            log.info("Gaia DR3 cache hit: %d stars", len(stars))
+            return stars
+        except Exception:
+            cache_path.unlink(missing_ok=True)
+
+    log.info("Querying Gaia DR3: RA=%.4f Dec=%.4f r=%.3f°", ra_deg, dec_deg, radius_deg)
+
+    stars = _query_vizier_tap(ra_deg, dec_deg, radius_deg, max_stars)
+
+    if stars:
+        try:
+            with open(cache_path, "w") as f:
+                json.dump([s.__dict__ for s in stars], f)
+        except Exception:
+            pass
+
+    return stars
 
 
-def _query_gaia_vizier_tap(
+def _query_vizier_tap(
     ra_deg: float,
     dec_deg: float,
     radius_deg: float,
     max_stars: int,
 ) -> list[StarCatalogEntry]:
-    """Query Gaia DR3 via Vizier TAP service."""
+    """Query Gaia DR3 via CDS TAPVizieR ADQL endpoint."""
     import xml.etree.ElementTree as ET
 
-    tap_url = "https://vizier.u-strasbg.fr/vizier/sl/VizierCmd.py"
+    adql = (
+        f'SELECT TOP {max_stars} RAJ2000,DEJ2000,Gmag,BPmag,RPmag,Source '
+        f'FROM "I/355/gaiadr3" '
+        f"WHERE CONTAINS(POINT('ICRS',RAJ2000,DEJ2000),"
+        f"CIRCLE('ICRS',{ra_deg},{dec_deg},{radius_deg}))=1 "
+        f"AND Gmag IS NOT NULL "
+        f"ORDER BY Gmag ASC"
+    )
 
-    radius_deg = min(radius_deg, 2.0)
+    params = urllib.parse.urlencode({
+        "REQUEST": "doQuery",
+        "LANG": "ADQL",
+        "FORMAT": "votable",
+        "QUERY": adql,
+    })
 
-    params = {
-        "-source": "I/355/gaiadr3",
-        "-info": "all",
-        "-out": "RAJ2000,DEJ2000,Gmag,BPmag,RPmag,Source",
-        "-c": f"{ra_deg} {dec_deg}",
-        "-c.rs": str(radius_deg),
-        "-c.eq": "J2000",
-        "-out.max": str(max_stars),
-    }
-
-    url = f"{tap_url}?{'&'.join(f'{k}={v}' for k, v in params.items())}"
-
-    log.debug("Vizier query URL: %s", url)
+    url = f"https://tapvizier.cds.unistra.fr/TAPVizieR/tap/sync?{params}"
 
     try:
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "Cosmica/1.0"},
-        )
-        with urllib.request.urlopen(req, timeout=30) as response:
-            data = response.read().decode("utf-8")
-    except (urllib.error.URLError, urllib.error.HTTPError) as e:
+        req = urllib.request.Request(url, headers={"User-Agent": "Cosmica/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = resp.read().decode("utf-8")
+    except Exception as e:
         log.error("Vizier TAP query failed: %s", e)
         return []
 
     stars: list[StarCatalogEntry] = []
     try:
         root = ET.fromstring(data)
-        for resource in root.findall(".//RESOURCE"):
-            for table in resource.findall("TABLE"):
-                for data_elem in table.findall("DATA/TABLEDATA/TR"):
-                    cells = data_elem.findall("TD")
-                    if len(cells) >= 6:
-                        try:
-                            ra = float(cells[0].text or 0)
-                            dec = float(cells[1].text or 0)
-                            g_mag = float(cells[2].text) if cells[2].text else None
-                            bp_mag = float(cells[3].text) if cells[3].text else None
-                            rp_mag = float(cells[4].text) if cells[4].text else None
-                            source_id = cells[5].text
-                            stars.append(
-                                StarCatalogEntry(
-                                    ra_deg=ra,
-                                    dec_deg=dec,
-                                    g_mag=g_mag,
-                                    bp_mag=bp_mag,
-                                    rp_mag=rp_mag,
-                                    source_id=source_id,
-                                )
-                            )
-                        except (ValueError, TypeError):
-                            continue
-    except ET.ParseError:
-        log.error("Failed to parse Vizier response")
-        return []
+        ns = {"v": "http://www.ivoa.net/xml/VOTable/v1.3"}
+        # Try with namespace first, then without
+        rows = root.findall(".//v:TR", ns) or root.findall(".//TR")
+        for row in rows:
+            cells = row.findall("v:TD", ns) or row.findall("TD")
+            if len(cells) < 5:
+                continue
+            try:
+                ra = float(cells[0].text or 0)
+                dec = float(cells[1].text or 0)
+                g_mag = float(cells[2].text) if cells[2].text else None
+                bp_mag = float(cells[3].text) if cells[3].text else None
+                rp_mag = float(cells[4].text) if cells[4].text else None
+                source_id = cells[5].text if len(cells) > 5 else None
+                stars.append(StarCatalogEntry(
+                    ra_deg=ra, dec_deg=dec,
+                    g_mag=g_mag, bp_mag=bp_mag, rp_mag=rp_mag,
+                    source_id=source_id,
+                ))
+            except (ValueError, TypeError):
+                continue
+    except ET.ParseError as e:
+        log.error("Failed to parse Vizier VOTable: %s", e)
 
-    log.info("Retrieved %d stars from Gaia DR3", len(stars))
+    log.info("Gaia DR3: retrieved %d stars", len(stars))
     return stars
 
 
@@ -152,89 +155,310 @@ def plate_solve_astap(
 ) -> dict | None:
     """Plate-solve using ASTAP CLI.
 
-    Requires astap_cli to be installed and in PATH.
-
-    Parameters
-    ----------
-    image_path : Path
-        Path to the FITS image to solve.
-    ra_hint : float, optional
-        Approximate RA in degrees.
-    dec_hint : float, optional
-        Approximate Dec in degrees.
-    scale_hint : float, optional
-        Approximate pixel scale in arcsec/px.
+    ASTAP writes a `<filename>.wcs` file with the plate solution.
+    Requires astap_cli in PATH.
 
     Returns
     -------
-    dict or None
-        Dict with 'ra', 'dec', 'scale', 'rotation', 'wcs' keys, or None if failed.
+    dict with keys: ra, dec, scale, rotation, wcs_header
+    or None if failed.
     """
-    astap_path = shutil.which("astap_cli")
+    astap_path = shutil.which("astap_cli") or shutil.which("astap")
     if astap_path is None:
-        log.error("ASTAP CLI not found in PATH")
+        log.warning("ASTAP not found in PATH (install astap or astap_cli)")
         return None
 
-    cmd = [astap_path, "-f", str(image_path)]
+    cmd = [astap_path, "-f", str(image_path), "-update"]
 
     if ra_hint is not None and dec_hint is not None:
-        cmd.extend(["-ra", f"{ra_hint:.6f}", "-dec", f"{dec_hint:.6f}"])
+        cmd += ["-ra", f"{ra_hint / 15:.6f}", "-dec", f"{dec_hint:.6f}", "-r", "30"]
 
     if scale_hint is not None:
-        cmd.extend(["-scale", f"{scale_hint:.2f}"])
+        cmd += ["-scale", f"{scale_hint:.4f}"]
 
     log.info("Running ASTAP: %s", " ".join(cmd))
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120
         )
-        if result.returncode != 0:
-            log.error("ASTAP failed: %s", result.stderr)
-            return None
-
-        wcs = _parse_astap_output(result.stdout, result.stderr)
-        return wcs
     except subprocess.TimeoutExpired:
-        log.error("ASTAP timed out")
+        log.error("ASTAP timed out after 120s")
         return None
     except Exception as e:
-        log.error("ASTAP error: %s", e)
+        log.error("ASTAP launch error: %s", e)
+        return None
+
+    # ASTAP writes <image>.wcs alongside the input file
+    wcs_path = image_path.with_suffix(".wcs")
+    ini_path = image_path.with_suffix(".ini")
+
+    if wcs_path.exists():
+        result = _parse_wcs_fits(wcs_path)
+        if result:
+            return result
+
+    # Fallback: parse .ini text file ASTAP also writes
+    if ini_path.exists():
+        result = _parse_astap_ini(ini_path)
+        if result:
+            return result
+
+    log.error("ASTAP solve failed (no .wcs output). stderr: %s", proc.stderr[:500])
+    return None
+
+
+def _parse_wcs_fits(wcs_path: Path) -> dict | None:
+    """Parse a FITS WCS file written by ASTAP using astropy."""
+    try:
+        from astropy.io import fits as afits
+        from astropy.wcs import WCS
+
+        with afits.open(wcs_path) as hdul:
+            header = hdul[0].header
+            wcs = WCS(header)
+
+        # Get image center coordinates
+        ny = header.get("NAXIS2", 1000)
+        nx = header.get("NAXIS1", 1000)
+        sky = wcs.pixel_to_world(nx / 2, ny / 2)
+        ra_center = float(sky.ra.deg)
+        dec_center = float(sky.dec.deg)
+
+        # Pixel scale from CD matrix or CDELT
+        try:
+            import numpy as np
+            cd = wcs.pixel_scale_matrix
+            scale_deg = float(np.sqrt(abs(np.linalg.det(cd))))
+            scale_arcsec = scale_deg * 3600
+        except Exception:
+            scale_arcsec = abs(float(header.get("CDELT1", 0.001))) * 3600
+
+        rotation = float(header.get("CROTA2", 0.0))
+
+        log.info("ASTAP WCS: RA=%.4f Dec=%.4f scale=%.3f\"/px", ra_center, dec_center, scale_arcsec)
+        return {
+            "ra": ra_center,
+            "dec": dec_center,
+            "scale": scale_arcsec,
+            "rotation": rotation,
+            "wcs_header": dict(header),
+        }
+    except Exception as e:
+        log.error("WCS FITS parse error: %s", e)
         return None
 
 
-def _parse_astap_output(stdout: str, stderr: str) -> dict | None:
-    """Parse ASTAP output to extract WCS information."""
-    output = stdout + "\n" + stderr
-
-    wcs = {"ra": None, "dec": None, "scale": None, "rotation": None, "wcs": {}}
-
-    for line in output.split("\n"):
-        line = line.strip()
-        if "RA:" in line:
-            try:
-                ra_str = line.split("RA:")[-1].strip().split()[0]
-                wcs["ra"] = float(ra_str)
-            except (IndexError, ValueError):
+def _parse_astap_ini(ini_path: Path) -> dict | None:
+    """Parse ASTAP .ini text output as fallback."""
+    result = {"ra": None, "dec": None, "scale": None, "rotation": None, "wcs_header": {}}
+    try:
+        text = ini_path.read_text()
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("PLTSOLVD=T"):
                 pass
-        if "Dec:" in line:
-            try:
-                dec_str = line.split("Dec:")[-1].strip().split()[0]
-                wcs["dec"] = float(dec_str)
-            except (IndexError, ValueError):
-                pass
-        if "scale:" in line.lower():
-            try:
-                scale_str = line.split(":")[-1].strip().split()[0]
-                wcs["scale"] = float(scale_str)
-            except (IndexError, ValueError):
-                pass
+            elif "=" in line:
+                key, _, val = line.partition("=")
+                key = key.strip()
+                val = val.strip()
+                try:
+                    if key in ("CRVAL1", "RA"):
+                        result["ra"] = float(val)
+                    elif key in ("CRVAL2", "DEC"):
+                        result["dec"] = float(val)
+                    elif key in ("CDELT1",):
+                        result["scale"] = abs(float(val)) * 3600
+                    elif key == "CROTA2":
+                        result["rotation"] = float(val)
+                except ValueError:
+                    pass
+    except Exception as e:
+        log.error("ASTAP ini parse error: %s", e)
+        return None
 
-    if wcs["ra"] is not None and wcs["dec"] is not None:
-        log.info("ASTAP solved: RA=%.4f, Dec=%.4f", wcs["ra"], wcs["dec"])
-        return wcs
+    if result["ra"] is not None and result["dec"] is not None:
+        return result
+    return None
 
+
+def plate_solve_astrometry_net(
+    image_path: Path,
+    api_key: str,
+    ra_hint: float | None = None,
+    dec_hint: float | None = None,
+    scale_hint: float | None = None,
+    timeout: int = 120,
+) -> dict | None:
+    """Plate-solve via nova.astrometry.net HTTP API.
+
+    Parameters
+    ----------
+    image_path : Path
+        FITS file to upload.
+    api_key : str
+        Your nova.astrometry.net API key.
+    timeout : int
+        Max seconds to wait for solve (default 120).
+    """
+    import io
+    BASE = "http://nova.astrometry.net/api"
+
+    def _post_json(url: str, data: dict) -> dict:
+        payload = ("request-json=" + urllib.parse.quote(json.dumps(data))).encode()
+        req = urllib.request.Request(url, data=payload,
+                                     headers={"Content-Type": "application/x-www-form-urlencoded"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read())
+
+    def _get_json(url: str) -> dict:
+        req = urllib.request.Request(url, headers={"User-Agent": "Cosmica/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read())
+
+    # 1. Login
+    log.info("Logging in to astrometry.net...")
+    try:
+        resp = _post_json(f"{BASE}/login", {"apikey": api_key})
+        session = resp.get("session")
+        if not session:
+            log.error("astrometry.net login failed: %s", resp)
+            return None
+    except Exception as e:
+        log.error("astrometry.net login error: %s", e)
+        return None
+
+    # 2. Upload file with multipart/form-data
+    log.info("Uploading %s to astrometry.net...", image_path.name)
+    try:
+        boundary = "CosmicaBoundary"
+        body = io.BytesIO()
+
+        # JSON options part
+        options: dict = {"session": session, "publicly_visible": "n",
+                         "allow_modifications": "n", "allow_commercial_use": "n"}
+        if ra_hint is not None and dec_hint is not None:
+            options["center_ra"] = ra_hint
+            options["center_dec"] = dec_hint
+            options["radius"] = 5.0
+        if scale_hint is not None:
+            options["scale_units"] = "arcsecperpix"
+            options["scale_est"] = scale_hint
+            options["scale_err"] = 20.0
+
+        def _write(b: bytes):
+            body.write(b)
+
+        _write(f"--{boundary}\r\n".encode())
+        _write(b'Content-Disposition: form-data; name="request-json"\r\n\r\n')
+        _write(json.dumps(options).encode())
+        _write(f"\r\n--{boundary}\r\n".encode())
+        _write(f'Content-Disposition: form-data; name="file"; filename="{image_path.name}"\r\n'.encode())
+        _write(b"Content-Type: application/octet-stream\r\n\r\n")
+        _write(image_path.read_bytes())
+        _write(f"\r\n--{boundary}--\r\n".encode())
+
+        upload_req = urllib.request.Request(
+            f"{BASE}/upload",
+            data=body.getvalue(),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        with urllib.request.urlopen(upload_req, timeout=60) as r:
+            upload_resp = json.loads(r.read())
+
+        subid = upload_resp.get("subid")
+        if not subid:
+            log.error("astrometry.net upload failed: %s", upload_resp)
+            return None
+        log.info("Submission ID: %s", subid)
+    except Exception as e:
+        log.error("astrometry.net upload error: %s", e)
+        return None
+
+    # 3. Poll for job completion
+    deadline = time.time() + timeout
+    job_id = None
+
+    while time.time() < deadline:
+        time.sleep(5)
+        try:
+            sub_info = _get_json(f"{BASE}/submissions/{subid}")
+            jobs = sub_info.get("jobs", [])
+            if jobs and jobs[0]:
+                job_id = jobs[0]
+                log.info("Job ID: %s", job_id)
+                break
+        except Exception:
+            pass
+
+    if job_id is None:
+        log.error("astrometry.net: no job started within timeout")
+        return None
+
+    while time.time() < deadline:
+        time.sleep(5)
+        try:
+            job_info = _get_json(f"{BASE}/jobs/{job_id}/info")
+            status = job_info.get("status")
+            if status == "success":
+                break
+            elif status == "failure":
+                log.error("astrometry.net solve failed")
+                return None
+        except Exception:
+            pass
+    else:
+        log.error("astrometry.net timed out waiting for solve")
+        return None
+
+    # 4. Download and parse WCS FITS
+    log.info("Downloading WCS from astrometry.net job %s...", job_id)
+    try:
+        wcs_url = f"http://nova.astrometry.net/wcs_file/{job_id}"
+        req = urllib.request.Request(wcs_url, headers={"User-Agent": "Cosmica/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            wcs_data = r.read()
+
+        # Write to temp file and parse
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".wcs", delete=False) as tmp:
+            tmp.write(wcs_data)
+            tmp_path = Path(tmp.name)
+
+        result = _parse_wcs_fits(tmp_path)
+        tmp_path.unlink(missing_ok=True)
+        return result
+    except Exception as e:
+        log.error("astrometry.net WCS download error: %s", e)
+        return None
+
+
+def plate_solve_auto(
+    image_path: Path,
+    api_key: str | None = None,
+    ra_hint: float | None = None,
+    dec_hint: float | None = None,
+    scale_hint: float | None = None,
+) -> dict | None:
+    """Try ASTAP first, fall back to astrometry.net.
+
+    Parameters
+    ----------
+    api_key : str, optional
+        astrometry.net API key (needed for fallback).
+    """
+    # Try ASTAP first (offline, fast)
+    if shutil.which("astap_cli") or shutil.which("astap"):
+        result = plate_solve_astap(image_path, ra_hint, dec_hint, scale_hint)
+        if result:
+            return result
+        log.warning("ASTAP solve failed, trying astrometry.net...")
+
+    # Fall back to astrometry.net
+    if api_key:
+        return plate_solve_astrometry_net(
+            image_path, api_key, ra_hint, dec_hint, scale_hint
+        )
+
+    log.error("No plate solver available (ASTAP not found, no astrometry.net API key)")
     return None

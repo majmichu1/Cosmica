@@ -1015,10 +1015,46 @@ class MainWindow(QMainWindow):
             align = True
             self._log_panel.log("Aligning and stacking frames...", "info")
 
-        params = self._tools_panel.get_stacking_params()
+        drizzle_enabled, drizzle_params = self._tools_panel.get_drizzle_params()
 
-        # If we are using pre-aligned frames, we force align=False in params too
-        # (though stack_images handles the 'align' argument separately)
+        if drizzle_enabled:
+            self._log_panel.log(
+                f"Drizzle {drizzle_params.scale}× enabled (drop={drizzle_params.drop_shrink:.2f})…",
+                "info",
+            )
+            from cosmica.core.drizzle import drizzle_integrate
+
+            def _drizzle_work(light_frames, d_params, progress=None):
+                import numpy as _np
+                # Collect raw arrays; if aligned frames exist they're already ndarray
+                arrays = [
+                    f if isinstance(f, _np.ndarray) else f.data
+                    for f in light_frames
+                ]
+                result = drizzle_integrate(arrays, params=d_params, progress=progress)
+                return result
+
+            def _on_drizzle_done(result):
+                import numpy as _np
+                from cosmica.core.image_io import ImageData
+                img = ImageData(data=result.data.astype(_np.float32), header={})
+                self._display_image(img)
+                self._log_panel.log(
+                    f"Drizzle complete: {result.n_frames} frames, "
+                    f"{result.output_scale}× scale ({img.shape_str})",
+                    "success",
+                )
+                if self._project:
+                    self._project.add_history(
+                        "Drizzle",
+                        {"n_frames": result.n_frames, "scale": result.output_scale},
+                    )
+                    self._save_project()
+
+            self._start_worker(_drizzle_work, lights, drizzle_params, on_done=_on_drizzle_done)
+            return
+
+        params = self._tools_panel.get_stacking_params()
 
         self._start_worker(
             stack_images,
@@ -1609,75 +1645,111 @@ class MainWindow(QMainWindow):
         if self._current_image is None:
             return
 
-        from cosmica.core.color_calibration import photometric_color_calibrate
-        from cosmica.core.star_catalog import (
-            plate_solve_astap,
-            query_gaia_dr3,
-        )
-
-        params = self._tools_panel.get_pcc_params()
-        self._log_panel.log("Running Photometric Color Calibration (PCC)...", "info")
-
-        if self._current_image.file_path is None:
-            self._log_panel.log("PCC requires image to be saved first", "error")
+        if self._current_image.data.ndim != 3 or self._current_image.data.shape[0] < 3:
+            self._log_panel.log("PCC requires a color (RGB) image", "error")
             return
 
-        solver = params.get("solver", "auto")
+        params = self._tools_panel.get_pcc_params()
+        self._log_panel.log("Starting Photometric Color Calibration (PCC)...", "info")
+
+        # Get astrometry.net key from QSettings
+        from PyQt6.QtCore import QSettings
+        settings = QSettings("Cosmica", "Cosmica")
+        api_key = settings.value("platesolver/astrometry_api_key", "") or None
+
+        image_data = self._current_image.data
+        file_path = self._current_image.file_path
         ra_hint = params.get("ra_hint")
         dec_hint = params.get("dec_hint")
+        solver = params.get("solver", "auto")
 
-        wcs = None
+        def _pcc_work(data, progress=None):
+            import tempfile
+            from pathlib import Path as _Path
+            from cosmica.core.color_calibration import photometric_color_calibrate, ColorCalibrationParams
+            from cosmica.core.star_catalog import plate_solve_auto, plate_solve_astap, plate_solve_astrometry_net, query_gaia_dr3
 
-        if solver in ("auto", "astap"):
-            self._log_panel.log("Attempting plate solve with ASTAP...", "info")
-            wcs = plate_solve_astap(
-                self._current_image.file_path,
-                ra_hint=ra_hint,
-                dec_hint=dec_hint,
-            )
+            # Determine the FITS path to give to the plate solver.
+            # If the image has no saved file, write a temp FITS.
+            solve_path = file_path
+            tmp_fits = None
+            if solve_path is None or not _Path(str(solve_path)).exists():
+                try:
+                    from cosmica.core.image_io import save_image, ImageData, FrameType
+                    tmp_file = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+                    tmp_fits = _Path(tmp_file.name)
+                    tmp_file.close()
+                    save_image(ImageData(data=data, header={}), tmp_fits)
+                    solve_path = tmp_fits
+                except Exception as e:
+                    log.warning("Could not save temp FITS for plate solving: %s", e)
+                    solve_path = None
 
-        if wcs is None and solver in ("auto", "astrometry_net"):
-            self._log_panel.log(
-                "ASTAP not available, astrometry.net not implemented yet", "warning"
-            )
+            wcs = None
+            if solve_path is not None:
+                if progress:
+                    progress(0.1, "Plate solving...")
+                if solver == "astap":
+                    wcs = plate_solve_astap(solve_path, ra_hint, dec_hint)
+                elif solver == "astrometry_net":
+                    if api_key:
+                        wcs = plate_solve_astrometry_net(solve_path, api_key, ra_hint, dec_hint)
+                    else:
+                        log.warning("No astrometry.net API key set in Preferences")
+                else:  # auto
+                    wcs = plate_solve_auto(solve_path, api_key, ra_hint, dec_hint)
 
-        if wcs is None:
-            self._log_panel.log(
-                "Plate solving failed, falling back to statistical calibration", "warning"
-            )
-            result = color_calibrate(
-                self._current_image.data, self._tools_panel.get_color_calibration_params()
-            )
-        else:
-            if ra_hint is None:
-                ra_hint = wcs.get("ra")
-            if dec_hint is None:
-                dec_hint = wcs.get("dec")
+            if tmp_fits is not None:
+                tmp_fits.unlink(missing_ok=True)
+                # Also clean up ASTAP output files
+                for ext in (".wcs", ".ini"):
+                    tmp_fits.with_suffix(ext).unlink(missing_ok=True)
 
-            if ra_hint is not None and dec_hint is not None:
-                self._log_panel.log(
-                    f"Querying Gaia DR3 around RA={ra_hint:.4f}, Dec={dec_hint:.4f}", "info"
+            if progress:
+                progress(0.5, "Querying Gaia DR3 catalog...")
+
+            catalog_stars = []
+            effective_ra = ra_hint
+            effective_dec = dec_hint
+            if wcs:
+                effective_ra = effective_ra or wcs.get("ra")
+                effective_dec = effective_dec or wcs.get("dec")
+
+            if effective_ra is not None and effective_dec is not None:
+                catalog_stars = query_gaia_dr3(effective_ra, effective_dec, radius_deg=0.5)
+                log.info("Gaia DR3: %d stars retrieved", len(catalog_stars))
+
+            if progress:
+                progress(0.75, "Computing color correction...")
+
+            if wcs is None and not catalog_stars:
+                log.warning("No plate solution and no catalog — falling back to statistical calibration")
+                result = __import__("cosmica.core.color_calibration", fromlist=["color_calibrate"]).color_calibrate(
+                    data, ColorCalibrationParams()
                 )
-                catalog_stars = query_gaia_dr3(ra_hint, dec_hint, radius_deg=0.5)
             else:
-                catalog_stars = []
+                result = photometric_color_calibrate(
+                    data,
+                    catalog_stars=catalog_stars if catalog_stars else None,
+                    wcs=wcs,
+                )
 
-            result = photometric_color_calibrate(
-                self._current_image.data,
-                catalog_stars=catalog_stars,
-                wcs=wcs,
-            )
+            if progress:
+                progress(1.0, "Done")
+            return result
 
-        factors = result.correction_factors
-        self._update_current_image(
-            result.data,
-            f"PCC complete (R={factors[0]:.3f}, G={factors[1]:.3f}, B={factors[2]:.3f})",
-        )
-        if self._project:
-            self._project.add_history(
-                "Photometric Color Calibration",
-                {"factors": list(factors)},
+        def _on_pcc_done(result):
+            factors = result.correction_factors
+            self._update_current_image(
+                result.data,
+                f"PCC complete (R={factors[0]:.3f}, G={factors[1]:.3f}, B={factors[2]:.3f})",
             )
+            if self._project:
+                self._project.add_history(
+                    "Photometric Color Calibration", {"factors": list(factors)}
+                )
+
+        self._start_worker(_pcc_work, image_data, on_done=_on_pcc_done)
 
     @pyqtSlot()
     def _on_run_denoise(self):

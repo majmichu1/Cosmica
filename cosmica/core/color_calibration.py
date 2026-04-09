@@ -251,7 +251,7 @@ def photometric_color_calibrate(
         return color_calibrate(result, ColorCalibrationParams(neutralize_background=False))
 
     matched_stars = _match_stars_to_catalog(
-        det_stars, catalog_stars, wcs, result.shape[1], result.shape[2]
+        result, det_stars, catalog_stars, wcs, result.shape[1], result.shape[2]
     )
 
     if len(matched_stars) < 5:
@@ -271,95 +271,153 @@ def photometric_color_calibrate(
     )
 
 
-def _match_stars_to_catalog(detected, catalog_stars, wcs, height, width):
-    """Match detected stars to catalog stars using WCS."""
-    if "ra" not in wcs or "dec" not in wcs:
+def _match_stars_to_catalog(image, detected, catalog_stars, wcs, height, width):
+    """Match detected stars to catalog stars using WCS pixel→sky conversion.
+
+    Uses astropy WCS when a full WCS header is available, falls back to
+    simple linear projection otherwise.
+    """
+    if not wcs or "ra" not in wcs or wcs["ra"] is None:
         return []
 
-    ra0, dec0 = wcs["ra"], wcs["dec"]
-    scale = wcs.get("scale", 1.0)
-    if scale is None or scale <= 0:
-        scale = 1.0
+    # Try astropy WCS for accurate pixel→sky conversion
+    sky_fn = _make_pixel_to_sky(wcs, width, height)
+
+    scale_deg = (wcs.get("scale") or 1.0) / 3600.0  # arcsec/px → deg/px
+    match_radius_deg = max(scale_deg * 5, 0.002)   # 5 px or at least 7"
 
     matches = []
-
     for star in detected.stars:
-        px, py = star.x, star.y
-
-        center_ra = ra0 + (px - width / 2) * scale / 3600
-        center_dec = dec0 + (py - height / 2) * scale / 3600
+        px, py = float(star.x), float(star.y)
+        star_ra, star_dec = sky_fn(px, py)
 
         best_match = None
         best_sep = float("inf")
         for cat_star in catalog_stars:
-            sep = ((cat_star.ra_deg - center_ra) ** 2 + (cat_star.dec_deg - center_dec) ** 2) ** 0.5
-            if sep < best_sep and sep < 0.01:
+            # Angular separation (small angle — Euclidean OK here)
+            dra = (cat_star.ra_deg - star_ra) * np.cos(np.radians(star_dec))
+            ddec = cat_star.dec_deg - star_dec
+            sep = np.hypot(dra, ddec)
+            if sep < best_sep and sep < match_radius_deg:
                 best_sep = sep
                 best_match = cat_star
 
-        if best_match is not None:
-            r = max(int(star.fwhm), 2)
-            y_lo = max(0, int(py) - r)
-            y_hi = min(height, int(py) + r + 1)
-            x_lo = max(0, int(px) - r)
-            x_hi = min(width, int(px) + r + 1)
+        if best_match is None:
+            continue
 
-            if y_hi - y_lo < 2 or x_hi - x_lo < 2:
-                continue
+        # Aperture photometry on the star
+        r = max(int(round(star.fwhm * 1.5)), 3)
+        y_lo = max(0, int(py) - r)
+        y_hi = min(height, int(py) + r + 1)
+        x_lo = max(0, int(px) - r)
+        x_hi = min(width, int(px) + r + 1)
 
-            fluxes = [float(image[ch, y_lo:y_hi, x_lo:x_hi].sum()) for ch in range(3)]
+        if y_hi - y_lo < 2 or x_hi - x_lo < 2:
+            continue
 
-            if all(f > 0 for f in fluxes):
-                matches.append(
-                    {
-                        "instrumental": fluxes,
-                        "catalog": best_match,
-                    }
-                )
+        fluxes = [float(image[ch, y_lo:y_hi, x_lo:x_hi].sum()) for ch in range(3)]
 
+        if all(f > 0 for f in fluxes):
+            matches.append({"instrumental": fluxes, "catalog": best_match})
+
+    log.info("PCC matched %d/%d stars to catalog", len(matches), len(detected.stars))
     return matches
 
 
-def _compute_ccm_from_matches(matches):
-    """Compute 3x3 color correction matrix from matched stars."""
+def _make_pixel_to_sky(wcs: dict, width: int, height: int):
+    """Return a (px, py) → (ra_deg, dec_deg) callable.
+
+    Uses astropy WCS when a full header is present, otherwise falls back
+    to a simple tangent-plane linear approximation.
+    """
+    header = wcs.get("wcs_header")
+    if header:
+        try:
+            from astropy.io import fits as afits
+            from astropy.wcs import WCS as AstroWCS
+            h = afits.Header(header)
+            awcs = AstroWCS(h)
+
+            def sky_astropy(px, py):
+                sky = awcs.pixel_to_world(px, py)
+                return float(sky.ra.deg), float(sky.dec.deg)
+
+            return sky_astropy
+        except Exception:
+            pass
+
+    # Linear approximation fallback
+    ra0 = float(wcs["ra"])
+    dec0 = float(wcs["dec"])
+    scale_deg = (wcs.get("scale") or 1.0) / 3600.0
+    cos_dec = np.cos(np.radians(dec0))
+
+    def sky_linear(px, py):
+        ra = ra0 + (px - width / 2) * scale_deg / max(cos_dec, 1e-6)
+        dec = dec0 - (py - height / 2) * scale_deg   # y axis flipped
+        return ra, dec
+
+    return sky_linear
+
+
+def _compute_ccm_from_matches(matches: list) -> tuple[float, float, float]:
+    """Compute per-channel correction factors from catalog-matched stars.
+
+    Uses Gaia BP-RP color index as a proxy for the true R/G/B ratio.
+    The model: observed color ratio should match catalog color temperature.
+    """
     if len(matches) < 3:
         return (1.0, 1.0, 1.0)
 
-    A = []
-    b = []
+    # Build least-squares system: find R,G,B scale factors that minimise
+    # the difference between instrumental and catalog-predicted colors.
+    r_ratios = []
+    b_ratios = []
 
     for m in matches:
-        inst = np.array(m["instrumental"])
+        inst = np.array(m["instrumental"], dtype=np.float64)
         cat = m["catalog"]
 
         if cat.bp_mag is None or cat.rp_mag is None or cat.g_mag is None:
             continue
-
-        bp_rp = cat.bp_mag - cat.rp_mag
-
-        g_inst = inst[0] + inst[1] + inst[2]
-        if g_inst <= 0:
+        if inst[1] <= 0:   # green channel as reference
             continue
 
-        r_inst = inst[0] / g_inst
-        g_inst_norm = inst[1] / g_inst
-        b_inst = inst[2] / g_inst
+        bp_rp = float(cat.bp_mag - cat.rp_mag)
 
-        A.append([r_inst - 1, g_inst_norm - 1, b_inst - 1])
-        b.append(-bp_rp)
+        # Gaia BP-RP → expected (R-G) and (B-G) color offsets
+        # Empirical relation from Gaia DR3 passbands:
+        #   R/G ≈ 10^( 0.27 * bp_rp)
+        #   B/G ≈ 10^(-0.30 * bp_rp)
+        expected_r_g = 10 ** (0.27 * bp_rp)
+        expected_b_g = 10 ** (-0.30 * bp_rp)
 
-    if len(A) < 3:
+        observed_r_g = inst[0] / inst[1]
+        observed_b_g = inst[2] / inst[1]
+
+        if observed_r_g > 0:
+            r_ratios.append(expected_r_g / observed_r_g)
+        if observed_b_g > 0:
+            b_ratios.append(expected_b_g / observed_b_g)
+
+    if not r_ratios or not b_ratios:
         return (1.0, 1.0, 1.0)
 
-    A = np.array(A)
-    b = np.array(b)
+    # Robust median to reject outliers
+    r_factor = float(np.median(r_ratios))
+    b_factor = float(np.median(b_ratios))
+    g_factor = 1.0
 
-    try:
-        coeffs, residuals, rank, s = np.linalg.lstsq(A, b, rcond=None)
-    except np.linalg.LinAlgError:
-        return (1.0, 1.0, 1.0)
+    # Normalize so green=1 (or normalize to max=1)
+    max_f = max(r_factor, g_factor, b_factor)
+    r_factor /= max_f
+    g_factor /= max_f
+    b_factor /= max_f
 
-    ccm = np.array([1.0 + coeffs[0], 1.0 + coeffs[1], 1.0 + coeffs[2]])
-    ccm = ccm / np.max(ccm)
+    # Clamp to reasonable range
+    r_factor = float(np.clip(r_factor, 0.3, 3.0))
+    g_factor = float(np.clip(g_factor, 0.3, 3.0))
+    b_factor = float(np.clip(b_factor, 0.3, 3.0))
 
-    return (float(ccm[0]), float(ccm[1]), float(ccm[2]))
+    log.info("PCC CCM from %d stars: R=%.3f G=%.3f B=%.3f", len(r_ratios), r_factor, g_factor, b_factor)
+    return (r_factor, g_factor, b_factor)

@@ -573,6 +573,49 @@ class ToolsPanel(QWidget):
         stack_layout.addWidget(self._btn_stack)
         layout.addWidget(stack_group)
 
+        # --- Drizzle Integration ---
+        drizzle_group = QGroupBox("Drizzle Integration")
+        drizzle_layout = QVBoxLayout(drizzle_group)
+        drizzle_layout.addWidget(
+            _info_label(
+                "Sub-pixel resolution enhancement. Stack frames at higher output resolution."
+            )
+        )
+
+        self._drizzle_check = QCheckBox("Enable Drizzle")
+        self._drizzle_check.setChecked(False)
+        self._drizzle_check.setToolTip(
+            "Use drizzle algorithm instead of standard stacking.\n"
+            "Requires well-dithered frames for best results."
+        )
+        drizzle_layout.addWidget(self._drizzle_check)
+
+        self._drizzle_scale_combo = QComboBox()
+        self._drizzle_scale_combo.addItems(["2× (recommended)", "3×"])
+        self._drizzle_scale_combo.setToolTip("Output scale factor (2× = double resolution)")
+        drizzle_layout.addLayout(_h_row("Output Scale:", self._drizzle_scale_combo))
+
+        self._drizzle_drop_spin = QDoubleSpinBox()
+        self._drizzle_drop_spin.setRange(0.5, 1.0)
+        self._drizzle_drop_spin.setValue(0.7)
+        self._drizzle_drop_spin.setSingleStep(0.05)
+        self._drizzle_drop_spin.setDecimals(2)
+        self._drizzle_drop_spin.setToolTip(
+            "Pixel fraction (drop shrink). 0.7 is standard; lower = sharper but noisier."
+        )
+        drizzle_layout.addLayout(_h_row("Drop Shrink:", self._drizzle_drop_spin))
+
+        self._drizzle_check.toggled.connect(
+            lambda en: (
+                self._drizzle_scale_combo.setEnabled(en),
+                self._drizzle_drop_spin.setEnabled(en),
+            )
+        )
+        self._drizzle_scale_combo.setEnabled(False)
+        self._drizzle_drop_spin.setEnabled(False)
+
+        layout.addWidget(drizzle_group)
+
         # --- Batch Processing ---
         batch_group = QGroupBox("Batch Processing")
         batch_layout = QVBoxLayout(batch_group)
@@ -1757,6 +1800,17 @@ class ToolsPanel(QWidget):
     # ================================================================
     # Parameter getters
     # ================================================================
+
+    def get_drizzle_params(self):
+        """Return (enabled, DrizzleParams) or (False, None)."""
+        from cosmica.core.drizzle import DrizzleParams
+        if not self._drizzle_check.isChecked():
+            return False, None
+        scale = 2 if self._drizzle_scale_combo.currentIndex() == 0 else 3
+        return True, DrizzleParams(
+            scale=scale,
+            drop_shrink=self._drizzle_drop_spin.value(),
+        )
 
     def get_stacking_params(self) -> StackingParams:
         rejection_map = {

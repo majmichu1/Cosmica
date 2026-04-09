@@ -51,6 +51,7 @@ credentials.json
 
 # AI assistant instruction files (local dev only, not for public repo)
 CLAUDE.md
+CODE_OF_CONDUCT.md
 GEMINI.md
 QWEN.md
 AGENTS.md

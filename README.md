@@ -129,8 +129,6 @@ The model uses **Noise2Self** — a self-supervised approach that learns to deno
 
 Contributions are welcome! Please read our [Contributing Guide](CONTRIBUTING.md) for details on how to get started.
 
-This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md).
-
 ## 📄 License
 
 This project is licensed under the **GNU General Public License v3.0** (GPL-3.0).

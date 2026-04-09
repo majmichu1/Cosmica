@@ -1,0 +1,488 @@
+[
+  {
+    "name": "ZWO Ha 7nm",
+    "filter_type": "narrowband",
+    "center_nm": 656.3,
+    "bandwidth_nm": 7.0,
+    "range_nm": null,
+    "peak_transmission": 0.93,
+    "pass_bands": null
+  },
+  {
+    "name": "ZWO OIII 7nm",
+    "filter_type": "narrowband",
+    "center_nm": 500.7,
+    "bandwidth_nm": 7.0,
+    "range_nm": null,
+    "peak_transmission": 0.92,
+    "pass_bands": null
+  },
+  {
+    "name": "ZWO SII 7nm",
+    "filter_type": "narrowband",
+    "center_nm": 671.6,
+    "bandwidth_nm": 7.0,
+    "range_nm": null,
+    "peak_transmission": 0.90,
+    "pass_bands": null
+  },
+  {
+    "name": "ZWO L",
+    "filter_type": "broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [400, 700],
+    "peak_transmission": 0.98,
+    "pass_bands": null
+  },
+  {
+    "name": "ZWO R",
+    "filter_type": "broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [580, 700],
+    "peak_transmission": 0.96,
+    "pass_bands": null
+  },
+  {
+    "name": "ZWO G",
+    "filter_type": "broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [470, 580],
+    "peak_transmission": 0.96,
+    "pass_bands": null
+  },
+  {
+    "name": "ZWO B",
+    "filter_type": "broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [390, 480],
+    "peak_transmission": 0.95,
+    "pass_bands": null
+  },
+  {
+    "name": "Antlia Ha 3nm",
+    "filter_type": "narrowband",
+    "center_nm": 656.3,
+    "bandwidth_nm": 3.0,
+    "range_nm": null,
+    "peak_transmission": 0.90,
+    "pass_bands": null
+  },
+  {
+    "name": "Antlia OIII 3nm",
+    "filter_type": "narrowband",
+    "center_nm": 500.7,
+    "bandwidth_nm": 3.0,
+    "range_nm": null,
+    "peak_transmission": 0.90,
+    "pass_bands": null
+  },
+  {
+    "name": "Antlia SII 3nm",
+    "filter_type": "narrowband",
+    "center_nm": 671.6,
+    "bandwidth_nm": 3.0,
+    "range_nm": null,
+    "peak_transmission": 0.88,
+    "pass_bands": null
+  },
+  {
+    "name": "Antlia L",
+    "filter_type": "broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [400, 700],
+    "peak_transmission": 0.98,
+    "pass_bands": null
+  },
+  {
+    "name": "Antlia R",
+    "filter_type": "broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [580, 700],
+    "peak_transmission": 0.96,
+    "pass_bands": null
+  },
+  {
+    "name": "Antlia G",
+    "filter_type": "broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [470, 580],
+    "peak_transmission": 0.96,
+    "pass_bands": null
+  },
+  {
+    "name": "Antlia B",
+    "filter_type": "broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [390, 480],
+    "peak_transmission": 0.95,
+    "pass_bands": null
+  },
+  {
+    "name": "Chroma Ha 3nm",
+    "filter_type": "narrowband",
+    "center_nm": 656.3,
+    "bandwidth_nm": 3.0,
+    "range_nm": null,
+    "peak_transmission": 0.95,
+    "pass_bands": null
+  },
+  {
+    "name": "Chroma OIII 3nm",
+    "filter_type": "narrowband",
+    "center_nm": 500.7,
+    "bandwidth_nm": 3.0,
+    "range_nm": null,
+    "peak_transmission": 0.95,
+    "pass_bands": null
+  },
+  {
+    "name": "Chroma SII 3nm",
+    "filter_type": "narrowband",
+    "center_nm": 671.6,
+    "bandwidth_nm": 3.0,
+    "range_nm": null,
+    "peak_transmission": 0.93,
+    "pass_bands": null
+  },
+  {
+    "name": "Chroma Ha 5nm",
+    "filter_type": "narrowband",
+    "center_nm": 656.3,
+    "bandwidth_nm": 5.0,
+    "range_nm": null,
+    "peak_transmission": 0.96,
+    "pass_bands": null
+  },
+  {
+    "name": "Chroma OIII 5nm",
+    "filter_type": "narrowband",
+    "center_nm": 500.7,
+    "bandwidth_nm": 5.0,
+    "range_nm": null,
+    "peak_transmission": 0.96,
+    "pass_bands": null
+  },
+  {
+    "name": "Optolong L-eXtreme",
+    "filter_type": "dual_narrowband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": null,
+    "peak_transmission": 0.92,
+    "pass_bands": [
+      {"center_nm": 656.3, "bandwidth_nm": 7.0},
+      {"center_nm": 500.7, "bandwidth_nm": 7.0}
+    ]
+  },
+  {
+    "name": "Optolong L-Ultimate",
+    "filter_type": "dual_narrowband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": null,
+    "peak_transmission": 0.90,
+    "pass_bands": [
+      {"center_nm": 656.3, "bandwidth_nm": 3.0},
+      {"center_nm": 500.7, "bandwidth_nm": 3.0}
+    ]
+  },
+  {
+    "name": "Optolong L-Pro",
+    "filter_type": "light_pollution",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [380, 750],
+    "peak_transmission": 0.95,
+    "pass_bands": null
+  },
+  {
+    "name": "Optolong L",
+    "filter_type": "broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [400, 700],
+    "peak_transmission": 0.97,
+    "pass_bands": null
+  },
+  {
+    "name": "Optolong R",
+    "filter_type": "broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [580, 700],
+    "peak_transmission": 0.96,
+    "pass_bands": null
+  },
+  {
+    "name": "Optolong G",
+    "filter_type": "broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [470, 580],
+    "peak_transmission": 0.96,
+    "pass_bands": null
+  },
+  {
+    "name": "Optolong B",
+    "filter_type": "broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [390, 480],
+    "peak_transmission": 0.95,
+    "pass_bands": null
+  },
+  {
+    "name": "IDAS NBZ",
+    "filter_type": "dual_narrowband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": null,
+    "peak_transmission": 0.92,
+    "pass_bands": [
+      {"center_nm": 656.3, "bandwidth_nm": 8.0},
+      {"center_nm": 500.7, "bandwidth_nm": 8.0}
+    ]
+  },
+  {
+    "name": "IDAS LPS-D2",
+    "filter_type": "light_pollution",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [380, 740],
+    "peak_transmission": 0.94,
+    "pass_bands": null
+  },
+  {
+    "name": "Baader L",
+    "filter_type": "broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [400, 700],
+    "peak_transmission": 0.97,
+    "pass_bands": null
+  },
+  {
+    "name": "Baader R",
+    "filter_type": "broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [580, 700],
+    "peak_transmission": 0.96,
+    "pass_bands": null
+  },
+  {
+    "name": "Baader G",
+    "filter_type": "broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [470, 580],
+    "peak_transmission": 0.96,
+    "pass_bands": null
+  },
+  {
+    "name": "Baader B",
+    "filter_type": "broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [390, 480],
+    "peak_transmission": 0.95,
+    "pass_bands": null
+  },
+  {
+    "name": "Baader Ha 7nm",
+    "filter_type": "narrowband",
+    "center_nm": 656.3,
+    "bandwidth_nm": 7.0,
+    "range_nm": null,
+    "peak_transmission": 0.94,
+    "pass_bands": null
+  },
+  {
+    "name": "Baader OIII 7nm (8.5nm)",
+    "filter_type": "narrowband",
+    "center_nm": 500.7,
+    "bandwidth_nm": 8.5,
+    "range_nm": null,
+    "peak_transmission": 0.93,
+    "pass_bands": null
+  },
+  {
+    "name": "Baader SII 7nm (8nm)",
+    "filter_type": "narrowband",
+    "center_nm": 671.6,
+    "bandwidth_nm": 8.0,
+    "range_nm": null,
+    "peak_transmission": 0.92,
+    "pass_bands": null
+  },
+  {
+    "name": "Astronomik L-2",
+    "filter_type": "broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [400, 700],
+    "peak_transmission": 0.98,
+    "pass_bands": null
+  },
+  {
+    "name": "Astronomik R",
+    "filter_type": "broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [580, 700],
+    "peak_transmission": 0.97,
+    "pass_bands": null
+  },
+  {
+    "name": "Astronomik G",
+    "filter_type": "broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [470, 580],
+    "peak_transmission": 0.97,
+    "pass_bands": null
+  },
+  {
+    "name": "Astronomik B",
+    "filter_type": "broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [390, 480],
+    "peak_transmission": 0.96,
+    "pass_bands": null
+  },
+  {
+    "name": "Astronomik Ha 6nm",
+    "filter_type": "narrowband",
+    "center_nm": 656.3,
+    "bandwidth_nm": 6.0,
+    "range_nm": null,
+    "peak_transmission": 0.96,
+    "pass_bands": null
+  },
+  {
+    "name": "Astronomik OIII 6nm",
+    "filter_type": "narrowband",
+    "center_nm": 500.7,
+    "bandwidth_nm": 6.0,
+    "range_nm": null,
+    "peak_transmission": 0.95,
+    "pass_bands": null
+  },
+  {
+    "name": "Astronomik SII 6nm",
+    "filter_type": "narrowband",
+    "center_nm": 671.6,
+    "bandwidth_nm": 6.0,
+    "range_nm": null,
+    "peak_transmission": 0.93,
+    "pass_bands": null
+  },
+  {
+    "name": "Astronomik CLS",
+    "filter_type": "light_pollution",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [380, 750],
+    "peak_transmission": 0.94,
+    "pass_bands": null
+  },
+  {
+    "name": "SVBony UV/IR Cut",
+    "filter_type": "broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [400, 700],
+    "peak_transmission": 0.96,
+    "pass_bands": null
+  },
+  {
+    "name": "SVBony CLS (Light Pollution)",
+    "filter_type": "lp_broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": null,
+    "peak_transmission": 0.92,
+    "pass_bands": [[430, 500], [530, 600], [640, 680]]
+  },
+  {
+    "name": "SVBony CBP (Contrast Booster)",
+    "filter_type": "lp_broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": null,
+    "peak_transmission": 0.90,
+    "pass_bands": [[400, 510], [520, 620], [640, 690]]
+  },
+  {
+    "name": "Optolong CLS",
+    "filter_type": "lp_broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": null,
+    "peak_transmission": 0.95,
+    "pass_bands": [[420, 510], [530, 600], [650, 680]]
+  },
+  {
+    "name": "Baader Moon & Skyglow",
+    "filter_type": "lp_broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": null,
+    "peak_transmission": 0.93,
+    "pass_bands": [[400, 510], [540, 600], [620, 690]]
+  },
+  {
+    "name": "IDAS LPS-P2",
+    "filter_type": "lp_broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": null,
+    "peak_transmission": 0.94,
+    "pass_bands": [[380, 510], [530, 610], [640, 690]]
+  },
+  {
+    "name": "Astronomik UHC",
+    "filter_type": "lp_narrowband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": null,
+    "peak_transmission": 0.96,
+    "pass_bands": [[480, 502], [486, 500], [656, 662]]
+  },
+  {
+    "name": "Astronomik UHC-E",
+    "filter_type": "lp_narrowband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": null,
+    "peak_transmission": 0.97,
+    "pass_bands": [[450, 520], [640, 680]]
+  },
+  {
+    "name": "Lumicon Deep Sky",
+    "filter_type": "lp_broadband",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": null,
+    "peak_transmission": 0.95,
+    "pass_bands": [[420, 510], [530, 600], [640, 680]]
+  },
+  {
+    "name": "No Filter",
+    "filter_type": "none",
+    "center_nm": null,
+    "bandwidth_nm": null,
+    "range_nm": [300, 1100],
+    "peak_transmission": 1.0,
+    "pass_bands": null
+  }
+]

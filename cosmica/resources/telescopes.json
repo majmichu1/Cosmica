@@ -1,0 +1,212 @@
+[
+  {
+    "name": "Sky-Watcher 130PDS",
+    "aperture_mm": 130,
+    "focal_length_mm": 650,
+    "focal_ratio": 5.0,
+    "telescope_type": "reflector"
+  },
+  {
+    "name": "Sky-Watcher 150PDS",
+    "aperture_mm": 150,
+    "focal_length_mm": 750,
+    "focal_ratio": 5.0,
+    "telescope_type": "reflector"
+  },
+  {
+    "name": "Sky-Watcher Esprit 80ED",
+    "aperture_mm": 80,
+    "focal_length_mm": 400,
+    "focal_ratio": 5.0,
+    "telescope_type": "refractor"
+  },
+  {
+    "name": "Sky-Watcher Esprit 100ED",
+    "aperture_mm": 100,
+    "focal_length_mm": 550,
+    "focal_ratio": 5.5,
+    "telescope_type": "refractor"
+  },
+  {
+    "name": "Sky-Watcher Esprit 120ED",
+    "aperture_mm": 120,
+    "focal_length_mm": 840,
+    "focal_ratio": 7.0,
+    "telescope_type": "refractor"
+  },
+  {
+    "name": "Sky-Watcher Esprit 150ED",
+    "aperture_mm": 150,
+    "focal_length_mm": 1050,
+    "focal_ratio": 7.0,
+    "telescope_type": "refractor"
+  },
+  {
+    "name": "Sky-Watcher Evostar 72ED",
+    "aperture_mm": 72,
+    "focal_length_mm": 420,
+    "focal_ratio": 5.8,
+    "telescope_type": "refractor"
+  },
+  {
+    "name": "Sky-Watcher Explorer 200P",
+    "aperture_mm": 200,
+    "focal_length_mm": 1000,
+    "focal_ratio": 5.0,
+    "telescope_type": "reflector"
+  },
+  {
+    "name": "Sky-Watcher Quattro 200P",
+    "aperture_mm": 200,
+    "focal_length_mm": 800,
+    "focal_ratio": 4.0,
+    "telescope_type": "reflector"
+  },
+  {
+    "name": "Sky-Watcher Quattro 250P",
+    "aperture_mm": 254,
+    "focal_length_mm": 1000,
+    "focal_ratio": 3.94,
+    "telescope_type": "reflector"
+  },
+  {
+    "name": "Sky-Watcher Quattro 300P",
+    "aperture_mm": 305,
+    "focal_length_mm": 1200,
+    "focal_ratio": 3.93,
+    "telescope_type": "reflector"
+  },
+  {
+    "name": "Celestron RASA 8",
+    "aperture_mm": 203,
+    "focal_length_mm": 400,
+    "focal_ratio": 2.0,
+    "telescope_type": "catadioptric"
+  },
+  {
+    "name": "Celestron RASA 11",
+    "aperture_mm": 279,
+    "focal_length_mm": 620,
+    "focal_ratio": 2.2,
+    "telescope_type": "catadioptric"
+  },
+  {
+    "name": "Celestron EdgeHD 8",
+    "aperture_mm": 203,
+    "focal_length_mm": 2032,
+    "focal_ratio": 10.0,
+    "telescope_type": "catadioptric"
+  },
+  {
+    "name": "Celestron EdgeHD 11",
+    "aperture_mm": 279,
+    "focal_length_mm": 2800,
+    "focal_ratio": 10.0,
+    "telescope_type": "catadioptric"
+  },
+  {
+    "name": "Celestron EdgeHD 14",
+    "aperture_mm": 356,
+    "focal_length_mm": 3910,
+    "focal_ratio": 11.0,
+    "telescope_type": "catadioptric"
+  },
+  {
+    "name": "Celestron C8 SCT",
+    "aperture_mm": 203,
+    "focal_length_mm": 2032,
+    "focal_ratio": 10.0,
+    "telescope_type": "catadioptric"
+  },
+  {
+    "name": "Celestron C11 SCT",
+    "aperture_mm": 279,
+    "focal_length_mm": 2800,
+    "focal_ratio": 10.0,
+    "telescope_type": "catadioptric"
+  },
+  {
+    "name": "Celestron NexStar 6SE",
+    "aperture_mm": 150,
+    "focal_length_mm": 1500,
+    "focal_ratio": 10.0,
+    "telescope_type": "catadioptric"
+  },
+  {
+    "name": "Celestron NexStar 8SE",
+    "aperture_mm": 203,
+    "focal_length_mm": 2032,
+    "focal_ratio": 10.0,
+    "telescope_type": "catadioptric"
+  },
+  {
+    "name": "Takahashi FSQ-106ED",
+    "aperture_mm": 106,
+    "focal_length_mm": 530,
+    "focal_ratio": 5.0,
+    "telescope_type": "refractor"
+  },
+  {
+    "name": "Takahashi TSA-120",
+    "aperture_mm": 120,
+    "focal_length_mm": 900,
+    "focal_ratio": 7.5,
+    "telescope_type": "refractor"
+  },
+  {
+    "name": "Takahashi Epsilon 130D",
+    "aperture_mm": 130,
+    "focal_length_mm": 430,
+    "focal_ratio": 3.3,
+    "telescope_type": "reflector"
+  },
+  {
+    "name": "William Optics RedCat 51",
+    "aperture_mm": 51,
+    "focal_length_mm": 250,
+    "focal_ratio": 4.9,
+    "telescope_type": "refractor"
+  },
+  {
+    "name": "William Optics SpaceCat 51",
+    "aperture_mm": 51,
+    "focal_length_mm": 250,
+    "focal_ratio": 4.9,
+    "telescope_type": "refractor"
+  },
+  {
+    "name": "William Optics GT81",
+    "aperture_mm": 81,
+    "focal_length_mm": 478,
+    "focal_ratio": 5.9,
+    "telescope_type": "refractor"
+  },
+  {
+    "name": "William Optics ZenithStar 73",
+    "aperture_mm": 73,
+    "focal_length_mm": 430,
+    "focal_ratio": 5.9,
+    "telescope_type": "refractor"
+  },
+  {
+    "name": "Sharpstar 61EDPH II",
+    "aperture_mm": 61,
+    "focal_length_mm": 274,
+    "focal_ratio": 4.5,
+    "telescope_type": "refractor"
+  },
+  {
+    "name": "Askar FRA400",
+    "aperture_mm": 72,
+    "focal_length_mm": 400,
+    "focal_ratio": 5.6,
+    "telescope_type": "refractor"
+  },
+  {
+    "name": "Askar FRA600",
+    "aperture_mm": 108,
+    "focal_length_mm": 600,
+    "focal_ratio": 5.6,
+    "telescope_type": "refractor"
+  }
+]

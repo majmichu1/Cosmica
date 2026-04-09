@@ -1,0 +1,5 @@
+<!-- Save (floppy disk) -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none">
+  <path d="M2 2h9l3 3v9H2z" stroke="#d4d4d4" stroke-width="1.5" fill="none" stroke-linejoin="round"/>
+  <path d="M5 2v4h4V2M5 14V9h4v5" stroke="#d4d4d4" stroke-width="1.5"/>
+</svg>

@@ -1,0 +1,5 @@
+<!-- New file -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none">
+  <path d="M3 2h10v12H3z" stroke="#d4d4d4" stroke-width="1.5" fill="none"/>
+  <path d="M6 2v12M3 6h10" stroke="#d4d4d4" stroke-width="1.5"/>
+</svg>

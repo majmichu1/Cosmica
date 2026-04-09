@@ -1,0 +1,85 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/output/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Poetry
+poetry.lock
+
+# PyInstaller
+*.spec.bak
+
+# Test
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# Distribution
+*.tar.gz
+*.zip
+
+# Secrets (never commit these)
+.env
+*.env.*
+*.key
+license_cache.json
+credentials.json
+
+# AI assistant instruction files (local dev only, not for public repo)
+CLAUDE.md
+GEMINI.md
+QWEN.md
+AGENTS.md
+COPILOT.md
+CODEX.md
+PROJECT_HANDOFF.md
+BUGFIX_*.md
+
+# AI models (too large for git)
+cosmica/ai/models/*.pt
+cosmica/ai/models/*.pth
+cosmica/ai/models/*.onnx
+cosmica/ai/training_data/*.dat
+cosmica/ai/training_data/*.npy
+
+# User data
+*.cosmica_project/
+astro_data/
+training_data/
+
+# Test/scratch images and data files in project root
+/*.FTS
+/*.fts
+/*.fits
+/*.fit
+/*.xisf
+/*.png
+/*.jpg
+/*.tif
+/*.tiff
+training_log.txt
+quick_compare_v2.py

@@ -1,0 +1,82 @@
+[project]
+name = "cosmica"
+version = "0.1.0"
+description = "Professional GPU-accelerated astrophotography image processing"
+authors = [
+    {name = "Cosmica Contributors"}
+]
+readme = "README.md"
+license = {text = "GPL-3.0-or-later"}
+requires-python = ">=3.11,<3.15"
+keywords = ["astrophotography", "image-processing", "astronomy", "FITS", "deep-learning"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "Topic :: Scientific/Engineering :: Astronomy",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+dependencies = [
+    "PyQt6>=6.6,<7",
+    "torch>=2.2,<3",
+    "torchvision>=0.17,<1",
+    "numpy>=1.26,<3",
+    "scipy>=1.12,<2",
+    "astropy>=6.0",
+    "ccdproc>=2.4",
+    "opencv-python-headless>=4.9,<5",
+    "Pillow>=10.2",
+    "requests>=2.31,<3",
+    "packaging>=24.0",
+    "platformdirs>=4.2,<5",
+    "qimage2ndarray>=1.10,<2",
+    "PyWavelets>=1.5",
+    "scikit-image>=0.22",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<9",
+    "pytest-qt>=4.3,<5",
+    "pytest-cov>=4.1,<6",
+    "ruff>=0.3,<1",
+    "mypy>=1.8,<2",
+    "pdoc>=14,<15",
+]
+build = [
+    "pyinstaller>=6.4,<7",
+]
+
+[project.scripts]
+cosmica = "cosmica.__main__:main"
+
+[project.gui-scripts]
+cosmica-gui = "cosmica.__main__:main"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+packages = [{include = "cosmica"}]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true

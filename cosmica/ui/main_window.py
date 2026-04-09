@@ -434,6 +434,8 @@ class MainWindow(QMainWindow):
         tp.show_image_statistics.connect(self._on_show_statistics)
         tp.open_star_mask_dialog.connect(self._on_open_star_mask)
         tp.open_subframe_selector.connect(self._on_open_subframe_selector)
+        tp.measure_psf.connect(self._on_measure_psf)
+        tp.run_continuum_subtraction.connect(self._on_run_continuum_subtraction)
 
         # Preview signals
         tp.preview_requested.connect(self._on_preview_requested)
@@ -1397,6 +1399,87 @@ class MainWindow(QMainWindow):
         stats = compute_image_statistics(self._current_image.data)
         dialog = StatisticsDialog(stats, self)
         dialog.exec()
+
+    @pyqtSlot()
+    def _on_measure_psf(self):
+        if self._current_image is None:
+            return
+        from cosmica.core.psf import measure_psf
+
+        self._log_panel.log("Measuring PSF from stars…", "info")
+
+        def _psf_work(data, progress=None):
+            return measure_psf(data)
+
+        def _on_psf_done(result):
+            if result is None or result.n_stars_used == 0:
+                self._log_panel.log("PSF measurement failed: no stars found", "warning")
+                return
+            self._tools_panel.set_psf_measurement(
+                result.fwhm, result.ellipticity, result.n_stars_used
+            )
+            self._log_panel.log(
+                f"PSF: FWHM={result.fwhm:.2f}px  ellipticity={result.ellipticity:.2f}"
+                f"  ({result.n_stars_used} stars)",
+                "success",
+            )
+
+        self._start_worker(_psf_work, self._current_image.data, on_done=_on_psf_done)
+
+    @pyqtSlot()
+    def _on_run_continuum_subtraction(self):
+        if self._current_image is None:
+            return
+        from pathlib import Path as _Path
+
+        from PyQt6.QtWidgets import QFileDialog
+
+        from cosmica.core.image_io import ImageData, load_image
+        from cosmica.core.narrowband import continuum_subtraction
+
+        bb_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Broadband (Continuum) Image",
+            "",
+            "Images (*.fits *.fit *.fts *.xisf *.tif *.tiff *.png *.jpg)",
+        )
+        if not bb_path:
+            return
+
+        scale = self._tools_panel.get_continuum_scale()
+        self._log_panel.log(
+            f"Continuum subtraction: scale={scale:.3f}, broadband={_Path(bb_path).name}", "info"
+        )
+
+        def _cont_work(nb_data, bb_path_str, scale, progress=None):
+            bb_img = load_image(bb_path_str)
+            # Use first channel (or luminance) as broadband
+            if bb_img.data.ndim == 3:
+                import numpy as _np
+                bb_ch = _np.mean(bb_img.data, axis=0)
+            else:
+                bb_ch = bb_img.data
+            # Narrowband: if color, use luminance; if mono, use as-is
+            import numpy as _np
+            if nb_data.ndim == 3:
+                nb_ch = _np.mean(nb_data, axis=0)
+            else:
+                nb_ch = nb_data
+            result_ch = continuum_subtraction(nb_ch, bb_ch, scale)
+            return result_ch
+
+        def _on_cont_done(result_ch):
+            import numpy as _np
+            from cosmica.core.image_io import ImageData
+            self._update_current_image(result_ch, "Continuum subtraction applied")
+
+        self._start_worker(
+            _cont_work,
+            self._current_image.data,
+            bb_path,
+            scale,
+            on_done=_on_cont_done,
+        )
 
     @pyqtSlot()
     def _on_open_star_mask(self):

@@ -166,6 +166,8 @@ class ToolsPanel(QWidget):
     run_chromatic_aberration = pyqtSignal()
     show_image_statistics = pyqtSignal()
     curves_histogram_changed = pyqtSignal()  # checkbox toggled or channel changed
+    measure_psf = pyqtSignal()
+    run_continuum_subtraction = pyqtSignal()
     open_star_mask_dialog = pyqtSignal()
     open_subframe_selector = pyqtSignal()
 
@@ -1202,7 +1204,21 @@ class ToolsPanel(QWidget):
         self._decon_fwhm_spin.setValue(3.0)
         self._decon_fwhm_spin.setSingleStep(0.1)
         self._decon_fwhm_spin.setToolTip("PSF full width at half maximum in pixels")
-        decon_layout.addLayout(_h_row("PSF FWHM:", self._decon_fwhm_spin))
+
+        fwhm_row = QHBoxLayout()
+        fwhm_row.addWidget(QLabel("PSF FWHM:"))
+        fwhm_row.addWidget(self._decon_fwhm_spin)
+        self._btn_measure_psf = QPushButton("Measure")
+        self._btn_measure_psf.setToolTip(
+            "Automatically measure PSF FWHM from stars in the current image"
+        )
+        self._btn_measure_psf.clicked.connect(self.measure_psf.emit)
+        fwhm_row.addWidget(self._btn_measure_psf)
+        decon_layout.addLayout(fwhm_row)
+
+        self._psf_result_label = QLabel("")
+        self._psf_result_label.setStyleSheet("color: #aaaaaa; font-size: 10px;")
+        decon_layout.addWidget(self._psf_result_label)
 
         self._decon_iter_spin = QSpinBox()
         self._decon_iter_spin.setRange(1, 500)
@@ -1714,6 +1730,42 @@ class ToolsPanel(QWidget):
         nb_layout.addWidget(self._btn_narrowband)
         layout.addWidget(nb_group)
 
+        # --- Continuum Subtraction ---
+        cont_group = QGroupBox("Continuum Subtraction")
+        cont_layout = QVBoxLayout(cont_group)
+        cont_layout.addWidget(
+            _info_label(
+                "Subtract broadband continuum from narrowband to isolate emission lines (Ha, OIII, SII)."
+            )
+        )
+
+        self._cont_nb_combo = QComboBox()
+        self._cont_nb_combo.addItems(["Current image as narrowband"])
+        self._cont_nb_combo.setToolTip("Source for narrowband channel")
+        cont_layout.addLayout(_h_row("Narrowband:", self._cont_nb_combo))
+
+        self._cont_bb_combo = QComboBox()
+        self._cont_bb_combo.addItems(["Open file…"])
+        self._cont_bb_combo.setToolTip("Source for broadband (continuum) channel")
+        cont_layout.addLayout(_h_row("Broadband:", self._cont_bb_combo))
+
+        self._cont_scale_spin = QDoubleSpinBox()
+        self._cont_scale_spin.setRange(0.01, 5.0)
+        self._cont_scale_spin.setValue(1.0)
+        self._cont_scale_spin.setSingleStep(0.05)
+        self._cont_scale_spin.setDecimals(3)
+        self._cont_scale_spin.setToolTip(
+            "Scale factor applied to broadband before subtraction. "
+            "Adjust to fully suppress stellar continuum."
+        )
+        cont_layout.addLayout(_h_row("Scale factor:", self._cont_scale_spin))
+
+        self._btn_cont_subtract = QPushButton("Subtract Continuum…")
+        self._btn_cont_subtract.setToolTip("Load broadband file and subtract from current image")
+        self._btn_cont_subtract.clicked.connect(self.run_continuum_subtraction.emit)
+        cont_layout.addWidget(self._btn_cont_subtract)
+        layout.addWidget(cont_group)
+
         # --- Pixel Math ---
         pm_group = QGroupBox("Pixel Math")
         pm_layout = QVBoxLayout(pm_group)
@@ -2014,6 +2066,13 @@ class ToolsPanel(QWidget):
             "solver": solver_map.get(self._pcc_solver_combo.currentIndex(), "auto"),
         }
 
+    def set_psf_measurement(self, fwhm: float, ellipticity: float, n_stars: int) -> None:
+        """Update FWHM spin from a PSF measurement result."""
+        self._decon_fwhm_spin.setValue(round(fwhm, 2))
+        self._psf_result_label.setText(
+            f"Measured: FWHM={fwhm:.2f}px  ellip={ellipticity:.2f}  n={n_stars}"
+        )
+
     def get_deconvolution_params(self) -> DeconvolutionParams | SpatialDeconvParams:
         if self._decon_spatial_check.isChecked():
             return SpatialDeconvParams(
@@ -2181,6 +2240,9 @@ class ToolsPanel(QWidget):
             blue_shift_x=self._ca_blue_x_spin.value(),
             blue_shift_y=self._ca_blue_y_spin.value(),
         )
+
+    def get_continuum_scale(self) -> float:
+        return self._cont_scale_spin.value()
 
     @property
     def starnet_extract_stars(self) -> bool:

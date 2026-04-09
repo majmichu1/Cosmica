@@ -49,17 +49,6 @@ htmlcov/
 license_cache.json
 credentials.json
 
-# AI assistant instruction files (local dev only, not for public repo)
-CLAUDE.md
-CODE_OF_CONDUCT.md
-GEMINI.md
-QWEN.md
-AGENTS.md
-COPILOT.md
-CODEX.md
-PROJECT_HANDOFF.md
-BUGFIX_*.md
-
 # AI models (too large for git)
 cosmica/ai/models/*.pt
 cosmica/ai/models/*.pth

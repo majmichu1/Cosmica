@@ -158,6 +158,15 @@ class MainWindow(QMainWindow):
         self._preview_timer.timeout.connect(self._do_preview_requested)
         self._pending_preview_tool: str | None = None
 
+        # Dynamic background extraction samples (image-space coords)
+        self._bg_samples: list[tuple[float, float]] = []
+
+        # WCS overlay data (image-space x, y, magnitude)
+        self._wcs_overlay_stars: list[tuple[float, float, float]] = []
+
+        # Python console dock (lazy init)
+        self._python_console_dock = None
+
         # Register tools for preset system
         load_default_presets()
 
@@ -436,6 +445,15 @@ class MainWindow(QMainWindow):
         tp.open_subframe_selector.connect(self._on_open_subframe_selector)
         tp.measure_psf.connect(self._on_measure_psf)
         tp.run_continuum_subtraction.connect(self._on_run_continuum_subtraction)
+        tp.toggle_sample_mode.connect(self._on_toggle_sample_mode)
+        tp.clear_bg_samples.connect(self._on_clear_bg_samples)
+        tp.toggle_wcs_overlay.connect(self._on_toggle_wcs_overlay)
+        tp.open_python_console.connect(self._on_open_python_console)
+        tp.run_mlt.connect(self._on_run_mlt)
+
+        # Canvas sample signals
+        self._canvas.sample_placed.connect(self._on_sample_placed)
+        self._canvas.sample_removed.connect(self._on_sample_removed)
 
         # Preview signals
         tp.preview_requested.connect(self._on_preview_requested)
@@ -630,6 +648,7 @@ class MainWindow(QMainWindow):
         hist_data = compute_histogram(image.data)
         self._histogram.set_histogram_data(hist_data)
         self._update_curves_histogram(hist_data)
+        self._sync_console_image()
 
     def _update_curves_histogram(self, hist_data: dict | None = None):
         """Push histogram data into the curve editor if the show-histogram checkbox is on."""
@@ -1206,6 +1225,8 @@ class MainWindow(QMainWindow):
             return color_adjust(data, tp.get_color_adjust_params())
         elif tool_name == "wavelet":
             return wavelet_sharpen(data, tp.get_wavelet_params())
+        elif tool_name == "mlt":
+            return wavelet_sharpen(data, tp.get_mlt_params())
         elif tool_name == "local_contrast":
             return local_contrast_enhance(data, tp.get_local_contrast_params())
         elif tool_name == "unsharp_mask":
@@ -1481,6 +1502,123 @@ class MainWindow(QMainWindow):
             on_done=_on_cont_done,
         )
 
+    # ── Dynamic background sample placement ──────────────────────────────────
+
+    @pyqtSlot(bool)
+    def _on_toggle_sample_mode(self, enabled: bool):
+        self._canvas.set_sample_mode(enabled)
+        if not enabled:
+            self._canvas.set_sample_points(self._bg_samples)
+
+    @pyqtSlot(float, float)
+    def _on_sample_placed(self, x: float, y: float):
+        self._bg_samples.append((x, y))
+        self._canvas.set_sample_points(self._bg_samples)
+        self._tools_panel.set_bg_sample_count(len(self._bg_samples))
+
+    @pyqtSlot(float, float)
+    def _on_sample_removed(self, x: float, y: float):
+        if not self._bg_samples:
+            return
+        import math as _math
+        nearest_idx = min(
+            range(len(self._bg_samples)),
+            key=lambda i: _math.hypot(self._bg_samples[i][0] - x, self._bg_samples[i][1] - y),
+        )
+        self._bg_samples.pop(nearest_idx)
+        self._canvas.set_sample_points(self._bg_samples)
+        self._tools_panel.set_bg_sample_count(len(self._bg_samples))
+
+    @pyqtSlot()
+    def _on_clear_bg_samples(self):
+        self._bg_samples.clear()
+        self._canvas.clear_sample_points()
+        self._tools_panel.set_bg_sample_count(0)
+
+    # ── WCS overlay ──────────────────────────────────────────────────────────
+
+    @pyqtSlot(bool)
+    def _on_toggle_wcs_overlay(self, enabled: bool):
+        if enabled and not self._wcs_overlay_stars:
+            self._log_panel.log(
+                "No WCS data available — run Solve & Calibrate (PCC) first", "warning"
+            )
+            self._tools_panel._btn_wcs_overlay.setChecked(False)
+            return
+        self._canvas.set_wcs_overlay_visible(enabled)
+
+    def _update_wcs_overlay(self, wcs: dict, catalog_stars: list):
+        """Project catalog stars to image pixel coordinates and store for overlay."""
+        if not wcs or not catalog_stars:
+            return
+        if self._current_image is None:
+            return
+
+        import numpy as _np
+        from cosmica.core.color_calibration import _make_pixel_to_sky
+
+        h = self._current_image.data.shape[-2] if self._current_image.data.ndim == 3 else self._current_image.data.shape[0]
+        w = self._current_image.data.shape[-1] if self._current_image.data.ndim == 3 else self._current_image.data.shape[1]
+
+        sky_fn = _make_pixel_to_sky(wcs, w, h)
+        scale_deg = (wcs.get("scale") or 1.0) / 3600.0
+        match_radius = max(scale_deg * 10, 0.005)
+
+        overlay = []
+        for cat in catalog_stars:
+            if cat.g_mag is None:
+                continue
+            # Invert sky_fn: try to find pixel coords for this star
+            # Use linear approximation: center + offset
+            ra0, dec0 = sky_fn(w / 2, h / 2)
+            cos_dec = _np.cos(_np.radians(dec0))
+            dra = (cat.ra_deg - ra0) * cos_dec
+            ddec = cat.dec_deg - dec0
+            px = w / 2 + dra / max(scale_deg, 1e-10)
+            py = h / 2 - ddec / max(scale_deg, 1e-10)
+            if 0 <= px < w and 0 <= py < h:
+                overlay.append((float(px), float(py), float(cat.g_mag)))
+
+        self._wcs_overlay_stars = overlay
+        self._canvas.set_overlay_stars(overlay)
+
+    # ── Python console ────────────────────────────────────────────────────────
+
+    @pyqtSlot()
+    def _on_open_python_console(self):
+        from PyQt6.QtWidgets import QDockWidget
+        from cosmica.ui.widgets.python_console import PythonConsoleWidget
+
+        if self._python_console_dock is None:
+            console = PythonConsoleWidget()
+            console.image_updated.connect(self._on_console_image_updated)
+            dock = QDockWidget("Python Console", self)
+            dock.setWidget(console)
+            dock.setMinimumWidth(500)
+            dock.setMinimumHeight(300)
+            self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
+            self._python_console_dock = dock
+
+        self._python_console_dock.show()
+        self._python_console_dock.raise_()
+        # Inject current image
+        self._sync_console_image()
+
+    def _sync_console_image(self):
+        if self._python_console_dock is None:
+            return
+        console = self._python_console_dock.widget()
+        if console and self._current_image is not None:
+            console.set_image(self._current_image)
+
+    @pyqtSlot(object)
+    def _on_console_image_updated(self, arr):
+        import numpy as _np
+        if not isinstance(arr, _np.ndarray):
+            self._log_panel.log("apply() requires a numpy ndarray", "error")
+            return
+        self._update_current_image(arr, "Image updated from Python console")
+
     @pyqtSlot()
     def _on_open_star_mask(self):
         if self._current_image is None:
@@ -1506,8 +1644,12 @@ class MainWindow(QMainWindow):
     def _on_run_background(self):
         if self._current_image is None:
             return
-        params = self._tools_panel.get_background_params()
-        self._log_panel.log("Extracting background...", "info")
+        # Convert image-space sample coords to integer (row, col) tuples
+        manual_pts = [(int(round(y)), int(round(x))) for x, y in self._bg_samples]
+        params = self._tools_panel.get_background_params(manual_points=manual_pts)
+        n = len(manual_pts)
+        msg = f"Extracting background ({n} manual sample{'s' if n != 1 else ''})..." if n else "Extracting background..."
+        self._log_panel.log(msg, "info")
 
         def _bg_work(data, progress=None):
             return extract_background(data, params)
@@ -1819,14 +1961,17 @@ class MainWindow(QMainWindow):
 
             if progress:
                 progress(1.0, "Done")
-            return result
+            return result, wcs, catalog_stars
 
-        def _on_pcc_done(result):
+        def _on_pcc_done(payload):
+            result, solved_wcs, stars = payload
             factors = result.correction_factors
             self._update_current_image(
                 result.data,
                 f"PCC complete (R={factors[0]:.3f}, G={factors[1]:.3f}, B={factors[2]:.3f})",
             )
+            if solved_wcs or stars:
+                self._update_wcs_overlay(solved_wcs or {}, stars or [])
             if self._project:
                 self._project.add_history(
                     "Photometric Color Calibration", {"factors": list(factors)}
@@ -1918,6 +2063,20 @@ class MainWindow(QMainWindow):
                 "scale_weights": params.scale_weights,
             },
         )
+
+    @pyqtSlot()
+    def _on_run_mlt(self):
+        if self._current_image is None:
+            return
+        params = self._tools_panel.get_mlt_params()
+        n_thresh = sum(1 for t in params.noise_thresholds if t > 0)
+        self._log_panel.log(
+            f"Running MLT ({params.n_scales} scales, {n_thresh} denoise bands)…", "info"
+        )
+        result = wavelet_sharpen(self._current_image.data, params)
+        self._update_current_image(result, "MLT complete")
+        if self._project:
+            self._project.add_history("MLT", {"n_scales": params.n_scales})
 
     @pyqtSlot()
     def _on_run_local_contrast(self):

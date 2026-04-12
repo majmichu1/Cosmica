@@ -54,6 +54,9 @@ class WaveletParams:
         default_factory=lambda: [1.0, 1.0, 1.0, 1.0]
     )
     residual_weight: float = 1.0
+    # Per-scale noise thresholds for soft thresholding (0 = disabled).
+    # Length must match n_scales (padded with 0 if shorter).
+    noise_thresholds: list[float] = field(default_factory=list)
 
 
 def wavelet_decompose(
@@ -146,9 +149,21 @@ def wavelet_sharpen(
     while len(weights) < params.n_scales:
         weights.append(1.0)
 
+    thresholds = list(params.noise_thresholds)
+    while len(thresholds) < params.n_scales:
+        thresholds.append(0.0)
+
+    def _soft_threshold(coeff: np.ndarray, thr: float) -> np.ndarray:
+        """Soft thresholding: shrink coefficients toward zero by thr."""
+        if thr <= 0:
+            return coeff
+        sign = np.sign(coeff)
+        return sign * np.maximum(np.abs(coeff) - thr, 0)
+
     def _process_channel(ch: np.ndarray) -> np.ndarray:
         scales = wavelet_decompose(ch, n_scales=params.n_scales)
         for i in range(params.n_scales):
+            scales[i] = _soft_threshold(scales[i], thresholds[i])
             scales[i] = scales[i] * weights[i]
         scales[-1] = scales[-1] * params.residual_weight
         return np.clip(wavelet_reconstruct(scales), 0, 1).astype(np.float32)

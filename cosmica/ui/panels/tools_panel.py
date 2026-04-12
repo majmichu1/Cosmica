@@ -168,6 +168,11 @@ class ToolsPanel(QWidget):
     curves_histogram_changed = pyqtSignal()  # checkbox toggled or channel changed
     measure_psf = pyqtSignal()
     run_continuum_subtraction = pyqtSignal()
+    toggle_sample_mode = pyqtSignal(bool)
+    clear_bg_samples = pyqtSignal()
+    toggle_wcs_overlay = pyqtSignal(bool)
+    open_python_console = pyqtSignal()
+    run_mlt = pyqtSignal()
     open_star_mask_dialog = pyqtSignal()
     open_subframe_selector = pyqtSignal()
 
@@ -907,6 +912,25 @@ class ToolsPanel(QWidget):
         self._bg_order_spin.setToolTip("Polynomial degree for the background surface model")
         bg_layout.addLayout(_h_row("Poly order:", self._bg_order_spin))
 
+        # Interactive sample placement
+        self._btn_place_samples = QPushButton("Place Samples")
+        self._btn_place_samples.setCheckable(True)
+        self._btn_place_samples.setToolTip(
+            "Click on the image to place background sample points.\n"
+            "Left-click adds, right-click removes nearest."
+        )
+        self._btn_place_samples.toggled.connect(self.toggle_sample_mode.emit)
+        bg_layout.addWidget(self._btn_place_samples)
+
+        self._bg_sample_label = QLabel("0 manual samples")
+        self._bg_sample_label.setStyleSheet("color: #aaaaaa; font-size: 10px;")
+        bg_layout.addWidget(self._bg_sample_label)
+
+        btn_clear_samples = QPushButton("Clear Samples")
+        btn_clear_samples.setToolTip("Remove all manually placed sample points")
+        btn_clear_samples.clicked.connect(self.clear_bg_samples.emit)
+        bg_layout.addWidget(btn_clear_samples)
+
         self._btn_background = QPushButton("Extract Background")
         self._btn_background.setToolTip("Compute and subtract the background gradient")
         self._btn_background.clicked.connect(self.run_background.emit)
@@ -1091,6 +1115,14 @@ class ToolsPanel(QWidget):
         self._btn_pcc.setToolTip("Plate-solve and perform photometric color calibration")
         self._btn_pcc.clicked.connect(self.run_pcc.emit)
         pcc_layout.addWidget(self._btn_pcc)
+
+        self._btn_wcs_overlay = QPushButton("Show WCS Overlay")
+        self._btn_wcs_overlay.setCheckable(True)
+        self._btn_wcs_overlay.setToolTip(
+            "Display catalog star positions on the image after plate solving"
+        )
+        self._btn_wcs_overlay.toggled.connect(self.toggle_wcs_overlay.emit)
+        pcc_layout.addWidget(self._btn_wcs_overlay)
 
         layout.addWidget(pcc_group)
 
@@ -1415,6 +1447,70 @@ class ToolsPanel(QWidget):
         wav_layout.addWidget(self._btn_wavelet)
         layout.addWidget(wav_group)
 
+        # --- MLT (Multi-Scale Linear Transform) ---
+        mlt_group = QGroupBox("MLT (Multi-Scale Linear Transform)")
+        mlt_layout = QVBoxLayout(mlt_group)
+        mlt_layout.addWidget(
+            _info_label(
+                "Full per-band control with noise thresholding. "
+                "Scale 1 = finest detail (stars/noise). Scale 6 = large structures."
+            )
+        )
+
+        self._mlt_sliders: list[tuple[QSlider, QLabel, QSlider, QLabel]] = []
+        band_names = ["Scale 1 (finest)", "Scale 2", "Scale 3", "Scale 4", "Scale 5", "Scale 6 (coarsest)"]
+
+        for i, name in enumerate(band_names):
+            band_box = QGroupBox(name)
+            band_box.setStyleSheet("QGroupBox { font-size: 10px; }")
+            band_layout = QVBoxLayout(band_box)
+            band_layout.setSpacing(2)
+            band_layout.setContentsMargins(6, 12, 6, 4)
+
+            # Boost slider
+            boost_row = QHBoxLayout()
+            boost_row.addWidget(QLabel("Boost:"))
+            boost_sl = QSlider(Qt.Orientation.Horizontal)
+            boost_sl.setRange(0, 400)
+            boost_sl.setValue(100)
+            boost_lbl = QLabel("1.00")
+            boost_sl.valueChanged.connect(lambda v, lbl=boost_lbl: lbl.setText(f"{v/100:.2f}"))
+            boost_row.addWidget(boost_sl)
+            boost_row.addWidget(boost_lbl)
+            band_layout.addLayout(boost_row)
+
+            # Threshold slider
+            thr_row = QHBoxLayout()
+            thr_row.addWidget(QLabel("Denoise:"))
+            thr_sl = QSlider(Qt.Orientation.Horizontal)
+            thr_sl.setRange(0, 200)
+            thr_sl.setValue(0)
+            thr_lbl = QLabel("0.000")
+            thr_sl.valueChanged.connect(lambda v, lbl=thr_lbl: lbl.setText(f"{v/10000:.4f}"))
+            thr_row.addWidget(thr_sl)
+            thr_row.addWidget(thr_lbl)
+            band_layout.addLayout(thr_row)
+
+            mlt_layout.addWidget(band_box)
+            self._mlt_sliders.append((boost_sl, boost_lbl, thr_sl, thr_lbl))
+
+        # Residual
+        res_row = QHBoxLayout()
+        res_row.addWidget(QLabel("Residual weight:"))
+        self._mlt_residual_spin = QDoubleSpinBox()
+        self._mlt_residual_spin.setRange(0.0, 2.0)
+        self._mlt_residual_spin.setValue(1.0)
+        self._mlt_residual_spin.setSingleStep(0.05)
+        res_row.addWidget(self._mlt_residual_spin)
+        mlt_layout.addLayout(res_row)
+
+        self._add_preview_checkbox(mlt_layout, "mlt")
+        btn_mlt = QPushButton("Apply MLT")
+        btn_mlt.setToolTip("Apply multi-scale linear transform")
+        btn_mlt.clicked.connect(self.run_mlt.emit)
+        mlt_layout.addWidget(btn_mlt)
+        layout.addWidget(mlt_group)
+
         # --- Local Contrast ---
         lc_group = QGroupBox("Local Contrast (CLAHE)")
         lc_layout = QVBoxLayout(lc_group)
@@ -1715,6 +1811,13 @@ class ToolsPanel(QWidget):
         btn_starmask.clicked.connect(self.open_star_mask_dialog.emit)
         quick_row1.addWidget(btn_starmask)
         quick_layout.addLayout(quick_row1)
+
+        quick_row2 = QHBoxLayout()
+        btn_console = QPushButton("Python Console...")
+        btn_console.setToolTip("Open embedded Python scripting console")
+        btn_console.clicked.connect(self.open_python_console.emit)
+        quick_row2.addWidget(btn_console)
+        quick_layout.addLayout(quick_row2)
         layout.addWidget(quick_group)
 
         # --- Narrowband ---
@@ -1993,11 +2096,15 @@ class ToolsPanel(QWidget):
     def get_curves_params(self) -> CurvesParams:
         return self._curve_editor.get_params()
 
-    def get_background_params(self) -> BackgroundParams:
+    def get_background_params(self, manual_points: list | None = None) -> BackgroundParams:
         return BackgroundParams(
             grid_size=self._bg_grid_spin.value(),
             polynomial_order=self._bg_order_spin.value(),
+            manual_points=manual_points or [],
         )
+
+    def set_bg_sample_count(self, n: int):
+        self._bg_sample_label.setText(f"{n} manual sample{'s' if n != 1 else ''}")
 
     def get_cosmetic_params(self) -> CosmeticParams:
         return CosmeticParams(
@@ -2105,6 +2212,20 @@ class ToolsPanel(QWidget):
             amount=self._sr_amount_slider.value() / 100.0,
             iterations=self._sr_iterations_spin.value(),
             kernel_size=self._sr_kernel_spin.value(),
+        )
+
+    def get_mlt_params(self) -> WaveletParams:
+        """Return WaveletParams from the MLT panel (6-band with thresholds)."""
+        weights = []
+        thresholds = []
+        for boost_sl, _, thr_sl, _ in self._mlt_sliders:
+            weights.append(boost_sl.value() / 100.0)
+            thresholds.append(thr_sl.value() / 10000.0)
+        return WaveletParams(
+            n_scales=6,
+            scale_weights=weights,
+            residual_weight=self._mlt_residual_spin.value(),
+            noise_thresholds=thresholds,
         )
 
     def get_wavelet_params(self) -> WaveletParams:

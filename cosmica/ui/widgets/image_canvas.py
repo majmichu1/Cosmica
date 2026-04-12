@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from PyQt6.QtCore import QPoint, QPointF, QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import QImage, QMouseEvent, QPainter, QPen, QPixmap, QWheelEvent
+from PyQt6.QtGui import QColor, QFont, QImage, QMouseEvent, QPainter, QPen, QPixmap, QWheelEvent
 from PyQt6.QtWidgets import QWidget
 
 
 class ImageCanvas(QWidget):
-    """High-performance image display with zoom, pan, and split preview."""
+    """High-performance image display with zoom, pan, split preview, and overlays."""
 
     zoom_changed = pyqtSignal(float)
     cursor_position = pyqtSignal(int, int, list)  # x, y, pixel values
+    sample_placed = pyqtSignal(float, float)       # image-space x, y
+    sample_removed = pyqtSignal(float, float)      # image-space x, y (nearest)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -21,22 +25,30 @@ class ImageCanvas(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         self._pixmap: QPixmap | None = None
-        self._pixmap_after: QPixmap | None = None  # for split preview
-        self._image_data: np.ndarray | None = None  # original float data for readout
+        self._pixmap_after: QPixmap | None = None
+        self._image_data: np.ndarray | None = None
 
         self._zoom = 1.0
         self._pan_offset = QPointF(0, 0)
         self._dragging = False
         self._drag_start = QPoint()
 
-        # Split preview
         self._split_mode = False
-        self._split_position = 0.5  # 0-1, fraction from left
+        self._split_position = 0.5
 
         self._fit_to_window = True
 
+        # Sample placement mode (for dynamic background extraction)
+        self._sample_mode = False
+        self._sample_points: list[tuple[float, float]] = []  # image-space coords
+
+        # WCS/catalog star overlay
+        self._overlay_stars: list[tuple[float, float, float]] = []  # (x, y, mag) image-space
+        self._show_wcs_overlay = False
+
+    # ── Public API ───────────────────────────────────────────────────────────
+
     def set_image(self, rgb_array: np.ndarray, image_data: np.ndarray | None = None):
-        """Set the display image from a uint8 RGB array (H, W, 3)."""
         rgb_array = np.ascontiguousarray(rgb_array)
         h, w, ch = rgb_array.shape
         bytes_per_line = w * ch
@@ -48,7 +60,6 @@ class ImageCanvas(QWidget):
         self.update()
 
     def set_after_image(self, rgb_array: np.ndarray):
-        """Set the 'after' image for split preview."""
         rgb_array = np.ascontiguousarray(rgb_array)
         h, w, ch = rgb_array.shape
         bytes_per_line = w * ch
@@ -80,19 +91,36 @@ class ImageCanvas(QWidget):
         self.zoom_changed.emit(self._zoom)
         self.update()
 
-    def _fit_zoom(self):
-        if self._pixmap is None:
-            return
-        pw, ph = self._pixmap.width(), self._pixmap.height()
-        ww, wh = self.width(), self.height()
-        if pw == 0 or ph == 0:
-            return
-        self._zoom = min(ww / pw, wh / ph)
-        self._pan_offset = QPointF(
-            (ww - pw * self._zoom) / 2,
-            (wh - ph * self._zoom) / 2,
-        )
-        self.zoom_changed.emit(self._zoom)
+    # ── Sample mode ──────────────────────────────────────────────────────────
+
+    def set_sample_mode(self, enabled: bool):
+        self._sample_mode = enabled
+        if enabled:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def set_sample_points(self, points: list[tuple[float, float]]):
+        self._sample_points = list(points)
+        self.update()
+
+    def clear_sample_points(self):
+        self._sample_points = []
+        self.update()
+
+    # ── WCS overlay ──────────────────────────────────────────────────────────
+
+    def set_overlay_stars(self, stars: list[tuple[float, float, float]]):
+        """Set catalog stars for WCS overlay. Each entry: (x_img, y_img, magnitude)."""
+        self._overlay_stars = stars
+        self.update()
+
+    def set_wcs_overlay_visible(self, visible: bool):
+        self._show_wcs_overlay = visible
+        self.update()
+
+    # ── Paint ────────────────────────────────────────────────────────────────
 
     def paintEvent(self, event):
         if self._pixmap is None:
@@ -108,61 +136,93 @@ class ImageCanvas(QWidget):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         painter.fillRect(self.rect(), Qt.GlobalColor.black)
 
-        # Compute destination rectangle
         pw, ph = self._pixmap.width(), self._pixmap.height()
         dst = QRectF(
-            self._pan_offset.x(),
-            self._pan_offset.y(),
-            pw * self._zoom,
-            ph * self._zoom,
+            self._pan_offset.x(), self._pan_offset.y(),
+            pw * self._zoom, ph * self._zoom,
         )
         src = QRectF(0, 0, pw, ph)
 
         if self._split_mode and self._pixmap_after is not None:
-            # Draw before on left, after on right
             split_x = dst.left() + dst.width() * self._split_position
-
-            # Left: before — use before pixmap's own source rect
             painter.setClipRect(QRectF(dst.left(), dst.top(), split_x - dst.left(), dst.height()))
             painter.drawPixmap(dst, self._pixmap, src)
-
-            # Right: after — use after pixmap's own source rect (may differ in size)
             aw, ah = self._pixmap_after.width(), self._pixmap_after.height()
             src_after = QRectF(0, 0, aw, ah)
             painter.setClipRect(QRectF(split_x, dst.top(), dst.right() - split_x, dst.height()))
             painter.drawPixmap(dst, self._pixmap_after, src_after)
-
             painter.setClipping(False)
-
-            # Draw split line
             painter.setPen(QPen(Qt.GlobalColor.white, 2))
             painter.drawLine(QPointF(split_x, dst.top()), QPointF(split_x, dst.bottom()))
         else:
             painter.drawPixmap(dst, self._pixmap, src)
 
+        # Draw WCS overlay
+        if self._show_wcs_overlay and self._overlay_stars:
+            self._draw_wcs_overlay(painter, dst, pw, ph)
+
+        # Draw background sample points
+        if self._sample_points or self._sample_mode:
+            self._draw_sample_points(painter, dst, pw, ph)
+
         painter.end()
 
-    def wheelEvent(self, event: QWheelEvent):
-        delta = event.angleDelta().y()
-        factor = 1.15 if delta > 0 else 1 / 1.15
+    def _draw_wcs_overlay(self, painter: QPainter, dst: QRectF, pw: int, ph: int):
+        font = QFont()
+        font.setPointSize(8)
+        painter.setFont(font)
 
-        # Zoom centered on cursor
-        mouse_pos = event.position()
-        old_scene = self._widget_to_image(mouse_pos)
+        for x_img, y_img, mag in self._overlay_stars:
+            wx = dst.left() + (x_img / pw) * dst.width()
+            wy = dst.top() + (y_img / ph) * dst.height()
 
-        self._fit_to_window = False
-        self._zoom = max(0.01, min(50.0, self._zoom * factor))
+            # Circle radius scaled by brightness (brighter = larger)
+            r = max(4.0, 12.0 - mag)
 
-        new_scene = self._widget_to_image(mouse_pos)
-        if old_scene is not None and new_scene is not None:
-            dx = (new_scene.x() - old_scene.x()) * self._zoom
-            dy = (new_scene.y() - old_scene.y()) * self._zoom
-            self._pan_offset += QPointF(dx, dy)
+            painter.setPen(QPen(QColor(80, 200, 255, 200), 1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(QPointF(wx, wy), r, r)
 
-        self.zoom_changed.emit(self._zoom)
-        self.update()
+            if mag < 10.0:
+                painter.setPen(QPen(QColor(150, 220, 255, 180)))
+                painter.drawText(QPointF(wx + r + 2, wy + 4), f"{mag:.1f}")
+
+    def _draw_sample_points(self, painter: QPainter, dst: QRectF, pw: int, ph: int):
+        for idx, (x_img, y_img) in enumerate(self._sample_points):
+            wx = dst.left() + (x_img / pw) * dst.width()
+            wy = dst.top() + (y_img / ph) * dst.height()
+            r = 8.0
+            painter.setPen(QPen(QColor(255, 200, 0, 230), 2))
+            painter.setBrush(QColor(255, 200, 0, 40))
+            painter.drawEllipse(QPointF(wx, wy), r, r)
+            painter.setPen(QPen(QColor(255, 200, 0, 200)))
+            font = QFont()
+            font.setPointSize(7)
+            painter.setFont(font)
+            painter.drawText(QPointF(wx + r + 2, wy + 4), str(idx + 1))
+
+        if self._sample_mode:
+            # Draw mode indicator
+            painter.setPen(QPen(QColor(255, 200, 0)))
+            font = QFont()
+            font.setPointSize(9)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.drawText(QPointF(8, 20), f"Sample mode — {len(self._sample_points)} pts  [RClick=remove]")
+
+    # ── Mouse events ─────────────────────────────────────────────────────────
 
     def mousePressEvent(self, event: QMouseEvent):
+        img_pos = self._widget_to_image(event.position())
+
+        if self._sample_mode and img_pos is not None:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self.sample_placed.emit(img_pos.x(), img_pos.y())
+                return
+            if event.button() == Qt.MouseButton.RightButton:
+                self.sample_removed.emit(img_pos.x(), img_pos.y())
+                return
+
         if event.button() == Qt.MouseButton.MiddleButton or (
             event.button() == Qt.MouseButton.LeftButton
             and event.modifiers() & Qt.KeyboardModifier.ControlModifier
@@ -179,7 +239,6 @@ class ImageCanvas(QWidget):
             self._fit_to_window = False
             self.update()
 
-        # Emit cursor position for pixel readout
         img_pos = self._widget_to_image(event.position())
         if img_pos is not None and self._image_data is not None:
             ix, iy = int(img_pos.x()), int(img_pos.y())
@@ -195,12 +254,42 @@ class ImageCanvas(QWidget):
     def mouseReleaseEvent(self, event: QMouseEvent):
         if self._dragging:
             self._dragging = False
-            self.setCursor(Qt.CursorShape.ArrowCursor)
+            cursor = Qt.CursorShape.CrossCursor if self._sample_mode else Qt.CursorShape.ArrowCursor
+            self.setCursor(cursor)
+
+    def wheelEvent(self, event: QWheelEvent):
+        delta = event.angleDelta().y()
+        factor = 1.15 if delta > 0 else 1 / 1.15
+        mouse_pos = event.position()
+        old_scene = self._widget_to_image(mouse_pos)
+        self._fit_to_window = False
+        self._zoom = max(0.01, min(50.0, self._zoom * factor))
+        new_scene = self._widget_to_image(mouse_pos)
+        if old_scene is not None and new_scene is not None:
+            dx = (new_scene.x() - old_scene.x()) * self._zoom
+            dy = (new_scene.y() - old_scene.y()) * self._zoom
+            self._pan_offset += QPointF(dx, dy)
+        self.zoom_changed.emit(self._zoom)
+        self.update()
 
     def resizeEvent(self, event):
         if self._fit_to_window:
             self._fit_zoom()
         super().resizeEvent(event)
+
+    def _fit_zoom(self):
+        if self._pixmap is None:
+            return
+        pw, ph = self._pixmap.width(), self._pixmap.height()
+        ww, wh = self.width(), self.height()
+        if pw == 0 or ph == 0:
+            return
+        self._zoom = min(ww / pw, wh / ph)
+        self._pan_offset = QPointF(
+            (ww - pw * self._zoom) / 2,
+            (wh - ph * self._zoom) / 2,
+        )
+        self.zoom_changed.emit(self._zoom)
 
     def _widget_to_image(self, pos: QPointF) -> QPointF | None:
         if self._pixmap is None or self._zoom == 0:

@@ -51,12 +51,25 @@ def extract_patches_from_file(path: Path, patch_size: int = PATCH_SIZE,
         data = (data - dmin) / (dmax - dmin)
     else: return None
 
-    n_patches = min(max_patches, max(1, (h // patch_size) * (w // patch_size)))
+    # Content-aware patch extraction: require some signal above background.
+    # A patch that is pure dark sky has std ≈ noise floor → not useful for training.
+    # We require std > MIN_PATCH_STD so the model trains on meaningful structure.
+    MIN_PATCH_STD = 0.015  # reject nearly-blank patches (pure dark sky)
+    MAX_ATTEMPTS = max_patches * 8  # try harder to find content-rich patches
+
+    n_target = min(max_patches, max(1, (h // patch_size) * (w // patch_size)))
     patches = []
-    for _ in range(n_patches):
+    attempts = 0
+    while len(patches) < n_target and attempts < MAX_ATTEMPTS:
         y = random.randint(0, h - patch_size)
         x = random.randint(0, w - patch_size)
-        patches.append(data[y:y + patch_size, x:x + patch_size])
+        patch = data[y:y + patch_size, x:x + patch_size]
+        if patch.std() >= MIN_PATCH_STD:
+            patches.append(patch)
+        attempts += 1
+
+    if not patches:
+        return None  # image had no useful content patches
 
     return np.array(patches, dtype=np.float32)
 

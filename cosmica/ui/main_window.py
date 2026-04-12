@@ -450,6 +450,7 @@ class MainWindow(QMainWindow):
         tp.toggle_wcs_overlay.connect(self._on_toggle_wcs_overlay)
         tp.open_python_console.connect(self._on_open_python_console)
         tp.run_mlt.connect(self._on_run_mlt)
+        tp.run_lrgb_combine.connect(self._on_run_lrgb_combine)
 
         # Canvas sample signals
         self._canvas.sample_placed.connect(self._on_sample_placed)
@@ -2077,6 +2078,55 @@ class MainWindow(QMainWindow):
         self._update_current_image(result, "MLT complete")
         if self._project:
             self._project.add_history("MLT", {"n_scales": params.n_scales})
+
+    @pyqtSlot()
+    def _on_run_lrgb_combine(self):
+        if self._current_image is None:
+            return
+        from PyQt6.QtWidgets import QFileDialog
+        from cosmica.core.lrgb import lrgb_combine
+        from cosmica.core.image_io import load_image
+
+        # Validate current image is mono (luminance)
+        data = self._current_image.data
+        if data.ndim == 3 and data.shape[0] == 3:
+            self._log_panel.log(
+                "LRGB Combine: current image should be the Luminance (mono) image. "
+                "Load your L image first.", "warning"
+            )
+
+        rgb_path, _ = QFileDialog.getOpenFileName(
+            self, "Select RGB Color Image", "",
+            "Images (*.fits *.fit *.fts *.xisf *.tif *.tiff *.png *.jpg)"
+        )
+        if not rgb_path:
+            return
+
+        params = self._tools_panel.get_lrgb_params()
+        lum_data = data
+        self._log_panel.log(
+            f"LRGB Combine: L weight={params.luminance_weight}, "
+            f"sat boost={params.saturation_boost}…", "info"
+        )
+
+        def _lrgb_work(lum, rgb_path_str, p, progress=None):
+            import numpy as _np
+            rgb_img = load_image(rgb_path_str)
+            rgb = rgb_img.data
+            if rgb.ndim == 2:
+                rgb = _np.stack([rgb, rgb, rgb], axis=0)
+            return lrgb_combine(lum, rgb, params=p,
+                                progress=progress or (lambda f, m: None))
+
+        def _on_lrgb_done(result):
+            self._update_current_image(result, "LRGB combine complete")
+            if self._project:
+                self._project.add_history("LRGB Combine", {
+                    "lum_weight": params.luminance_weight,
+                    "sat_boost": params.saturation_boost,
+                })
+
+        self._start_worker(_lrgb_work, lum_data, rgb_path, params, on_done=_on_lrgb_done)
 
     @pyqtSlot()
     def _on_run_local_contrast(self):

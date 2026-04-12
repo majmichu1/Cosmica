@@ -173,6 +173,7 @@ class ToolsPanel(QWidget):
     toggle_wcs_overlay = pyqtSignal(bool)
     open_python_console = pyqtSignal()
     run_mlt = pyqtSignal()
+    run_lrgb_combine = pyqtSignal()
     open_star_mask_dialog = pyqtSignal()
     open_subframe_selector = pyqtSignal()
 
@@ -1126,6 +1127,45 @@ class ToolsPanel(QWidget):
 
         layout.addWidget(pcc_group)
 
+        # --- LRGB Combine ---
+        lrgb_group = QGroupBox("LRGB Combine")
+        lrgb_layout = QVBoxLayout(lrgb_group)
+        lrgb_layout.addWidget(
+            _info_label(
+                "Merge a luminance (L) image with an RGB color image. "
+                "Load the L image first, then run to load and combine with RGB."
+            )
+        )
+
+        self._lrgb_lum_weight_spin = QDoubleSpinBox()
+        self._lrgb_lum_weight_spin.setRange(0.0, 1.0)
+        self._lrgb_lum_weight_spin.setValue(1.0)
+        self._lrgb_lum_weight_spin.setSingleStep(0.05)
+        self._lrgb_lum_weight_spin.setToolTip("1.0 = full L replacement; lower = blend with RGB lightness")
+        lrgb_layout.addLayout(_h_row("L weight:", self._lrgb_lum_weight_spin))
+
+        self._lrgb_sat_spin = QDoubleSpinBox()
+        self._lrgb_sat_spin.setRange(0.5, 3.0)
+        self._lrgb_sat_spin.setValue(1.2)
+        self._lrgb_sat_spin.setSingleStep(0.05)
+        self._lrgb_sat_spin.setToolTip("Saturation boost to compensate for L channel override")
+        lrgb_layout.addLayout(_h_row("Sat boost:", self._lrgb_sat_spin))
+
+        self._lrgb_chroma_spin = QDoubleSpinBox()
+        self._lrgb_chroma_spin.setRange(0.0, 1.0)
+        self._lrgb_chroma_spin.setValue(0.0)
+        self._lrgb_chroma_spin.setSingleStep(0.1)
+        self._lrgb_chroma_spin.setToolTip("Gaussian blur on chroma (a/b) channels to reduce color noise")
+        lrgb_layout.addLayout(_h_row("Chroma denoise:", self._lrgb_chroma_spin))
+
+        self._btn_lrgb = QPushButton("Load RGB & Combine…")
+        self._btn_lrgb.setToolTip(
+            "Current image = Luminance. Opens a file picker for the RGB image."
+        )
+        self._btn_lrgb.clicked.connect(self.run_lrgb_combine.emit)
+        lrgb_layout.addWidget(self._btn_lrgb)
+        layout.addWidget(lrgb_group)
+
         # --- SCNR ---
         scnr_group = QGroupBox("SCNR (Green Noise)")
         scnr_layout = QVBoxLayout(scnr_group)
@@ -1658,8 +1698,8 @@ class ToolsPanel(QWidget):
 
         self._aid_strength_slider = QSlider(Qt.Orientation.Horizontal)
         self._aid_strength_slider.setRange(0, 100)
-        self._aid_strength_slider.setValue(100)
-        self._aid_strength_label = QLabel("1.00")
+        self._aid_strength_slider.setValue(80)
+        self._aid_strength_label = QLabel("0.80")
         self._aid_strength_slider.valueChanged.connect(
             lambda v: self._aid_strength_label.setText(f"{v / 100:.2f}")
         )
@@ -1669,8 +1709,32 @@ class ToolsPanel(QWidget):
         row.addWidget(self._aid_strength_label)
         aid_layout.addLayout(row)
 
+        self._aid_protect_slider = QSlider(Qt.Orientation.Horizontal)
+        self._aid_protect_slider.setRange(0, 100)
+        self._aid_protect_slider.setValue(80)
+        self._aid_protect_label = QLabel("0.80")
+        self._aid_protect_slider.valueChanged.connect(
+            lambda v: self._aid_protect_label.setText(f"{v / 100:.2f}")
+        )
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Protect stars:"))
+        row2.addWidget(self._aid_protect_slider)
+        row2.addWidget(self._aid_protect_label)
+        aid_layout.addLayout(row2)
+
+        self._aid_passes_spin = QSpinBox()
+        self._aid_passes_spin.setRange(4, 64)
+        self._aid_passes_spin.setValue(16)
+        self._aid_passes_spin.setToolTip(
+            "J-invariant passes: more = smoother result, slower. 16 is a good balance."
+        )
+        aid_layout.addLayout(_h_row("J-inv passes:", self._aid_passes_spin))
+
         self._btn_ai_denoise = QPushButton("Run AI Denoise")
-        self._btn_ai_denoise.setToolTip("GPU-accelerated deep learning denoising")
+        self._btn_ai_denoise.setToolTip(
+            "J-invariant N2S inference with star protection.\n"
+            "Best on linear (unstretched) images."
+        )
         self._btn_ai_denoise.clicked.connect(self.run_ai_denoise.emit)
         aid_layout.addWidget(self._btn_ai_denoise)
         layout.addWidget(aid_group)
@@ -2268,6 +2332,8 @@ class ToolsPanel(QWidget):
     def get_ai_denoise_params(self) -> AIDenoiseParams:
         return AIDenoiseParams(
             strength=self._aid_strength_slider.value() / 100.0,
+            protect_stars=self._aid_protect_slider.value() / 100.0,
+            n_passes=self._aid_passes_spin.value(),
         )
 
     def get_ai_sharpen_params(self) -> AISharpenParams:
@@ -2364,6 +2430,14 @@ class ToolsPanel(QWidget):
 
     def get_continuum_scale(self) -> float:
         return self._cont_scale_spin.value()
+
+    def get_lrgb_params(self):
+        from cosmica.core.lrgb import LRGBParams
+        return LRGBParams(
+            luminance_weight=self._lrgb_lum_weight_spin.value(),
+            saturation_boost=self._lrgb_sat_spin.value(),
+            chrominance_noise=self._lrgb_chroma_spin.value(),
+        )
 
     @property
     def starnet_extract_stars(self) -> bool:

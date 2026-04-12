@@ -458,6 +458,7 @@ class MainWindow(QMainWindow):
         tp.open_python_console.connect(self._on_open_python_console)
         tp.run_mlt.connect(self._on_run_mlt)
         tp.run_lrgb_combine.connect(self._on_run_lrgb_combine)
+        tp.run_spcc.connect(self._on_run_spcc)
 
         # Blink comparator
         tp.blink_load_a.connect(lambda: self._blink_load_from_file(slot=0))
@@ -793,69 +794,105 @@ class MainWindow(QMainWindow):
             self._log_panel.log("No project loaded", "warning")
             return
 
-        bias_frames = self._project.frames_by_type(FrameType.BIAS)
-        dark_frames = self._project.frames_by_type(FrameType.DARK)
-        flat_frames = self._project.frames_by_type(FrameType.FLAT)
         light_frames = self._project.frames_by_type(FrameType.LIGHT)
-
         if not light_frames:
             self._log_panel.log("No light frames to calibrate", "warning")
             return
 
-        self._log_panel.log("Starting calibration pipeline...", "info")
+        # Get calibration sources from panel (raw folders OR pre-made masters)
+        cal_sources = self._tools_panel.get_calibration_sources()
+
+        # Fall back to project-imported frames if panel has nothing configured
+        bias_paths  = (cal_sources["bias_paths"]  or
+                       [e.path for e in self._project.frames_by_type(FrameType.BIAS)])
+        dark_paths  = (cal_sources["dark_paths"]  or
+                       [e.path for e in self._project.frames_by_type(FrameType.DARK)])
+        flat_paths  = (cal_sources["flat_paths"]  or
+                       [e.path for e in self._project.frames_by_type(FrameType.FLAT)])
+
+        bias_master_path  = cal_sources["bias_master"]
+        dark_master_path  = cal_sources["dark_master"]
+        flat_master_path  = cal_sources["flat_master"]
+
+        n_bias = len(bias_paths) or (1 if bias_master_path else 0)
+        n_dark = len(dark_paths) or (1 if dark_master_path else 0)
+        n_flat = len(flat_paths) or (1 if flat_master_path else 0)
+        self._log_panel.log(
+            f"Starting calibration — {len(light_frames)} lights, "
+            f"{n_bias} bias, {n_dark} dark, {n_flat} flat", "info"
+        )
         self._start_worker(
             self._calibration_pipeline,
-            [e.path for e in bias_frames],
-            [e.path for e in dark_frames],
-            [e.path for e in flat_frames],
+            bias_paths, dark_paths, flat_paths,
             [e.path for e in light_frames],
+            bias_master_path, dark_master_path, flat_master_path,
             on_done=self._on_calibration_done,
         )
 
     @staticmethod
-    def _calibration_pipeline(bias_paths, dark_paths, flat_paths, light_paths, progress=None):
+    def _calibration_pipeline(
+        bias_paths, dark_paths, flat_paths, light_paths,
+        bias_master_path=None, dark_master_path=None, flat_master_path=None,
+        progress=None,
+    ):
         results = {}
+        prog = progress or (lambda f, m: None)
 
+        # ── Master bias ───────────────────────────────────────────────────────
         master_bias = None
-        if bias_paths:
-            progress(0.0, "Creating master bias...")
-            r = create_master_bias(bias_paths, progress=lambda f, m: progress(f * 0.15, m))
+        if bias_master_path:
+            from cosmica.core.image_io import load_image
+            master_bias = load_image(bias_master_path)
+            prog(0.05, f"Loaded master bias: {Path(bias_master_path).name}")
+            results["master_bias"] = master_bias
+        elif bias_paths:
+            prog(0.0, f"Creating master bias from {len(bias_paths)} frames…")
+            r = create_master_bias(bias_paths, progress=lambda f, m: prog(f * 0.15, m))
             master_bias = r.master
             results["master_bias"] = master_bias
 
+        # ── Master dark ───────────────────────────────────────────────────────
         master_dark = None
-        if dark_paths:
-            progress(0.15, "Creating master dark...")
+        if dark_master_path:
+            from cosmica.core.image_io import load_image
+            master_dark = load_image(dark_master_path)
+            prog(0.15, f"Loaded master dark: {Path(dark_master_path).name}")
+            results["master_dark"] = master_dark
+        elif dark_paths:
+            prog(0.15, f"Creating master dark from {len(dark_paths)} frames…")
             r = create_master_dark(
-                dark_paths,
-                master_bias=master_bias,
-                progress=lambda f, m: progress(0.15 + f * 0.2, m),
+                dark_paths, master_bias=master_bias,
+                progress=lambda f, m: prog(0.15 + f * 0.2, m),
             )
             master_dark = r.master
             results["master_dark"] = master_dark
 
+        # ── Master flat ───────────────────────────────────────────────────────
         master_flat = None
-        if flat_paths:
-            progress(0.35, "Creating master flat...")
+        if flat_master_path:
+            from cosmica.core.image_io import load_image
+            master_flat = load_image(flat_master_path)
+            prog(0.35, f"Loaded master flat: {Path(flat_master_path).name}")
+            results["master_flat"] = master_flat
+        elif flat_paths:
+            prog(0.35, f"Creating master flat from {len(flat_paths)} frames…")
             r = create_master_flat(
-                flat_paths,
-                master_bias=master_bias,
-                master_dark=master_dark,
-                progress=lambda f, m: progress(0.35 + f * 0.2, m),
+                flat_paths, master_bias=master_bias, master_dark=master_dark,
+                progress=lambda f, m: prog(0.35 + f * 0.2, m),
             )
             master_flat = r.master
             results["master_flat"] = master_flat
 
-        progress(0.55, "Calibrating light frames...")
+        # ── Calibrate lights ──────────────────────────────────────────────────
+        prog(0.55, f"Calibrating {len(light_paths)} light frames…")
         calibrated = calibrate_lights_batch(
             light_paths,
             master_bias=master_bias,
             master_dark=master_dark,
             master_flat=master_flat,
-            progress=lambda f, m: progress(0.55 + f * 0.45, m),
+            progress=lambda f, m: prog(0.55 + f * 0.45, m),
         )
         results["calibrated"] = calibrated
-
         return results
 
     @pyqtSlot(object)
@@ -1996,9 +2033,54 @@ class MainWindow(QMainWindow):
         self._start_worker(_pcc_work, image_data, on_done=_on_pcc_done)
 
     @pyqtSlot()
+    def _on_run_spcc(self):
+        if self._current_image is None:
+            return
+        if not self._wcs_overlay_stars:
+            self._log_panel.log(
+                "SPCC requires plate solve data — run Solve & Calibrate (PCC) first", "warning"
+            )
+            return
+        if self._current_image.data.ndim != 3 or self._current_image.data.shape[0] != 3:
+            self._log_panel.log("SPCC requires a 3-channel RGB image", "warning")
+            return
+
+        from cosmica.core.spcc import spcc_calibrate
+        params = self._tools_panel.get_spcc_params()
+        catalog = self._wcs_overlay_stars          # list of (x_img, y_img, mag) — need bp_rp
+        # _wcs_overlay_stars stores (x, y, magnitude); we use magnitude as proxy for bp_rp
+        # In a future version, store actual BP-RP from catalog query.
+        # For now use G magnitude as a rough temperature proxy (brighter G-type stars)
+        catalog_with_color = [(x, y, max(0.0, min(3.0, (m - 5.0) / 3.0)))
+                              for x, y, m in catalog]
+
+        self._log_panel.log(
+            f"Running SPCC ({params.filter_name}, {len(catalog_with_color)} catalog stars)…", "info"
+        )
+
+        def _spcc_work(data, progress=None):
+            return spcc_calibrate(data, catalog_with_color, params=params,
+                                  progress=progress or (lambda f, m: None))
+
+        self._start_worker(_spcc_work, self._current_image.data,
+                           on_done=lambda r: self._update_current_image(r, "SPCC complete"))
+
+    @pyqtSlot()
     def _on_run_denoise(self):
         if self._current_image is None:
             return
+
+        if self._tools_panel.is_tgv_denoise_selected():
+            from cosmica.core.tgv_denoise import tgv_denoise
+            tgv_params = self._tools_panel.get_tgv_params()
+            self._log_panel.log(
+                f"Running TGV denoising (strength={tgv_params.strength:.2f}, "
+                f"{tgv_params.n_iter} iters)...", "info"
+            )
+            self._start_worker(tgv_denoise, self._current_image.data, tgv_params,
+                               on_done=lambda r: self._update_current_image(r, "TGV denoising complete"))
+            return
+
         params = self._tools_panel.get_denoise_params()
         self._log_panel.log(f"Running noise reduction ({params.method.name})...", "info")
         result = denoise(self._current_image.data, params)

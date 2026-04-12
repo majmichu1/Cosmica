@@ -174,6 +174,7 @@ class ToolsPanel(QWidget):
     open_python_console = pyqtSignal()
     run_mlt = pyqtSignal()
     run_lrgb_combine = pyqtSignal()
+    run_spcc = pyqtSignal()
     open_star_mask_dialog = pyqtSignal()
     open_subframe_selector = pyqtSignal()
 
@@ -260,15 +261,81 @@ class ToolsPanel(QWidget):
         cal_group = QGroupBox("Calibration")
         cal_layout = QVBoxLayout(cal_group)
         cal_layout.addWidget(
-            _info_label("Create master frames from imported darks, flats, and bias.")
+            _info_label(
+                "Create masters from raw frame folders or use pre-made masters. "
+                "Add lights via the Project panel, then configure calibration frames below."
+            )
         )
+
+        # Bias
+        bias_row = QHBoxLayout()
+        self._cal_bias_label = QLabel("Bias: none")
+        self._cal_bias_label.setStyleSheet("font-size: 11px; color: #aaa;")
+        bias_row.addWidget(self._cal_bias_label, 1)
+        btn_bias_folder = QPushButton("Folder…")
+        btn_bias_folder.setFixedWidth(56)
+        btn_bias_folder.setToolTip("Load bias frames folder — master will be created automatically")
+        btn_bias_folder.clicked.connect(lambda: self._cal_load_folder("bias"))
+        bias_row.addWidget(btn_bias_folder)
+        btn_bias_master = QPushButton("Master…")
+        btn_bias_master.setFixedWidth(56)
+        btn_bias_master.setToolTip("Load a pre-made master bias FITS file")
+        btn_bias_master.clicked.connect(lambda: self._cal_load_master("bias"))
+        bias_row.addWidget(btn_bias_master)
+        cal_layout.addLayout(bias_row)
+
+        # Dark
+        dark_row = QHBoxLayout()
+        self._cal_dark_label = QLabel("Dark: none")
+        self._cal_dark_label.setStyleSheet("font-size: 11px; color: #aaa;")
+        dark_row.addWidget(self._cal_dark_label, 1)
+        btn_dark_folder = QPushButton("Folder…")
+        btn_dark_folder.setFixedWidth(56)
+        btn_dark_folder.setToolTip("Load dark frames folder — master will be created automatically")
+        btn_dark_folder.clicked.connect(lambda: self._cal_load_folder("dark"))
+        dark_row.addWidget(btn_dark_folder)
+        btn_dark_master = QPushButton("Master…")
+        btn_dark_master.setFixedWidth(56)
+        btn_dark_master.setToolTip("Load a pre-made master dark FITS file")
+        btn_dark_master.clicked.connect(lambda: self._cal_load_master("dark"))
+        dark_row.addWidget(btn_dark_master)
+        cal_layout.addLayout(dark_row)
+
+        # Flat
+        flat_row = QHBoxLayout()
+        self._cal_flat_label = QLabel("Flat: none")
+        self._cal_flat_label.setStyleSheet("font-size: 11px; color: #aaa;")
+        flat_row.addWidget(self._cal_flat_label, 1)
+        btn_flat_folder = QPushButton("Folder…")
+        btn_flat_folder.setFixedWidth(56)
+        btn_flat_folder.setToolTip("Load flat frames folder — master will be created automatically")
+        btn_flat_folder.clicked.connect(lambda: self._cal_load_folder("flat"))
+        flat_row.addWidget(btn_flat_folder)
+        btn_flat_master = QPushButton("Master…")
+        btn_flat_master.setFixedWidth(56)
+        btn_flat_master.setToolTip("Load a pre-made master flat FITS file")
+        btn_flat_master.clicked.connect(lambda: self._cal_load_master("flat"))
+        flat_row.addWidget(btn_flat_master)
+        cal_layout.addLayout(flat_row)
+
+        cal_layout.addWidget(_info_label("Light frames: add via Project panel → Import Lights"))
+
         self._btn_calibrate = QPushButton("Run Calibration")
         self._btn_calibrate.setToolTip(
-            "Creates master dark, flat, and bias from your imported calibration frames, "
-            "then applies them to your light frames."
+            "Creates masters from loaded raw frames (if folders loaded), "
+            "then applies them to all light frames."
         )
         self._btn_calibrate.clicked.connect(self.run_calibration.emit)
         cal_layout.addWidget(self._btn_calibrate)
+
+        # Store calibration frame paths / mode
+        self._cal_bias_paths: list[str] = []   # raw frames
+        self._cal_dark_paths: list[str] = []
+        self._cal_flat_paths: list[str] = []
+        self._cal_bias_master_path: str | None = None
+        self._cal_dark_master_path: str | None = None
+        self._cal_flat_master_path: str | None = None
+
         layout.addWidget(cal_group)
 
         # --- Cosmetic Correction ---
@@ -1135,6 +1202,31 @@ class ToolsPanel(QWidget):
 
         layout.addWidget(pcc_group)
 
+        # --- Spectrophotometric Color Calibration (SPCC) ---
+        spcc_group = QGroupBox("Spectrophotometric Color Calibration (SPCC)")
+        spcc_layout = QVBoxLayout(spcc_group)
+        spcc_layout.addWidget(_info_label(
+            "Uses actual filter transmission curves + Gaia star temperatures for highly "
+            "accurate color calibration. Requires plate solve (PCC) to have been run first."
+        ))
+
+        self._spcc_filter_combo = QComboBox()
+        from cosmica.core.spcc import FILTER_NAMES
+        self._spcc_filter_combo.addItems(FILTER_NAMES)
+        self._spcc_filter_combo.setToolTip("Select your camera + filter combination")
+        spcc_layout.addLayout(_h_row("Filter set:", self._spcc_filter_combo))
+
+        self._spcc_neutralize_check = QCheckBox("Neutralize background")
+        self._spcc_neutralize_check.setChecked(True)
+        self._spcc_neutralize_check.setToolTip("Remove per-channel sky background offset after calibration")
+        spcc_layout.addWidget(self._spcc_neutralize_check)
+
+        self._btn_spcc = QPushButton("Run SPCC")
+        self._btn_spcc.setToolTip("Spectrophotometric color calibration (needs plate solve data)")
+        self._btn_spcc.clicked.connect(self.run_spcc.emit)
+        spcc_layout.addWidget(self._btn_spcc)
+        layout.addWidget(spcc_group)
+
         # --- LRGB Combine ---
         lrgb_group = QGroupBox("LRGB Combine")
         lrgb_layout = QVBoxLayout(lrgb_group)
@@ -1354,8 +1446,12 @@ class ToolsPanel(QWidget):
         )
 
         self._nr_method_combo = QComboBox()
-        self._nr_method_combo.addItems(["Wavelet", "Non-Local Means"])
-        self._nr_method_combo.setToolTip("Wavelet preserves more structure; NLM is faster")
+        self._nr_method_combo.addItems(["Wavelet", "Non-Local Means", "TGV (Total Gen. Variation)"])
+        self._nr_method_combo.setToolTip(
+            "Wavelet: fast, good sharpness\n"
+            "NLM: texture-aware\n"
+            "TGV: best edge/gradient preservation, GPU-accelerated"
+        )
         nr_layout.addLayout(_h_row("Method:", self._nr_method_combo))
 
         self._nr_strength_slider = QSlider(Qt.Orientation.Horizontal)
@@ -2310,6 +2406,72 @@ class ToolsPanel(QWidget):
             "solver": solver_map.get(self._pcc_solver_combo.currentIndex(), "auto"),
         }
 
+    # ── Calibration helpers ───────────────────────────────────────────────────
+
+    def _cal_load_folder(self, frame_type: str):
+        from PyQt6.QtWidgets import QFileDialog
+        folder = QFileDialog.getExistingDirectory(
+            self, f"Select {frame_type.title()} Frames Folder"
+        )
+        if not folder:
+            return
+        from pathlib import Path
+        p = Path(folder)
+        paths = []
+        for ext in ("*.fits", "*.fit", "*.fts", "*.FTS"):
+            paths.extend(str(f) for f in sorted(p.glob(ext)))
+        if not paths:
+            return
+        n = len(paths)
+        if frame_type == "bias":
+            self._cal_bias_paths = paths
+            self._cal_bias_master_path = None
+            self._cal_bias_label.setText(f"Bias: {n} frames (folder)")
+        elif frame_type == "dark":
+            self._cal_dark_paths = paths
+            self._cal_dark_master_path = None
+            self._cal_dark_label.setText(f"Dark: {n} frames (folder)")
+        elif frame_type == "flat":
+            self._cal_flat_paths = paths
+            self._cal_flat_master_path = None
+            self._cal_flat_label.setText(f"Flat: {n} frames (folder)")
+
+    def _cal_load_master(self, frame_type: str):
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, f"Select Master {frame_type.title()} FITS", "",
+            "FITS Images (*.fits *.fit *.fts *.FTS)"
+        )
+        if not path:
+            return
+        from pathlib import Path
+        name = Path(path).name
+        if frame_type == "bias":
+            self._cal_bias_master_path = path
+            self._cal_bias_paths = []
+            self._cal_bias_label.setText(f"Bias: {name}")
+        elif frame_type == "dark":
+            self._cal_dark_master_path = path
+            self._cal_dark_paths = []
+            self._cal_dark_label.setText(f"Dark: {name}")
+        elif frame_type == "flat":
+            self._cal_flat_master_path = path
+            self._cal_flat_paths = []
+            self._cal_flat_label.setText(f"Flat: {name}")
+
+    def get_calibration_sources(self) -> dict:
+        """Return calibration frame configuration for auto-master creation."""
+        return {
+            "bias_paths":   self._cal_bias_paths,
+            "dark_paths":   self._cal_dark_paths,
+            "flat_paths":   self._cal_flat_paths,
+            "bias_master":  self._cal_bias_master_path,
+            "dark_master":  self._cal_dark_master_path,
+            "flat_master":  self._cal_flat_master_path,
+        }
+
+    # ── Blink Comparator helpers ──────────────────────────────────────────────
+
     def set_blink_slot_label(self, slot: str, name: str) -> None:
         """Update blink comparator A/B slot label. slot='a' or 'b'."""
         if slot == "a":
@@ -2347,6 +2509,16 @@ class ToolsPanel(QWidget):
             regularization=self._decon_reg_slider.value() / 10000.0,
             deringing=self._decon_dering_check.isChecked(),
             deringing_amount=self._decon_dering_amount.value(),
+        )
+
+    def is_tgv_denoise_selected(self) -> bool:
+        return self._nr_method_combo.currentIndex() == 2
+
+    def get_tgv_params(self):
+        from cosmica.core.tgv_denoise import TGVParams
+        return TGVParams(
+            strength=self._nr_strength_slider.value() / 100.0 * 2.0,  # map 0-100 → 0-2
+            n_iter=150,
         )
 
     def get_denoise_params(self) -> DenoiseParams:
@@ -2524,6 +2696,13 @@ class ToolsPanel(QWidget):
             luminance_weight=self._lrgb_lum_weight_spin.value(),
             saturation_boost=self._lrgb_sat_spin.value(),
             chrominance_noise=self._lrgb_chroma_spin.value(),
+        )
+
+    def get_spcc_params(self):
+        from cosmica.core.spcc import SPCCParams
+        return SPCCParams(
+            filter_name=self._spcc_filter_combo.currentText(),
+            neutralize_background=self._spcc_neutralize_check.isChecked(),
         )
 
     @property

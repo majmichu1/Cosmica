@@ -177,6 +177,14 @@ class ToolsPanel(QWidget):
     open_star_mask_dialog = pyqtSignal()
     open_subframe_selector = pyqtSignal()
 
+    # Blink Comparator
+    blink_load_a = pyqtSignal()           # load image A from file
+    blink_load_b = pyqtSignal()           # load image B from file
+    blink_use_current_as_a = pyqtSignal() # set current image as A
+    blink_use_current_as_b = pyqtSignal() # set current image as B
+    blink_toggle = pyqtSignal(bool)       # start/stop blinking
+    blink_fps_changed = pyqtSignal(int)   # FPS changed
+
     # Transform signals
     run_crop = pyqtSignal()
     run_rotate = pyqtSignal()
@@ -1864,6 +1872,71 @@ class ToolsPanel(QWidget):
         ca_layout.addWidget(btn_ca)
         layout.addWidget(ca_group)
 
+        # --- Blink Comparator ---
+        blink_group = QGroupBox("Blink Comparator")
+        blink_layout = QVBoxLayout(blink_group)
+        blink_layout.addWidget(_info_label(
+            "Flip rapidly between two images to spot alignment differences, star size changes, "
+            "or processing artifacts. Press B while canvas is focused to toggle."
+        ))
+
+        # Slot A
+        a_row = QHBoxLayout()
+        self._blink_a_label = QLabel("A: —")
+        self._blink_a_label.setStyleSheet("font-size: 11px; color: #aaa;")
+        self._blink_a_label.setWordWrap(True)
+        a_row.addWidget(self._blink_a_label, 1)
+        btn_a_file = QPushButton("File…")
+        btn_a_file.setFixedWidth(48)
+        btn_a_file.setToolTip("Load Image A from file")
+        btn_a_file.clicked.connect(self.blink_load_a.emit)
+        a_row.addWidget(btn_a_file)
+        btn_a_cur = QPushButton("Current")
+        btn_a_cur.setFixedWidth(60)
+        btn_a_cur.setToolTip("Use current canvas image as A")
+        btn_a_cur.clicked.connect(self.blink_use_current_as_a.emit)
+        a_row.addWidget(btn_a_cur)
+        blink_layout.addLayout(a_row)
+
+        # Slot B
+        b_row = QHBoxLayout()
+        self._blink_b_label = QLabel("B: —")
+        self._blink_b_label.setStyleSheet("font-size: 11px; color: #aaa;")
+        self._blink_b_label.setWordWrap(True)
+        b_row.addWidget(self._blink_b_label, 1)
+        btn_b_file = QPushButton("File…")
+        btn_b_file.setFixedWidth(48)
+        btn_b_file.setToolTip("Load Image B from file")
+        btn_b_file.clicked.connect(self.blink_load_b.emit)
+        b_row.addWidget(btn_b_file)
+        btn_b_cur = QPushButton("Current")
+        btn_b_cur.setFixedWidth(60)
+        btn_b_cur.setToolTip("Use current canvas image as B")
+        btn_b_cur.clicked.connect(self.blink_use_current_as_b.emit)
+        b_row.addWidget(btn_b_cur)
+        blink_layout.addLayout(b_row)
+
+        # FPS + toggle
+        ctrl_row = QHBoxLayout()
+        ctrl_row.addWidget(QLabel("FPS:"))
+        self._blink_fps_spin = QSpinBox()
+        self._blink_fps_spin.setRange(1, 10)
+        self._blink_fps_spin.setValue(2)
+        self._blink_fps_spin.setToolTip("Flips per second")
+        self._blink_fps_spin.valueChanged.connect(self.blink_fps_changed.emit)
+        ctrl_row.addWidget(self._blink_fps_spin)
+        ctrl_row.addStretch()
+        self._blink_toggle_btn = QPushButton("Start  [B]")
+        self._blink_toggle_btn.setCheckable(True)
+        self._blink_toggle_btn.setToolTip("Toggle blink comparator (shortcut: B)")
+        self._blink_toggle_btn.toggled.connect(self.blink_toggle.emit)
+        self._blink_toggle_btn.toggled.connect(
+            lambda on: self._blink_toggle_btn.setText("Stop  [B]" if on else "Start  [B]")
+        )
+        ctrl_row.addWidget(self._blink_toggle_btn)
+        blink_layout.addLayout(ctrl_row)
+        layout.addWidget(blink_group)
+
         # --- Quick tools row ---
         quick_group = QGroupBox("Tools")
         quick_layout = QVBoxLayout(quick_group)
@@ -2236,6 +2309,20 @@ class ToolsPanel(QWidget):
             "dec_hint": self._pcc_dec_spin.value() if self._pcc_dec_spin.value() != 0 else None,
             "solver": solver_map.get(self._pcc_solver_combo.currentIndex(), "auto"),
         }
+
+    def set_blink_slot_label(self, slot: str, name: str) -> None:
+        """Update blink comparator A/B slot label. slot='a' or 'b'."""
+        if slot == "a":
+            self._blink_a_label.setText(f"A: {name}")
+        else:
+            self._blink_b_label.setText(f"B: {name}")
+
+    def reset_blink_toggle(self):
+        """Programmatically un-press the blink toggle button (e.g. on stop)."""
+        self._blink_toggle_btn.blockSignals(True)
+        self._blink_toggle_btn.setChecked(False)
+        self._blink_toggle_btn.setText("Start  [B]")
+        self._blink_toggle_btn.blockSignals(False)
 
     def set_psf_measurement(self, fwhm: float, ellipticity: float, n_stars: int) -> None:
         """Update FWHM spin from a PSF measurement result."""

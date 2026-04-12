@@ -167,6 +167,13 @@ class MainWindow(QMainWindow):
         # Python console dock (lazy init)
         self._python_console_dock = None
 
+        # Blink comparator
+        self._blink_images: list = [None, None]  # [A, B] — display RGB uint8 arrays (H,W,3)
+        self._blink_names: list[str] = ["", ""]
+        self._blink_index = 0
+        self._blink_timer = QTimer()
+        self._blink_timer.timeout.connect(self._blink_tick)
+
         # Register tools for preset system
         load_default_presets()
 
@@ -451,6 +458,14 @@ class MainWindow(QMainWindow):
         tp.open_python_console.connect(self._on_open_python_console)
         tp.run_mlt.connect(self._on_run_mlt)
         tp.run_lrgb_combine.connect(self._on_run_lrgb_combine)
+
+        # Blink comparator
+        tp.blink_load_a.connect(lambda: self._blink_load_from_file(slot=0))
+        tp.blink_load_b.connect(lambda: self._blink_load_from_file(slot=1))
+        tp.blink_use_current_as_a.connect(lambda: self._blink_use_current(slot=0))
+        tp.blink_use_current_as_b.connect(lambda: self._blink_use_current(slot=1))
+        tp.blink_toggle.connect(self._on_blink_toggle)
+        tp.blink_fps_changed.connect(self._on_blink_fps_changed)
 
         # Canvas sample signals
         self._canvas.sample_placed.connect(self._on_sample_placed)
@@ -2379,3 +2394,88 @@ class MainWindow(QMainWindow):
                     "quality_checks": f"{n_passed}/{n_checks}",
                 },
             )
+
+    # ── Blink Comparator ──────────────────────────────────────────────────────
+
+    def _blink_load_from_file(self, slot: int):
+        path, _ = QFileDialog.getOpenFileName(
+            self, f"Load Blink Image {'A' if slot == 0 else 'B'}", "",
+            "Images (*.fits *.fit *.fts *.xisf *.tif *.tiff *.png *.jpg)"
+        )
+        if not path:
+            return
+        import numpy as _np
+        img = load_image(path)
+        self._blink_images[slot] = self._make_display_rgb(img.data)
+        name = Path(path).name
+        self._blink_names[slot] = name
+        self._tools_panel.set_blink_slot_label("a" if slot == 0 else "b", name)
+        self._log_panel.log(f"Blink {'A' if slot == 0 else 'B'}: loaded {name}", "info")
+
+    def _blink_use_current(self, slot: int):
+        if self._current_image is None:
+            self._log_panel.log("No image loaded", "warning")
+            return
+        self._blink_images[slot] = self._make_display_rgb(self._current_image.data)
+        name = getattr(self._current_image, "path", None)
+        name = Path(name).name if name else "current image"
+        self._blink_names[slot] = name
+        self._tools_panel.set_blink_slot_label("a" if slot == 0 else "b", name)
+        self._log_panel.log(f"Blink {'A' if slot == 0 else 'B'}: set to {name}", "info")
+
+    def _make_display_rgb(self, data) -> "np.ndarray":
+        """Convert image data to display-ready uint8 RGB (H,W,3) array."""
+        import numpy as _np
+        from cosmica.core.stretch import auto_stretch, StretchParams
+        stretched = auto_stretch(data, StretchParams())
+        if stretched.ndim == 2:
+            rgb = _np.stack([stretched] * 3, axis=-1)
+        else:
+            # (3, H, W) → (H, W, 3)
+            rgb = _np.transpose(stretched, (1, 2, 0))
+        return (_np.clip(rgb, 0, 1) * 255).astype(_np.uint8)
+
+    @pyqtSlot(bool)
+    def _on_blink_toggle(self, enabled: bool):
+        if enabled:
+            if self._blink_images[0] is None or self._blink_images[1] is None:
+                self._log_panel.log(
+                    "Blink Comparator: load both Image A and Image B first", "warning"
+                )
+                self._tools_panel.reset_blink_toggle()
+                return
+            fps = self._tools_panel._blink_fps_spin.value()
+            self._blink_index = 0
+            self._blink_timer.start(1000 // fps)
+            self._log_panel.log(f"Blink Comparator started ({fps} fps)", "info")
+        else:
+            self._blink_timer.stop()
+            # Restore the original current image on canvas
+            if self._current_image is not None:
+                self._display_image(self._current_image)
+            self._log_panel.log("Blink Comparator stopped", "info")
+
+    @pyqtSlot(int)
+    def _on_blink_fps_changed(self, fps: int):
+        if self._blink_timer.isActive():
+            self._blink_timer.setInterval(1000 // fps)
+
+    def _blink_tick(self):
+        img = self._blink_images[self._blink_index]
+        if img is not None:
+            self._canvas.set_image(img)
+            slot_name = "A" if self._blink_index == 0 else "B"
+            self.statusBar().showMessage(
+                f"Blink: {slot_name} — {self._blink_names[self._blink_index]}"
+            )
+        self._blink_index = 1 - self._blink_index
+
+    def keyPressEvent(self, event):
+        """Global keyboard shortcuts."""
+        from PyQt6.QtCore import Qt as _Qt
+        if event.key() == _Qt.Key.Key_B and not event.isAutoRepeat():
+            # Toggle blink comparator
+            btn = self._tools_panel._blink_toggle_btn
+            btn.setChecked(not btn.isChecked())
+            return
+        super().keyPressEvent(event)

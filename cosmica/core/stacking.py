@@ -27,7 +27,7 @@ from cosmica.core.gpu_stars import (
     match_stars_gpu,
     warp_image_gpu,
 )
-from cosmica.core.image_io import FrameType, ImageData
+from cosmica.core.image_io import FrameType, ImageData, load_image
 from cosmica.core.star_detection import (
     align_image as _cpu_align_image,
 )
@@ -779,6 +779,231 @@ def align_frames(
 
     progress(1.0, f"Alignment complete: {n} frames")
     return [img for img in aligned if img is not None]
+
+
+# ---------------------------------------------------------------------------
+# Tiled stacking from file paths (memory-efficient)
+# ---------------------------------------------------------------------------
+
+
+def _load_fits_tile(path: "Path", y0: int, y1: int) -> np.ndarray:
+    """Load a horizontal tile [y0:y1, :] from a FITS file via memmap.
+
+    Returns float32 array of shape (C, tile_h, w) or (tile_h, w).
+    Only the requested rows are read from disk.
+    """
+    from astropy.io import fits as _fits
+
+    with _fits.open(str(path), memmap=True) as hdul:
+        for hdu in hdul:
+            if hdu.data is not None:
+                d = hdu.data
+                if d.ndim == 2:
+                    tile = np.array(d[y0:y1, :], dtype=np.float32)
+                elif d.ndim == 3:
+                    tile = np.array(d[:, y0:y1, :], dtype=np.float32)
+                else:
+                    tile = np.array(d, dtype=np.float32)
+                # Normalize to [0,1] if integer
+                if np.issubdtype(hdu.data.dtype, np.integer):
+                    info = np.iinfo(hdu.data.dtype)
+                    tile /= float(info.max)
+                return tile
+    raise ValueError(f"No image data in {path}")
+
+
+def _sample_frame_background(path: "Path", sample_size: int = 256) -> float:
+    """Estimate frame background by sampling the center of a FITS file."""
+    from astropy.io import fits as _fits
+
+    with _fits.open(str(path), memmap=True) as hdul:
+        for hdu in hdul:
+            if hdu.data is not None:
+                d = hdu.data
+                if d.ndim == 2:
+                    h, w = d.shape
+                    y0 = max(0, h // 2 - sample_size // 2)
+                    x0 = max(0, w // 2 - sample_size // 2)
+                    crop = np.array(d[y0:y0 + sample_size, x0:x0 + sample_size], dtype=np.float32)
+                elif d.ndim == 3:
+                    _, h, w = d.shape
+                    y0 = max(0, h // 2 - sample_size // 2)
+                    x0 = max(0, w // 2 - sample_size // 2)
+                    crop = np.array(d[0, y0:y0 + sample_size, x0:x0 + sample_size], dtype=np.float32)
+                else:
+                    return 0.0
+                if np.issubdtype(hdu.data.dtype, np.integer):
+                    info = np.iinfo(hdu.data.dtype)
+                    crop /= float(info.max)
+                return float(np.median(crop))
+    return 0.0
+
+
+def _get_fits_shape(path: "Path") -> tuple:
+    """Return the data shape (C,H,W) or (H,W) from a FITS header (no pixel read)."""
+    from astropy.io import fits as _fits
+
+    with _fits.open(str(path), memmap=True) as hdul:
+        for hdu in hdul:
+            if hdu.data is not None:
+                return hdu.data.shape
+    raise ValueError(f"No image data in {path}")
+
+
+def stack_from_paths(
+    paths: "list[Path]",
+    params: "StackingParams | None" = None,
+    progress: ProgressCallback = _noop_progress,
+) -> "StackResult":
+    """Stack frames from FITS file paths using tiled processing.
+
+    Only one horizontal tile-strip is in memory at a time.  For N=50 frames
+    at 3096×2080 in float32, peak RAM is ~300 MB regardless of frame count,
+    versus ~4 GB for the in-memory path.
+
+    Normalization factors are computed from a small center crop (fast, ≈1 MB
+    per file), then applied per-tile as each strip is loaded.
+
+    Parameters
+    ----------
+    paths : list[Path]
+        Paths to aligned FITS files to stack.
+    params : StackingParams, optional
+        Stacking configuration (rejection, normalization, etc.).
+    progress : callable
+        Progress callback (fraction, message).
+    """
+    from pathlib import Path as _Path
+
+    if params is None:
+        params = StackingParams()
+
+    n = len(paths)
+    if n == 0:
+        raise ValueError("No paths provided")
+    if n == 1:
+        img = load_image(str(paths[0]))
+        return StackResult(image=img, n_frames=1)
+
+    # 1. Determine output shape from first file
+    progress(0.0, "Reading file headers…")
+    ref_shape = _get_fits_shape(paths[0])
+    if len(ref_shape) == 2:
+        h, w = ref_shape
+        n_channels = 1
+        is_color = False
+    else:
+        n_channels, h, w = ref_shape
+        is_color = True
+
+    log.info(
+        "Stack from paths: %d files, shape=%s, color=%s",
+        n, ref_shape, is_color,
+    )
+
+    # 2. Compute per-frame normalization shifts from center crop
+    shifts = np.zeros(n, dtype=np.float32)
+    if params.normalization != NormalizationMethod.NONE:
+        progress(0.02, "Computing normalization factors…")
+        medians = []
+        for i, p in enumerate(paths):
+            medians.append(_sample_frame_background(p))
+        ref_med = medians[0]
+        for i, m in enumerate(medians):
+            if params.normalization in (
+                NormalizationMethod.ADDITIVE, NormalizationMethod.ADDITIVE_SCALING
+            ):
+                shifts[i] = ref_med - m
+            # MULTIPLICATIVE: handled as scale; skip for now (additive is most robust)
+        log.debug("Normalization shifts: min=%.4f max=%.4f", shifts.min(), shifts.max())
+
+    # 3. Compute tile height so that (N × n_channels × tile_h × W × 4) ≤ ~350 MB
+    target_bytes = 350 * 1024 * 1024
+    bytes_per_row = n * n_channels * w * 4
+    tile_h = max(1, min(h, target_bytes // max(bytes_per_row, 1)))
+    n_tiles = (h + tile_h - 1) // tile_h
+    log.info(
+        "Tiled stacking: tile_h=%d rows, %d tiles, ~%d MB per tile",
+        tile_h, n_tiles, (bytes_per_row * tile_h) // (1024 * 1024),
+    )
+
+    # 4. Allocate output
+    if is_color:
+        output = np.zeros((n_channels, h, w), dtype=np.float32)
+    else:
+        output = np.zeros((h, w), dtype=np.float32)
+    total_rejected = 0
+
+    # 5. Process tiles
+    for tile_idx in range(n_tiles):
+        y0 = tile_idx * tile_h
+        y1 = min(y0 + tile_h, h)
+        actual_h = y1 - y0
+
+        progress(
+            0.05 + 0.90 * (tile_idx / n_tiles),
+            f"Stacking tile {tile_idx + 1}/{n_tiles} (rows {y0}–{y1})…",
+        )
+
+        # Load tile from each file
+        tile_frames = []
+        for i, p in enumerate(paths):
+            try:
+                tile = _load_fits_tile(p, y0, y1)
+                tile = np.clip(tile + shifts[i], 0, 1)
+                tile_frames.append(tile)
+            except Exception as exc:
+                log.warning("Could not load tile from %s: %s — skipping", p, exc)
+
+        if not tile_frames:
+            continue
+
+        # Stack → (N, [C,] tile_h, W)
+        tile_stack = np.array(tile_frames, dtype=np.float32)
+        del tile_frames  # free immediately
+
+        # Rejection
+        if params.rejection == RejectionMethod.SIGMA_CLIP:
+            masked = _reject_sigma_clip(tile_stack, params.kappa_low, params.kappa_high, params.max_iterations)
+        elif params.rejection == RejectionMethod.WINSORIZED_SIGMA:
+            masked = _reject_winsorized_sigma(tile_stack, params.kappa_low, params.kappa_high, params.max_iterations, params.winsorize_cutoff)
+        elif params.rejection in (RejectionMethod.LINEAR_FIT, RejectionMethod.NONE):
+            masked = np.ma.array(tile_stack, mask=False)
+            if params.rejection == RejectionMethod.LINEAR_FIT:
+                masked = _reject_sigma_clip(tile_stack, params.kappa_low, params.kappa_high, params.max_iterations)
+        elif params.rejection == RejectionMethod.PERCENTILE_CLIP:
+            masked = _reject_percentile_clip(tile_stack, params.percentile_low, params.percentile_high)
+        elif params.rejection == RejectionMethod.ESD:
+            masked = _reject_esd(tile_stack)
+        elif params.rejection == RejectionMethod.MIN_MAX:
+            masked = _reject_min_max(tile_stack, params.min_max_reject)
+        else:
+            masked = np.ma.array(tile_stack, mask=False)
+
+        tile_mask = _get_mask(masked, tile_stack.shape)
+        total_rejected += int(np.sum(tile_mask))
+
+        # Integration
+        tile_result = _integrate(masked, params.integration)
+        del tile_stack, masked
+
+        if is_color:
+            output[:, y0:y1, :] = tile_result
+        else:
+            output[y0:y1, :] = tile_result
+
+    output = np.clip(output, 0, 1).astype(np.float32)
+    progress(1.0, f"Stacking complete: {n} files, {total_rejected} pixels rejected")
+    log.info("Tiled stacking complete: %d frames, %d rejected", n, total_rejected)
+
+    # Load header from first file for metadata
+    ref_img = load_image(str(paths[0]))
+    result_image = ImageData(
+        data=output,
+        header=ref_img.header.copy(),
+        frame_type=FrameType.RESULT,
+    )
+    return StackResult(image=result_image, n_frames=n, total_rejected=total_rejected)
 
 
 # ---------------------------------------------------------------------------

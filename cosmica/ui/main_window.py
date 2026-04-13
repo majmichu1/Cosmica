@@ -59,7 +59,7 @@ from cosmica.core.morphology import morphology_transform
 from cosmica.core.presets import load_default_presets
 from cosmica.core.project import Project
 from cosmica.core.scripting import MacroRecorder, load_macro, play_macro, save_macro
-from cosmica.core.stacking import StackingParams, align_frames, stack_images
+from cosmica.core.stacking import StackingParams, align_frames, stack_from_paths, stack_images
 from cosmica.core.star_reduction import reduce_stars
 from cosmica.core.statistics import compute_image_statistics
 from cosmica.core.stretch import (
@@ -170,6 +170,9 @@ class MainWindow(QMainWindow):
 
         # Multi-session stacking
         self._ms_sessions: list = []  # list of SessionGroup objects
+
+        # Paths to saved aligned frames for memory-efficient stacking
+        self._aligned_paths: list = []
 
         # Blink comparator
         self._blink_images: list = [None, None]  # [A, B] — display RGB uint8 arrays (H,W,3)
@@ -1055,22 +1058,20 @@ class MainWindow(QMainWindow):
             self._log_panel.log("Alignment failed: no frames aligned", "error")
             return
 
-        # Store aligned lights for immediate stacking
-        self._aligned_lights = aligned_lights
-
-        # Save aligned frames to project folder
+        # Save aligned frames to project folder FIRST, then free from RAM
         project_dir = self._project.directory if self._project else None
+        aligned_paths: list[Path] = []
         if project_dir:
             aligned_dir = os.path.join(project_dir, "aligned")
             os.makedirs(aligned_dir, exist_ok=True)
 
             for i, img in enumerate(aligned_lights):
                 filename = f"aligned_{i + 1:03d}.fits"
-                filepath = os.path.join(aligned_dir, filename)
+                filepath = Path(os.path.join(aligned_dir, filename))
                 try:
                     from cosmica.core.image_io import save_image
-
-                    save_image(img, filepath)
+                    save_image(img, str(filepath))
+                    aligned_paths.append(filepath)
                 except Exception as e:
                     log.warning(f"Failed to save aligned frame {filename}: {e}")
 
@@ -1078,23 +1079,29 @@ class MainWindow(QMainWindow):
                 f"Saved {len(aligned_lights)} aligned frames to 'aligned/' folder", "info"
             )
 
+        # Display reference frame before freeing memory
+        ref_display = aligned_lights[0]
+        self._display_image(ref_display)
+
+        # *** Free aligned_lights from RAM — stacking reads from disk ***
+        self._aligned_lights = []
+        del aligned_lights
+        import gc; gc.collect()
+
+        if project_dir and aligned_paths:
             # Register aligned frames in the project (REGISTERED section)
-            aligned_paths = [
-                Path(os.path.join(aligned_dir, f"aligned_{i + 1:03d}.fits"))
-                for i in range(len(aligned_lights))
-            ]
-            # Clear old aligned entries first, then add fresh ones
             for p in aligned_paths:
                 if p.exists():
                     self._project.remove_frame(p)
             self._project.add_frames([p for p in aligned_paths if p.exists()], FrameType.ALIGNED)
+            # Store paths for subsequent stack-from-disk
+            self._aligned_paths = aligned_paths
 
             # Refresh file tree
             if hasattr(self, "_project_panel"):
                 self._project_panel.refresh()
-
-        # Display the aligned reference frame
-        self._display_image(aligned_lights[0])
+        else:
+            self._aligned_paths = []
 
         self._log_panel.log(
             f"Alignment complete: {len(aligned_lights)} frames aligned. Ready to stack.",
@@ -1105,18 +1112,36 @@ class MainWindow(QMainWindow):
             self._save_project()
 
     def _on_run_stacking(self):
-        # If we have aligned frames, use them (skip alignment)
-        if hasattr(self, "_aligned_lights") and self._aligned_lights:
-            lights = self._aligned_lights
-            align = False
-            self._log_panel.log("Stacking previously aligned frames...", "info")
-        else:
-            lights = self._get_lights_for_stacking()
-            if not lights:
-                return
-            lights = self._apply_quality_filter(lights)
-            align = True
-            self._log_panel.log("Aligning and stacking frames...", "info")
+        from cosmica.core.stacking import stack_from_paths
+
+        # Prefer aligned paths on disk (memory-efficient tiled stacking)
+        aligned_paths = getattr(self, "_aligned_paths", [])
+        if not aligned_paths and self._project:
+            aligned_paths = [
+                e.path for e in self._project.frames_by_type(FrameType.ALIGNED)
+                if e.path.exists()
+            ]
+
+        if aligned_paths:
+            params = self._tools_panel.get_stacking_params()
+            n = len(aligned_paths)
+            self._log_panel.log(
+                f"Stacking {n} aligned frames from disk (tiled, low-RAM)…", "info"
+            )
+            self._start_worker(
+                stack_from_paths,
+                aligned_paths,
+                params=params,
+                on_done=self._on_stacking_done,
+            )
+            return
+
+        # No aligned frames on disk — align + stack in one pass
+        lights = self._get_lights_for_stacking()
+        if not lights:
+            return
+        lights = self._apply_quality_filter(lights)
+        self._log_panel.log("Aligning and stacking frames...", "info")
 
         drizzle_enabled, drizzle_params = self._tools_panel.get_drizzle_params()
 
@@ -1129,7 +1154,6 @@ class MainWindow(QMainWindow):
 
             def _drizzle_work(light_frames, d_params, progress=None):
                 import numpy as _np
-                # Collect raw arrays; if aligned frames exist they're already ndarray
                 arrays = [
                     f if isinstance(f, _np.ndarray) else f.data
                     for f in light_frames
@@ -1158,12 +1182,11 @@ class MainWindow(QMainWindow):
             return
 
         params = self._tools_panel.get_stacking_params()
-
         self._start_worker(
             stack_images,
             lights,
             params=params,
-            align=align,
+            align=True,
             on_done=self._on_stacking_done,
         )
 

@@ -163,6 +163,7 @@ class MainWindow(QMainWindow):
 
         # WCS overlay data (image-space x, y, magnitude)
         self._wcs_overlay_stars: list[tuple[float, float, float]] = []
+        self._current_wcs: dict = {}   # last solved WCS dict
 
         # Python console dock (lazy init)
         self._python_console_dock = None
@@ -215,6 +216,11 @@ class MainWindow(QMainWindow):
         save_img.setShortcut("Ctrl+Shift+S")
         save_img.triggered.connect(self._save_image)
         file_menu.addAction(save_img)
+
+        fits_hdr = QAction("Edit FITS &Header...", self)
+        fits_hdr.setShortcut("Ctrl+H")
+        fits_hdr.triggered.connect(self._show_fits_header)
+        file_menu.addAction(fits_hdr)
 
         file_menu.addSeparator()
 
@@ -455,6 +461,7 @@ class MainWindow(QMainWindow):
         tp.toggle_sample_mode.connect(self._on_toggle_sample_mode)
         tp.clear_bg_samples.connect(self._on_clear_bg_samples)
         tp.toggle_wcs_overlay.connect(self._on_toggle_wcs_overlay)
+        tp.toggle_dso_overlay.connect(self._on_toggle_dso_overlay)
         tp.open_python_console.connect(self._on_open_python_console)
         tp.run_mlt.connect(self._on_run_mlt)
         tp.run_lrgb_combine.connect(self._on_run_lrgb_combine)
@@ -562,6 +569,17 @@ class MainWindow(QMainWindow):
             log.exception("Export failed")
             self._log_panel.log(f"Export failed: {e}", "error")
             QMessageBox.critical(self, "Export Error", f"Failed to export image:\n{e}")
+
+    def _show_fits_header(self):
+        if self._current_image is None:
+            self._log_panel.log("Load an image first", "warning")
+            return
+        from cosmica.ui.dialogs.fits_header_dialog import FITSHeaderDialog
+        path = getattr(self._current_image, "file_path", None)
+        dlg = FITSHeaderDialog(self._current_image.header, file_path=path, parent=self)
+        if dlg.exec():
+            self._current_image.header.update(dlg.get_header())
+            self._log_panel.log("FITS header updated", "success")
 
     def _show_preferences(self):
         from cosmica.ui.dialogs.preferences_dialog import PreferencesDialog
@@ -1633,7 +1651,44 @@ class MainWindow(QMainWindow):
                 overlay.append((float(px), float(py), float(cat.g_mag)))
 
         self._wcs_overlay_stars = overlay
+        self._current_wcs = wcs
         self._canvas.set_overlay_stars(overlay)
+        # Auto-populate DSO annotations
+        self._update_dso_annotations(wcs)
+
+    def _update_dso_annotations(self, wcs: dict):
+        """Project DSO catalog entries to image pixel coordinates and push to canvas."""
+        if not wcs or self._current_image is None:
+            return
+        from cosmica.core.dso_catalog import query_dso_in_field
+        import numpy as _np
+
+        h = self._current_image.data.shape[-2] if self._current_image.data.ndim == 3 else self._current_image.data.shape[0]
+        w = self._current_image.data.shape[-1] if self._current_image.data.ndim == 3 else self._current_image.data.shape[1]
+
+        ra_center = wcs.get("ra_center", 0.0)
+        dec_center = wcs.get("dec_center", 0.0)
+        scale_deg = (wcs.get("scale") or 1.0) / 3600.0
+        fov_deg = max(w, h) * scale_deg * 1.5
+
+        dsos = query_dso_in_field(ra_center, dec_center, fov_deg)
+        cos_dec = _np.cos(_np.radians(dec_center))
+        annotations = []
+        for dso in dsos:
+            dra = (dso.ra_deg - ra_center) * cos_dec
+            ddec = dso.dec_deg - dec_center
+            px = w / 2 + dra / max(scale_deg, 1e-10)
+            py = h / 2 - ddec / max(scale_deg, 1e-10)
+            if -50 <= px < w + 50 and -50 <= py < h + 50:
+                annotations.append((float(px), float(py), dso.name, dso.type_code))
+
+        self._canvas.set_dso_annotations(annotations)
+
+    @pyqtSlot()
+    def _on_toggle_dso_overlay(self):
+        """Toggle DSO annotation overlay visibility on the canvas."""
+        current = getattr(self._canvas, '_show_dso_overlay', False)
+        self._canvas.set_dso_overlay_visible(not current)
 
     # ── Python console ────────────────────────────────────────────────────────
 

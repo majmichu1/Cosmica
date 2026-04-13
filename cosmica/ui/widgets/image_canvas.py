@@ -46,6 +46,10 @@ class ImageCanvas(QWidget):
         self._overlay_stars: list[tuple[float, float, float]] = []  # (x, y, mag) image-space
         self._show_wcs_overlay = False
 
+        # DSO annotation overlay
+        self._dso_annotations: list[tuple[float, float, str, str]] = []  # (x, y, name, type)
+        self._show_dso_overlay = False
+
     # ── Public API ───────────────────────────────────────────────────────────
 
     def set_image(self, rgb_array: np.ndarray, image_data: np.ndarray | None = None):
@@ -120,6 +124,15 @@ class ImageCanvas(QWidget):
         self._show_wcs_overlay = visible
         self.update()
 
+    def set_dso_annotations(self, annotations: list[tuple[float, float, str, str]]):
+        """Set DSO annotations. Each entry: (x_img, y_img, name, type_code)."""
+        self._dso_annotations = annotations
+        self.update()
+
+    def set_dso_overlay_visible(self, visible: bool):
+        self._show_dso_overlay = visible
+        self.update()
+
     # ── Paint ────────────────────────────────────────────────────────────────
 
     def paintEvent(self, event):
@@ -161,6 +174,10 @@ class ImageCanvas(QWidget):
         if self._show_wcs_overlay and self._overlay_stars:
             self._draw_wcs_overlay(painter, dst, pw, ph)
 
+        # Draw DSO annotation overlay
+        if self._show_dso_overlay and self._dso_annotations:
+            self._draw_dso_annotations(painter, dst, pw, ph)
+
         # Draw background sample points
         if self._sample_points or self._sample_mode:
             self._draw_sample_points(painter, dst, pw, ph)
@@ -186,6 +203,37 @@ class ImageCanvas(QWidget):
             if mag < 10.0:
                 painter.setPen(QPen(QColor(150, 220, 255, 180)))
                 painter.drawText(QPointF(wx + r + 2, wy + 4), f"{mag:.1f}")
+
+    def _draw_dso_annotations(self, painter: QPainter, dst: QRectF, pw: int, ph: int):
+        # Colour by object type
+        _type_colors = {
+            "G":   QColor(255, 200,  80, 220),   # galaxies — gold
+            "EN":  QColor(255, 100, 100, 220),   # emission nebulae — red
+            "PN":  QColor(100, 220, 255, 220),   # planetary nebulae — cyan
+            "SNR": QColor(255, 140,  60, 220),   # SNR — orange
+            "OC":  QColor(180, 255, 180, 220),   # open clusters — green
+            "GC":  QColor(200, 180, 255, 220),   # globular clusters — purple
+        }
+        font = QFont()
+        font.setPointSize(9)
+        font.setBold(True)
+        painter.setFont(font)
+
+        for x_img, y_img, name, type_code in self._dso_annotations:
+            wx = dst.left() + (x_img / pw) * dst.width()
+            wy = dst.top()  + (y_img / ph) * dst.height()
+            color = _type_colors.get(type_code, QColor(200, 200, 200, 200))
+
+            # Small circle marker
+            painter.setPen(QPen(color, 1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(QPointF(wx, wy), 6.0, 6.0)
+
+            # Name label with subtle drop-shadow
+            painter.setPen(QPen(QColor(0, 0, 0, 140), 1))
+            painter.drawText(QPointF(wx + 9, wy + 5), name)
+            painter.setPen(QPen(color))
+            painter.drawText(QPointF(wx + 8, wy + 4), name)
 
     def _draw_sample_points(self, painter: QPainter, dst: QRectF, pw: int, ph: int):
         for idx, (x_img, y_img) in enumerate(self._sample_points):

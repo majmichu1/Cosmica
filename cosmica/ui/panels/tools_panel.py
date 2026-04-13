@@ -175,6 +175,7 @@ class ToolsPanel(QWidget):
     run_mlt = pyqtSignal()
     run_lrgb_combine = pyqtSignal()
     run_spcc = pyqtSignal()
+    toggle_dso_overlay = pyqtSignal(bool)
     open_star_mask_dialog = pyqtSignal()
     open_subframe_selector = pyqtSignal()
 
@@ -1192,13 +1193,21 @@ class ToolsPanel(QWidget):
         self._btn_pcc.clicked.connect(self.run_pcc.emit)
         pcc_layout.addWidget(self._btn_pcc)
 
-        self._btn_wcs_overlay = QPushButton("Show WCS Overlay")
+        overlay_row = QHBoxLayout()
+        self._btn_wcs_overlay = QPushButton("Star Overlay")
         self._btn_wcs_overlay.setCheckable(True)
-        self._btn_wcs_overlay.setToolTip(
-            "Display catalog star positions on the image after plate solving"
-        )
+        self._btn_wcs_overlay.setToolTip("Display catalog star positions on the image")
         self._btn_wcs_overlay.toggled.connect(self.toggle_wcs_overlay.emit)
-        pcc_layout.addWidget(self._btn_wcs_overlay)
+        overlay_row.addWidget(self._btn_wcs_overlay)
+
+        self._btn_dso_overlay = QPushButton("DSO Labels")
+        self._btn_dso_overlay.setCheckable(True)
+        self._btn_dso_overlay.setToolTip(
+            "Overlay DSO names (NGC/Messier/IC) from embedded catalog after plate solve"
+        )
+        self._btn_dso_overlay.toggled.connect(self.toggle_dso_overlay.emit)
+        overlay_row.addWidget(self._btn_dso_overlay)
+        pcc_layout.addLayout(overlay_row)
 
         layout.addWidget(pcc_group)
 

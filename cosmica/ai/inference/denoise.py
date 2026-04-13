@@ -102,6 +102,29 @@ def _load_trained_model(prefer_best: bool = True) -> UNet | None:
     return None
 
 
+def _jinvariant_tile(
+    tile: torch.Tensor,
+    model: torch.nn.Module,
+    n_passes: int,
+    mask_ratio: float,
+) -> torch.Tensor:
+    """J-invariant inference on a single (1,1,H,W) tile tensor already on device."""
+    accum = torch.zeros_like(tile)
+    count = torch.zeros_like(tile)
+    with torch.no_grad():
+        for _ in range(n_passes):
+            mask = torch.rand_like(tile) < mask_ratio
+            masked = tile.clone()
+            masked[mask] = 0.0
+            pred = model(masked)
+            accum[mask] += pred[mask]
+            count[mask] += 1
+    result = tile.clone()
+    valid = count > 0
+    result[valid] = (accum[valid] / count[valid]).clamp(0, 1)
+    return result
+
+
 def _jinvariant_channel(
     data: np.ndarray,
     model: torch.nn.Module,
@@ -109,36 +132,62 @@ def _jinvariant_channel(
     device: torch.device,
     progress: ProgressCallback,
 ) -> np.ndarray:
-    """J-invariant inference on a single 2D channel (H, W).
+    """J-invariant inference on a single 2D channel (H, W) with tiled processing.
 
-    For each pixel, predict its value from surrounding context by averaging
-    multiple masked forward passes where that pixel was hidden.
-    Only predictions at masked positions are collected, guaranteeing that
-    the prediction for pixel j never uses pixel j's own noisy value.
+    Splits large images into overlapping tiles so inference fits in available
+    VRAM even while training is running in parallel.
     """
     h, w = data.shape
-    x = torch.from_numpy(data).unsqueeze(0).unsqueeze(0).to(device)  # (1,1,H,W)
+    tile_size = 256   # match training patch size exactly
+    overlap = 32      # ~12% overlap for smooth blending
 
-    accum = torch.zeros_like(x)
-    count = torch.zeros_like(x)
+    # If image fits comfortably, process in one shot
+    if h <= tile_size and w <= tile_size:
+        x = torch.from_numpy(data.copy()).unsqueeze(0).unsqueeze(0).to(device)
+        model.eval()
+        result = _jinvariant_tile(x, model, params.n_passes, params.mask_ratio)
+        return result.squeeze().cpu().numpy()
 
+    # Tiled processing with overlap blending
     model.eval()
-    with torch.no_grad():
-        for i in range(params.n_passes):
-            progress(i / params.n_passes, f"J-invariant pass {i+1}/{params.n_passes}…")
-            mask = torch.rand_like(x) < params.mask_ratio
-            masked = x.clone()
-            masked[mask] = 0.0
-            pred = model(masked)
-            accum[mask] += pred[mask]
-            count[mask] += 1
+    output = np.zeros((h, w), dtype=np.float32)
+    weight = np.zeros((h, w), dtype=np.float32)
 
-    # Build result: use J-invariant prediction where available, original elsewhere
-    result = x.clone()
-    valid = count > 0
-    result[valid] = (accum[valid] / count[valid]).clamp(0, 1)
+    ys = list(range(0, h - tile_size + 1, tile_size - overlap))
+    if ys[-1] + tile_size < h:
+        ys.append(h - tile_size)
+    xs = list(range(0, w - tile_size + 1, tile_size - overlap))
+    if xs[-1] + tile_size < w:
+        xs.append(w - tile_size)
 
-    return result.squeeze().cpu().numpy()
+    total_tiles = len(ys) * len(xs)
+    tile_idx = 0
+
+    for y0 in ys:
+        for x0 in xs:
+            y1, x1 = y0 + tile_size, x0 + tile_size
+            patch = data[y0:y1, x0:x1].copy()
+            t = torch.from_numpy(patch).unsqueeze(0).unsqueeze(0).to(device)
+            result_t = _jinvariant_tile(t, model, params.n_passes, params.mask_ratio)
+            result_np = result_t.squeeze().cpu().numpy()
+
+            # Cosine blending window to avoid seam artefacts
+            win_y = np.hanning(tile_size).astype(np.float32)
+            win_x = np.hanning(tile_size).astype(np.float32)
+            win = np.outer(win_y, win_x) + 1e-6
+
+            output[y0:y1, x0:x1] += result_np * win
+            weight[y0:y1, x0:x1] += win
+
+            tile_idx += 1
+            progress(tile_idx / total_tiles,
+                     f"J-invariant tile {tile_idx}/{total_tiles}…")
+
+            # Free tile memory explicitly
+            del t, result_t
+            torch.cuda.empty_cache()
+
+    return (output / weight).clip(0, 1)
 
 
 def _signal_blend(

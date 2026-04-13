@@ -474,6 +474,7 @@ class MainWindow(QMainWindow):
         tp.run_lrgb_combine.connect(self._on_run_lrgb_combine)
         tp.run_spcc.connect(self._on_run_spcc)
         tp.open_channel_combine_dialog.connect(self._on_open_channel_combine)
+        tp.preview_stretch_toggled.connect(self._on_preview_stretch_toggled)
 
         # Multi-session stacking
         tp.run_multi_session.connect(self._on_run_multi_session)
@@ -698,6 +699,10 @@ class MainWindow(QMainWindow):
         self._histogram.set_histogram_data(hist_data)
         self._update_curves_histogram(hist_data)
         self._sync_console_image()
+
+        # Reset preview-stretch button whenever a new image is displayed
+        if hasattr(self, "_tools_panel"):
+            self._tools_panel.reset_preview_stretch_button()
 
     def _update_curves_histogram(self, hist_data: dict | None = None):
         """Push histogram data into the curve editor if the show-histogram checkbox is on."""
@@ -2479,6 +2484,26 @@ class MainWindow(QMainWindow):
                 f"Combined channels: palette={dlg._palette_combo.currentText()}, "
                 f"shape={rgb.shape}", "info"
             )
+
+    @pyqtSlot(bool)
+    def _on_preview_stretch_toggled(self, enabled: bool):
+        """Non-destructive auto-stretch preview — data stays linear."""
+        if self._current_image is None:
+            return
+        if enabled:
+            # Show stretched copy on canvas, keep _current_image untouched
+            from cosmica.core.stretch import auto_stretch
+            params = self._tools_panel.get_stretch_params()
+            stretched = auto_stretch(self._current_image.data, params)
+            from cosmica.core.image_io import ImageData
+            self._canvas.set_image(ImageData(data=stretched, header=self._current_image.header.copy()))
+            self._log_panel.log(
+                "Preview stretch ON — canvas shows stretched view, data stays linear", "info"
+            )
+        else:
+            # Restore original linear display
+            self._display_image(self._current_image)
+            self._log_panel.log("Preview stretch OFF — showing linear data", "info")
 
     @pyqtSlot()
     def _on_run_local_contrast(self):

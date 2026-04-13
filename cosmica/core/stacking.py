@@ -782,6 +782,72 @@ def align_frames(
 
 
 # ---------------------------------------------------------------------------
+# GPU rejection helpers (used by stack_from_paths tiled path)
+# ---------------------------------------------------------------------------
+
+
+def _gpu_sigma_clip(
+    stack: torch.Tensor,
+    kappa_low: float,
+    kappa_high: float,
+    max_iter: int = 5,
+) -> tuple[torch.Tensor, int]:
+    """Iterative sigma clipping on GPU. stack shape: (N, ...).
+    Returns (mean of kept pixels, n_rejected).
+    """
+    mask = torch.ones_like(stack, dtype=torch.bool)  # True = keep
+
+    for _ in range(max_iter):
+        count = mask.sum(dim=0, keepdim=True).float().clamp(min=1)
+        mean = (stack * mask).sum(dim=0, keepdim=True) / count
+        # Variance of kept pixels
+        diff = stack - mean
+        var = (diff ** 2 * mask).sum(dim=0, keepdim=True) / count
+        std = var.sqrt().clamp(min=1e-8)
+
+        new_mask = mask & (diff >= -kappa_low * std) & (diff <= kappa_high * std)
+        if new_mask.sum() == mask.sum():
+            break
+        mask = new_mask
+
+    count = mask.sum(dim=0).float().clamp(min=1)
+    result = (stack * mask).sum(dim=0) / count
+    n_rejected = int((~mask).sum().item())
+    return result, n_rejected
+
+
+def _gpu_percentile_clip(
+    stack: torch.Tensor,
+    pct_low: float,
+    pct_high: float,
+) -> tuple[torch.Tensor, int]:
+    """Percentile clip on GPU. Clamps each pixel's value range."""
+    n = stack.shape[0]
+    lo = torch.quantile(stack, pct_low / 100.0, dim=0)
+    hi = torch.quantile(stack, 1.0 - pct_high / 100.0, dim=0)
+    mask = (stack >= lo.unsqueeze(0)) & (stack <= hi.unsqueeze(0))
+    count = mask.sum(dim=0).float().clamp(min=1)
+    result = (stack * mask).sum(dim=0) / count
+    n_rejected = int((~mask).sum().item())
+    return result, n_rejected
+
+
+def _gpu_min_max(
+    stack: torch.Tensor,
+    n_reject: int,
+) -> tuple[torch.Tensor, int]:
+    """Min/Max rejection on GPU — reject n_reject lowest and highest per pixel."""
+    n = stack.shape[0]
+    sorted_s, _ = stack.sort(dim=0)
+    kept = sorted_s[n_reject: n - n_reject]
+    if kept.shape[0] == 0:
+        kept = sorted_s
+    result = kept.mean(dim=0)
+    n_rejected = 2 * n_reject * int(stack[0].numel())
+    return result, n_rejected
+
+
+# ---------------------------------------------------------------------------
 # Tiled stacking from file paths (memory-efficient)
 # ---------------------------------------------------------------------------
 
@@ -896,9 +962,27 @@ def stack_from_paths(
         n_channels, h, w = ref_shape
         is_color = True
 
+    # Detect Bayer (OSC raw) — shape is 2D but camera is color
+    bayer_pat = None
+    try:
+        from astropy.io import fits as _fits
+        with _fits.open(str(paths[0]), memmap=True) as _hdul:
+            for _hdu in _hdul:
+                if _hdu.data is not None:
+                    for _kw in ("BAYERPAT", "COLORTYP", "CFA-PAT", "BAYER"):
+                        _bp = str(_hdu.header.get(_kw, "")).strip().upper()
+                        if _bp in ("RGGB", "BGGR", "GRBG", "GBRG"):
+                            bayer_pat = _bp
+                    break
+    except Exception:
+        pass
+
+    color_desc = f"color (C,H,W)" if is_color else (
+        f"OSC Bayer ({bayer_pat})" if bayer_pat else "mono"
+    )
     log.info(
-        "Stack from paths: %d files, shape=%s, color=%s",
-        n, ref_shape, is_color,
+        "Stack from paths: %d files, shape=%s, %s",
+        n, ref_shape, color_desc,
     )
 
     # 2. Compute per-frame normalization shifts from center crop
@@ -917,14 +1001,17 @@ def stack_from_paths(
             # MULTIPLICATIVE: handled as scale; skip for now (additive is most robust)
         log.debug("Normalization shifts: min=%.4f max=%.4f", shifts.min(), shifts.max())
 
-    # 3. Compute tile height so that (N × n_channels × tile_h × W × 4) ≤ ~350 MB
+    # 3. Compute tile height so that (N × n_channels × tile_h × W × 4) ≤ ~350 MB RAM
+    # GPU path moves each tile to VRAM after assembly, so RAM budget is per-tile only
+    dm = get_device_manager()
+    use_gpu = params.use_gpu and dm.device.type != "cpu"
     target_bytes = 350 * 1024 * 1024
     bytes_per_row = n * n_channels * w * 4
     tile_h = max(1, min(h, target_bytes // max(bytes_per_row, 1)))
     n_tiles = (h + tile_h - 1) // tile_h
     log.info(
-        "Tiled stacking: tile_h=%d rows, %d tiles, ~%d MB per tile",
-        tile_h, n_tiles, (bytes_per_row * tile_h) // (1024 * 1024),
+        "Tiled stacking: tile_h=%d rows, %d tiles, ~%d MB/tile, GPU=%s",
+        tile_h, n_tiles, (bytes_per_row * tile_h) // (1024 * 1024), use_gpu,
     )
 
     # 4. Allocate output
@@ -938,14 +1025,13 @@ def stack_from_paths(
     for tile_idx in range(n_tiles):
         y0 = tile_idx * tile_h
         y1 = min(y0 + tile_h, h)
-        actual_h = y1 - y0
 
         progress(
             0.05 + 0.90 * (tile_idx / n_tiles),
             f"Stacking tile {tile_idx + 1}/{n_tiles} (rows {y0}–{y1})…",
         )
 
-        # Load tile from each file
+        # Load tile from each file — disk → RAM one frame at a time
         tile_frames = []
         for i, p in enumerate(paths):
             try:
@@ -960,32 +1046,53 @@ def stack_from_paths(
 
         # Stack → (N, [C,] tile_h, W)
         tile_stack = np.array(tile_frames, dtype=np.float32)
-        del tile_frames  # free immediately
+        del tile_frames
 
-        # Rejection
-        if params.rejection == RejectionMethod.SIGMA_CLIP:
-            masked = _reject_sigma_clip(tile_stack, params.kappa_low, params.kappa_high, params.max_iterations)
-        elif params.rejection == RejectionMethod.WINSORIZED_SIGMA:
-            masked = _reject_winsorized_sigma(tile_stack, params.kappa_low, params.kappa_high, params.max_iterations, params.winsorize_cutoff)
-        elif params.rejection in (RejectionMethod.LINEAR_FIT, RejectionMethod.NONE):
-            masked = np.ma.array(tile_stack, mask=False)
-            if params.rejection == RejectionMethod.LINEAR_FIT:
-                masked = _reject_sigma_clip(tile_stack, params.kappa_low, params.kappa_high, params.max_iterations)
-        elif params.rejection == RejectionMethod.PERCENTILE_CLIP:
-            masked = _reject_percentile_clip(tile_stack, params.percentile_low, params.percentile_high)
-        elif params.rejection == RejectionMethod.ESD:
-            masked = _reject_esd(tile_stack)
-        elif params.rejection == RejectionMethod.MIN_MAX:
-            masked = _reject_min_max(tile_stack, params.min_max_reject)
+        if use_gpu and params.rejection in (
+            RejectionMethod.SIGMA_CLIP, RejectionMethod.WINSORIZED_SIGMA,
+            RejectionMethod.LINEAR_FIT, RejectionMethod.PERCENTILE_CLIP,
+            RejectionMethod.MIN_MAX, RejectionMethod.NONE,
+        ):
+            # GPU path: move tile to VRAM, do rejection+integration on GPU
+            t = torch.from_numpy(tile_stack).to(dm.device)
+            del tile_stack
+
+            if params.rejection in (RejectionMethod.SIGMA_CLIP, RejectionMethod.LINEAR_FIT):
+                result_t, n_rej = _gpu_sigma_clip(t, params.kappa_low, params.kappa_high, params.max_iterations)
+            elif params.rejection == RejectionMethod.WINSORIZED_SIGMA:
+                result_t, n_rej = _gpu_sigma_clip(t, params.kappa_low, params.kappa_high, params.max_iterations)
+            elif params.rejection == RejectionMethod.PERCENTILE_CLIP:
+                result_t, n_rej = _gpu_percentile_clip(t, params.percentile_low, params.percentile_high)
+            elif params.rejection == RejectionMethod.MIN_MAX:
+                result_t, n_rej = _gpu_min_max(t, params.min_max_reject)
+            else:  # NONE
+                result_t = t.mean(dim=0)
+                n_rej = 0
+
+            total_rejected += n_rej
+            tile_result = result_t.cpu().numpy()
+            del t, result_t
         else:
-            masked = np.ma.array(tile_stack, mask=False)
+            # CPU fallback (ESD and others not yet on GPU)
+            if params.rejection == RejectionMethod.SIGMA_CLIP:
+                masked = _reject_sigma_clip(tile_stack, params.kappa_low, params.kappa_high, params.max_iterations)
+            elif params.rejection == RejectionMethod.WINSORIZED_SIGMA:
+                masked = _reject_winsorized_sigma(tile_stack, params.kappa_low, params.kappa_high, params.max_iterations, params.winsorize_cutoff)
+            elif params.rejection == RejectionMethod.LINEAR_FIT:
+                masked = _reject_sigma_clip(tile_stack, params.kappa_low, params.kappa_high, params.max_iterations)
+            elif params.rejection == RejectionMethod.PERCENTILE_CLIP:
+                masked = _reject_percentile_clip(tile_stack, params.percentile_low, params.percentile_high)
+            elif params.rejection == RejectionMethod.ESD:
+                masked = _reject_esd(tile_stack)
+            elif params.rejection == RejectionMethod.MIN_MAX:
+                masked = _reject_min_max(tile_stack, params.min_max_reject)
+            else:
+                masked = np.ma.array(tile_stack, mask=False)
 
-        tile_mask = _get_mask(masked, tile_stack.shape)
-        total_rejected += int(np.sum(tile_mask))
-
-        # Integration
-        tile_result = _integrate(masked, params.integration)
-        del tile_stack, masked
+            tile_mask = _get_mask(masked, tile_stack.shape)
+            total_rejected += int(np.sum(tile_mask))
+            tile_result = _integrate(masked, params.integration)
+            del tile_stack, masked
 
         if is_color:
             output[:, y0:y1, :] = tile_result

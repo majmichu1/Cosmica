@@ -33,8 +33,8 @@ class TestAIDenoiseParams:
     def test_defaults(self):
         params = AIDenoiseParams()
         assert params.strength == 1.0
-        assert params.tile_size == 512
-        assert params.overlap == 64
+        assert params.tile_size == 256
+        assert params.overlap == 32
 
 
 class TestAIDenoise:
@@ -109,7 +109,8 @@ class TestAIDenoise:
 
     def test_progress_callback(self):
         model = _small_model()
-        data = _noisy_mono()
+        # Image must be larger than tile_size to exercise the tiled path (and progress)
+        data = _noisy_mono(h=128, w=128)
         calls = []
         def progress(frac, msg):
             calls.append((frac, msg))

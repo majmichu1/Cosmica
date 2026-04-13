@@ -44,8 +44,8 @@ class AIDenoiseParams:
     protect_threshold: float = 0.15  # pixels above this are treated as "signal"
     n_passes: int = 16           # J-invariant passes (more = smoother result)
     mask_ratio: float = 0.15     # must match training mask ratio
-    tile_size: int = 512
-    overlap: int = 64
+    tile_size: int = 256         # must match training patch size
+    overlap: int = 32
 
 
 def _load_trained_model(prefer_best: bool = True) -> UNet | None:
@@ -57,8 +57,8 @@ def _load_trained_model(prefer_best: bool = True) -> UNet | None:
     candidates = []
     if prefer_best:
         candidates.append(models_dir / "best_n2s_model.pt")
-    # Try checkpoints newest first
-    for i in range(10, 0, -1):
+    # Try checkpoints newest first (up to epoch 30)
+    for i in range(30, 0, -1):
         candidates.append(models_dir / f"checkpoint_epoch_{i}.pt")
     candidates.append(models_dir / "cosmica_denoise_n2s_v1.pt")
 
@@ -138,8 +138,8 @@ def _jinvariant_channel(
     VRAM even while training is running in parallel.
     """
     h, w = data.shape
-    tile_size = 256   # match training patch size exactly
-    overlap = 32      # ~12% overlap for smooth blending
+    tile_size = params.tile_size
+    overlap = params.overlap
 
     # If image fits comfortably, process in one shot
     if h <= tile_size and w <= tile_size:

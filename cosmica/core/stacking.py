@@ -71,6 +71,7 @@ class RegistrationMode(Enum):
     STAR_1_PASS = auto()      # GPU star detection → RANSAC → warp (single pass)
     STAR_2_PASS = auto()      # as above + refinement pass with tight radius
     FFT_TRANSLATION = auto()  # FFT phase cross-correlation (translation only)
+    COMET = auto()            # Track comet nucleus centroid; align by translation only
 
 
 class NormalizationMethod(Enum):
@@ -95,6 +96,7 @@ class StackingParams:
     min_max_reject: int = 1         # frames to reject at each extreme (MIN_MAX)
     upsample_factor: int = 10       # sub-pixel refinement for FFT alignment
     use_gpu: bool = True            # prefer GPU; falls back to CPU automatically
+    comet_nucleus_radius: int = 15  # search radius for nucleus peak (COMET mode)
 
 
 @dataclass
@@ -519,6 +521,128 @@ def _gpu_fft_shift(
 
 
 # ---------------------------------------------------------------------------
+# Comet Nucleus Tracking
+# ---------------------------------------------------------------------------
+
+
+def _find_comet_nucleus(
+    data: np.ndarray,
+    search_radius: int = 15,
+) -> tuple[float, float]:
+    """Find the comet nucleus position in an image.
+
+    Strategy:
+    1. Work on the 2-D luminance channel.
+    2. Apply a broad Gaussian blur to suppress stars and noise.
+    3. Find the brightest pixel (nucleus peak).
+    4. Compute centroid within `search_radius` pixels for sub-pixel accuracy.
+
+    Returns (cx, cy) — column, row centroid.
+    """
+    # Get 2-D luminance
+    if data.ndim == 3:
+        gray = data.mean(axis=0).astype(np.float32)
+    else:
+        gray = data.astype(np.float32)
+
+    h, w = gray.shape
+    # Blur out stars: σ ≈ 4 px is enough to smooth point sources
+    blur_k = max(3, (search_radius // 2) * 2 + 1)
+    try:
+        import cv2 as _cv2
+        blurred = _cv2.GaussianBlur(gray, (blur_k, blur_k), 0)
+    except Exception:
+        blurred = gray  # cv2 should always be present
+
+    # Peak pixel
+    peak_flat = int(np.argmax(blurred))
+    py, px = divmod(peak_flat, w)
+
+    # Centroid in a box around peak
+    r = search_radius
+    y0, y1 = max(0, py - r), min(h, py + r + 1)
+    x0, x1 = max(0, px - r), min(w, px + r + 1)
+    region = gray[y0:y1, x0:x1].astype(np.float64)
+
+    region_min = region.min()
+    region = region - region_min  # subtract local bg
+    total = region.sum()
+    if total < 1e-10:
+        return float(px), float(py)
+
+    ys, xs = np.mgrid[y0:y1, x0:x1]
+    cx = float((xs * region).sum() / total)
+    cy = float((ys * region).sum() / total)
+    return cx, cy
+
+
+def _comet_align_frames(
+    images: list[ImageData],
+    params: StackingParams,
+    progress: ProgressCallback,
+) -> list[ImageData]:
+    """Align frames by tracking the comet nucleus centroid.
+
+    All frames are shifted so their nuclei coincide with the nucleus
+    in the reference frame. No rotation or scale correction is applied.
+    """
+    n = len(images)
+    progress(0.0, "Finding comet nucleus in reference frame…")
+
+    # Reference = first frame (temporal ordering; the nucleus must be visible)
+    ref_img = images[0]
+    ref_cx, ref_cy = _find_comet_nucleus(ref_img.data, params.comet_nucleus_radius)
+    log.info("Comet nucleus (reference): (%.1f, %.1f)", ref_cx, ref_cy)
+
+    aligned: list[ImageData] = [ref_img]
+
+    for i in range(1, n):
+        progress(i / n, f"Comet alignment: frame {i + 1}/{n}…")
+        frame = images[i]
+        cx, cy = _find_comet_nucleus(frame.data, params.comet_nucleus_radius)
+        dx = ref_cx - cx
+        dy = ref_cy - cy
+        log.debug("Frame %d nucleus: (%.1f, %.1f), shift: (%.1f, %.1f)", i + 1, cx, cy, dx, dy)
+
+        # Apply translation with cv2.warpAffine
+        import cv2 as _cv2
+
+        M = np.float32([[1, 0, dx], [0, 1, dy]])
+        d = frame.data
+        if d.ndim == 2:
+            h, w = d.shape
+            shifted = _cv2.warpAffine(
+                d, M, (w, h),
+                flags=_cv2.INTER_LINEAR,
+                borderMode=_cv2.BORDER_CONSTANT,
+                borderValue=0.0,
+            )
+        else:
+            c, h, w = d.shape
+            shifted = np.stack(
+                [
+                    _cv2.warpAffine(
+                        d[ch], M, (w, h),
+                        flags=_cv2.INTER_LINEAR,
+                        borderMode=_cv2.BORDER_CONSTANT,
+                        borderValue=0.0,
+                    )
+                    for ch in range(c)
+                ],
+                axis=0,
+            )
+
+        aligned.append(ImageData(
+            data=shifted.astype(np.float32),
+            header=frame.header.copy(),
+            frame_type=frame.frame_type,
+        ))
+
+    progress(1.0, f"Comet alignment complete: {n} frames")
+    return aligned
+
+
+# ---------------------------------------------------------------------------
 # Star-Based Alignment (GPU + CPU paths)
 # ---------------------------------------------------------------------------
 
@@ -549,6 +673,9 @@ def align_frames(
         return _fft_align_frames(
             images, progress, params.upsample_factor, params.use_gpu
         )
+
+    if params.registration_mode == RegistrationMode.COMET:
+        return _comet_align_frames(images, params, progress)
 
     dm = get_device_manager()
     gpu_available = params.use_gpu and dm.device.type != "cpu"

@@ -206,6 +206,9 @@ class ToolsPanel(QWidget):
     multi_session_add_folder = pyqtSignal()
     multi_session_clear = pyqtSignal()
 
+    # Channel combine
+    open_channel_combine_dialog = pyqtSignal()
+
     # Smart Processor signals
     open_smart_processor = pyqtSignal()
     open_equipment_dialog = pyqtSignal()
@@ -505,13 +508,22 @@ class ToolsPanel(QWidget):
         )
 
         self._reg_mode_combo = QComboBox()
-        self._reg_mode_combo.addItems(["Star (1-Pass)", "Star (2-Pass)", "FFT Translation"])
+        self._reg_mode_combo.addItems(["Star (1-Pass)", "Star (2-Pass)", "FFT Translation", "Comet"])
         self._reg_mode_combo.setToolTip(
             "Star 1-Pass: GPU star detection + RANSAC, single pass.\n"
             "Star 2-Pass: as above with refinement pass (large rotations/drift).\n"
-            "FFT Translation: phase cross-correlation, GPU-accelerated (pure shift only)."
+            "FFT Translation: phase cross-correlation, GPU-accelerated (pure shift only).\n"
+            "Comet: track comet nucleus position, align by translation only."
         )
+        self._reg_mode_combo.currentIndexChanged.connect(self._on_reg_mode_changed)
         reg_layout.addLayout(_h_row("Mode:", self._reg_mode_combo))
+
+        self._comet_radius_spin = QSpinBox()
+        self._comet_radius_spin.setRange(5, 100)
+        self._comet_radius_spin.setValue(15)
+        self._comet_radius_spin.setToolTip("Search radius around peak for nucleus centroid (pixels)")
+        self._comet_radius_spin.setVisible(False)
+        reg_layout.addLayout(_h_row("Nucleus search radius:", self._comet_radius_spin))
 
         self._star_sens_spin = QDoubleSpinBox()
         self._star_sens_spin.setRange(1.0, 20.0)
@@ -1313,6 +1325,24 @@ class ToolsPanel(QWidget):
         self._btn_lrgb.clicked.connect(self.run_lrgb_combine.emit)
         lrgb_layout.addWidget(self._btn_lrgb)
         layout.addWidget(lrgb_group)
+
+        # --- Channel Combine (RGB / SHO / HOO) ---
+        cc_group = QGroupBox("Combine Channels (RGB / SHO / HOO)")
+        cc_layout = QVBoxLayout(cc_group)
+        cc_layout.addWidget(
+            _info_label(
+                "Combine separate mono Ha, OIII, SII, R, G, B images into a color composite. "
+                "Supports standard narrowband palettes (SHO, HSO, HOO, HOS) and custom RGB."
+            )
+        )
+        btn_cc = QPushButton("Combine Channels…")
+        btn_cc.setToolTip(
+            "Open the channel combine dialog to mix mono images into a color composite.\n"
+            "Supports SHO, HSO, HOO, HOS, and custom RGB palettes."
+        )
+        btn_cc.clicked.connect(self.open_channel_combine_dialog.emit)
+        cc_layout.addWidget(btn_cc)
+        layout.addWidget(cc_group)
 
         # --- SCNR ---
         scnr_group = QGroupBox("SCNR (Green Noise)")
@@ -2262,6 +2292,7 @@ class ToolsPanel(QWidget):
             0: RegistrationMode.STAR_1_PASS,
             1: RegistrationMode.STAR_2_PASS,
             2: RegistrationMode.FFT_TRANSLATION,
+            3: RegistrationMode.COMET,
         }
         kappa = self._kappa_spin.value()
         return StackingParams(
@@ -2276,6 +2307,7 @@ class ToolsPanel(QWidget):
             ),
             kappa_low=kappa,
             kappa_high=kappa,
+            comet_nucleus_radius=self._comet_radius_spin.value(),
         )
 
     def get_quality_filter_params(self) -> dict | None:
@@ -2291,6 +2323,10 @@ class ToolsPanel(QWidget):
             "top_percent": self._quality_percent_spin.value(),
             "rejection_sigma": self._quality_sigma_spin.value(),
         }
+
+    def _on_reg_mode_changed(self, index: int):
+        """Show comet nucleus radius spin only when Comet mode is selected."""
+        self._comet_radius_spin.setVisible(index == 3)
 
     def _on_quality_mode_changed(self, index: int):
         """Handle quality filter mode change - show/hide relevant spin boxes."""

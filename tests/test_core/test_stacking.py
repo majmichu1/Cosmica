@@ -218,3 +218,43 @@ class TestFFTAlignment:
         assert aligned.n_frames == 2
         # The stacked result should be close to the reference
         assert aligned.image.data.shape == base.shape
+
+
+class TestCometAlignment:
+    def test_comet_nucleus_found(self):
+        from cosmica.core.stacking import _find_comet_nucleus
+
+        frame = np.zeros((100, 100), dtype=np.float32)
+        frame[40, 60] = 1.0
+        cx, cy = _find_comet_nucleus(frame, 15)
+        assert abs(cx - 60) < 1.0
+        assert abs(cy - 40) < 1.0
+
+    def test_comet_aligns_shifted_frames(self):
+        from cosmica.core.stacking import _comet_align_frames
+
+        base = np.zeros((80, 80), dtype=np.float32)
+        base[40, 40] = 1.0  # nucleus at (40, 40)
+
+        shifted = np.zeros((80, 80), dtype=np.float32)
+        shifted[50, 45] = 1.0  # nucleus at (45, 50)
+
+        imgs = [ImageData(data=base), ImageData(data=shifted)]
+        params = StackingParams(
+            registration_mode=RegistrationMode.COMET,
+            comet_nucleus_radius=15,
+        )
+        aligned = _comet_align_frames(imgs, params, lambda f, m: None)
+        assert len(aligned) == 2
+        # After alignment, nucleus in frame 2 should be near (40, 40)
+        from cosmica.core.stacking import _find_comet_nucleus
+        cx, cy = _find_comet_nucleus(aligned[1].data, 15)
+        assert abs(cx - 40) < 2.0
+        assert abs(cy - 40) < 2.0
+
+    def test_comet_mode_in_registration_enum(self):
+        assert RegistrationMode.COMET is not None
+
+    def test_stacking_params_comet_radius(self):
+        p = StackingParams(registration_mode=RegistrationMode.COMET, comet_nucleus_radius=25)
+        assert p.comet_nucleus_radius == 25

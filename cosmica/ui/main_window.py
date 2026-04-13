@@ -470,6 +470,7 @@ class MainWindow(QMainWindow):
         tp.run_mlt.connect(self._on_run_mlt)
         tp.run_lrgb_combine.connect(self._on_run_lrgb_combine)
         tp.run_spcc.connect(self._on_run_spcc)
+        tp.open_channel_combine_dialog.connect(self._on_open_channel_combine)
 
         # Multi-session stacking
         tp.run_multi_session.connect(self._on_run_multi_session)
@@ -1327,6 +1328,8 @@ class MainWindow(QMainWindow):
         if self._current_image is None:
             return
         if not self._tools_panel.split_preview_enabled:
+            self._stretch_preview_timer.stop()
+            self._canvas.set_split_mode(False)
             self._canvas.clear_after_image()
             self._preview_indicator.setText("")
             return
@@ -1844,10 +1847,11 @@ class MainWindow(QMainWindow):
         if self._python_console_dock is None:
             console = PythonConsoleWidget()
             console.image_updated.connect(self._on_console_image_updated)
+            console.image_preview.connect(self._on_console_image_preview)
             dock = QDockWidget("Python Console", self)
             dock.setWidget(console)
-            dock.setMinimumWidth(500)
-            dock.setMinimumHeight(300)
+            dock.setMinimumWidth(560)
+            dock.setMinimumHeight(340)
             self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
             self._python_console_dock = dock
 
@@ -1870,6 +1874,17 @@ class MainWindow(QMainWindow):
             self._log_panel.log("apply() requires a numpy ndarray", "error")
             return
         self._update_current_image(arr, "Image updated from Python console")
+
+    @pyqtSlot(object)
+    def _on_console_image_preview(self, arr):
+        """Display array on canvas as a temporary preview without replacing current image."""
+        import numpy as _np
+        if not isinstance(arr, _np.ndarray):
+            return
+        arr = _np.clip(arr, 0, 1).astype(_np.float32)
+        from cosmica.core.image_io import ImageData
+        preview = ImageData(data=arr, header={})
+        self._display_image(preview)
 
     @pyqtSlot()
     def _on_open_star_mask(self):
@@ -2423,6 +2438,24 @@ class MainWindow(QMainWindow):
                 })
 
         self._start_worker(_lrgb_work, lum_data, rgb_path, params, on_done=_on_lrgb_done)
+
+    @pyqtSlot()
+    def _on_open_channel_combine(self):
+        from cosmica.ui.dialogs.channel_combine_dialog import ChannelCombineDialog
+
+        dlg = ChannelCombineDialog(
+            current_image=self._current_image,
+            parent=self,
+        )
+        if dlg.exec() and dlg.result_data() is not None:
+            rgb = dlg.result_data()
+            self._update_current_image(rgb, "Channel combine complete")
+            if self._project:
+                self._project.add_history("Channel Combine", {"palette": dlg._palette_combo.currentText()})
+            self._log_panel.log(
+                f"Combined channels: palette={dlg._palette_combo.currentText()}, "
+                f"shape={rgb.shape}", "info"
+            )
 
     @pyqtSlot()
     def _on_run_local_contrast(self):

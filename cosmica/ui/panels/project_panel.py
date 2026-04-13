@@ -78,7 +78,17 @@ class ProjectPanel(QWidget):
         files_layout = QVBoxLayout(files_widget)
         files_layout.setContentsMargins(0, 4, 0, 0)
 
-        # Import buttons
+        # Smart auto-import button
+        btn_auto = QPushButton("Auto-Import Folder…")
+        btn_auto.setToolTip(
+            "Scan a folder for FITS/XISF files and automatically assign frame types\n"
+            "from IMAGETYP/FRAME headers, filename patterns, and exposure time."
+        )
+        btn_auto.clicked.connect(self._import_folder_auto)
+        btn_auto.setStyleSheet("padding: 4px 8px; font-size: 11px; font-weight: bold;")
+        files_layout.addWidget(btn_auto)
+
+        # Manual import buttons
         btn_row = QHBoxLayout()
         for label, frame_type in [
             ("Lights", FrameType.LIGHT),
@@ -180,6 +190,88 @@ class ProjectPanel(QWidget):
         )
         if paths:
             self.frames_imported.emit([Path(p) for p in paths], frame_type)
+
+    def _import_folder_auto(self):
+        """Scan a folder, auto-detect frame types from headers, import all."""
+        from PyQt6.QtWidgets import QMessageBox
+        from pathlib import Path
+        import glob as _glob
+        from cosmica.core.image_io import _guess_frame_type
+
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Folder to Auto-Import", ""
+        )
+        if not folder:
+            return
+
+        folder = Path(folder)
+        extensions = ("*.fits", "*.fit", "*.fts", "*.xisf",
+                       "*.FITS", "*.FIT", "*.FTS", "*.XISF")
+        files = []
+        for ext in extensions:
+            files.extend(folder.glob(ext))
+            files.extend(folder.rglob(ext))
+        files = sorted(set(files))
+
+        if not files:
+            QMessageBox.information(self, "Auto-Import",
+                                    f"No FITS/XISF files found in:\n{folder}")
+            return
+
+        # Group by detected type
+        groups: dict[FrameType, list[Path]] = {}
+        unknown: list[Path] = []
+
+        for path in files:
+            try:
+                # Read just the header (fast — no pixel data)
+                header = {}
+                if path.suffix.lower() in (".fits", ".fit", ".fts"):
+                    try:
+                        from astropy.io import fits as _fits
+                        with _fits.open(str(path), memmap=True) as hdul:
+                            for hdu in hdul:
+                                if hdu.data is not None:
+                                    header = dict(hdu.header)
+                                    break
+                    except Exception:
+                        pass
+                ft = _guess_frame_type(header, path)
+                if ft == FrameType.UNKNOWN:
+                    unknown.append(path)
+                else:
+                    groups.setdefault(ft, []).append(path)
+            except Exception:
+                unknown.append(path)
+
+        # Emit per type group
+        total = 0
+        for ft, paths in groups.items():
+            self.frames_imported.emit(paths, ft)
+            total += len(paths)
+
+        # Unknown frames — ask user
+        if unknown:
+            reply = QMessageBox.question(
+                self,
+                "Auto-Import — Unknown Frames",
+                f"{len(unknown)} frame(s) could not be auto-detected.\n"
+                f"Import them as Light frames?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.frames_imported.emit(unknown, FrameType.LIGHT)
+                total += len(unknown)
+
+        summary = ", ".join(
+            f"{len(v)} {FRAME_TYPE_LABELS.get(k, k.name)}"
+            for k, v in groups.items()
+        )
+        QMessageBox.information(
+            self, "Auto-Import Complete",
+            f"Imported {total} frames:\n{summary or 'none detected'}"
+            + (f"\n{len(unknown)} unknown" if unknown else "")
+        )
 
     def _context_menu(self, pos):
         item = self._tree.itemAt(pos)

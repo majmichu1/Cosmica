@@ -648,24 +648,62 @@ def _png_mode(arr: np.ndarray) -> str:
 
 
 def _guess_frame_type(header: dict, path: Path) -> FrameType:
-    """Try to guess the frame type from FITS header or filename."""
-    # Check IMAGETYP header
-    img_type = str(header.get("IMAGETYP", "")).lower().strip()
+    """Try to guess the frame type from FITS header or filename.
+
+    Checks (in order):
+    1. IMAGETYP / FRAME header keyword (most reliable)
+    2. OBJECT header keyword patterns
+    3. Filename patterns
+    4. Exposure + readout patterns (0s exposure → bias, very short → bias/dark)
+    """
     type_map = {
         "light": FrameType.LIGHT,
+        "science": FrameType.LIGHT,
+        "object": FrameType.LIGHT,
         "dark": FrameType.DARK,
         "flat": FrameType.FLAT,
         "bias": FrameType.BIAS,
         "offset": FrameType.BIAS,
+        "calibration": FrameType.BIAS,  # rare but seen
     }
-    for key, ft in type_map.items():
-        if key in img_type:
+
+    # 1. IMAGETYP or FRAME keyword (SharpCap, SGP, NINA, MaxIm, etc.)
+    for kw in ("IMAGETYP", "FRAME", "EXPTYPE", "OBSTYPE"):
+        val = str(header.get(kw, "")).lower().strip()
+        if val:
+            for key, ft in type_map.items():
+                if key in val:
+                    return ft
+
+    # 2. OBJECT keyword — sometimes set to "Dark" or "Flat" by capture software
+    obj = str(header.get("OBJECT", "")).lower().strip()
+    for key, ft in [("dark", FrameType.DARK), ("flat", FrameType.FLAT),
+                    ("bias", FrameType.BIAS), ("offset", FrameType.BIAS)]:
+        if obj == key:
             return ft
 
-    # Check filename
+    # 3. Filename patterns (handles most common naming conventions)
     name = path.stem.lower()
-    for key, ft in type_map.items():
-        if key in name:
+    # Check longer patterns first to avoid partial matches
+    for pattern, ft in [
+        ("masterflat", FrameType.FLAT), ("master_flat", FrameType.FLAT),
+        ("masterdark", FrameType.DARK), ("master_dark", FrameType.DARK),
+        ("masterbias", FrameType.BIAS), ("master_bias", FrameType.BIAS),
+        ("_flat_", FrameType.FLAT), ("_dark_", FrameType.DARK),
+        ("_bias_", FrameType.BIAS), ("_light_", FrameType.LIGHT),
+        ("flat", FrameType.FLAT), ("dark", FrameType.DARK),
+        ("bias", FrameType.BIAS), ("offset", FrameType.BIAS),
+        ("light", FrameType.LIGHT),
+    ]:
+        if pattern in name:
             return ft
+
+    # 4. Heuristics from EXPTIME: 0s or very short → likely bias
+    try:
+        exptime = float(header.get("EXPTIME", header.get("EXPOSURE", -1)))
+        if exptime == 0.0:
+            return FrameType.BIAS
+    except (ValueError, TypeError):
+        pass
 
     return FrameType.UNKNOWN

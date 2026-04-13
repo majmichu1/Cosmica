@@ -168,6 +168,9 @@ class MainWindow(QMainWindow):
         # Python console dock (lazy init)
         self._python_console_dock = None
 
+        # Multi-session stacking
+        self._ms_sessions: list = []  # list of SessionGroup objects
+
         # Blink comparator
         self._blink_images: list = [None, None]  # [A, B] — display RGB uint8 arrays (H,W,3)
         self._blink_names: list[str] = ["", ""]
@@ -466,6 +469,11 @@ class MainWindow(QMainWindow):
         tp.run_mlt.connect(self._on_run_mlt)
         tp.run_lrgb_combine.connect(self._on_run_lrgb_combine)
         tp.run_spcc.connect(self._on_run_spcc)
+
+        # Multi-session stacking
+        tp.run_multi_session.connect(self._on_run_multi_session)
+        tp.multi_session_add_folder.connect(self._on_ms_add_folder)
+        tp.multi_session_clear.connect(self._on_ms_clear)
 
         # Blink comparator
         tp.blink_load_a.connect(lambda: self._blink_load_from_file(slot=0))
@@ -1165,6 +1173,128 @@ class MainWindow(QMainWindow):
         )
         if self._project:
             self._project.add_history("Stacking", {"n_frames": result.n_frames})
+            self._save_project()
+
+    # ── Multi-session stacking ────────────────────────────────────────────────
+
+    @pyqtSlot()
+    def _on_ms_add_folder(self):
+        """Let the user pick a folder of light frames as a new session."""
+        from PyQt6.QtWidgets import QFileDialog, QInputDialog
+        folder = QFileDialog.getExistingDirectory(self, "Select Session Folder", "")
+        if not folder:
+            return
+        from pathlib import Path
+        import glob as _glob
+        extensions = ("*.fits", "*.fit", "*.fts", "*.xisf", "*.FITS", "*.FIT", "*.FTS")
+        files = []
+        for ext in extensions:
+            files.extend(_glob.glob(str(Path(folder) / ext)))
+        if not files:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "No frames", f"No FITS/XISF files found in:\n{folder}")
+            return
+
+        # Ask user for a session name (default = folder name)
+        default_name = Path(folder).name
+        name, ok = QInputDialog.getText(self, "Session Name", "Name for this session:", text=default_name)
+        if not ok or not name.strip():
+            name = default_name
+
+        # Load frames
+        from cosmica.core.image_io import load_image
+        loaded = []
+        for fpath in sorted(files):
+            try:
+                img = load_image(fpath)
+                if img is not None:
+                    loaded.append(img)
+            except Exception as exc:
+                self._log_panel.log(f"Skipped {Path(fpath).name}: {exc}", "warning")
+
+        if not loaded:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Load failed", "Could not load any frames from the folder.")
+            return
+
+        from cosmica.core.multi_session import SessionGroup
+        # Estimate total integration time from headers
+        total_time = 0.0
+        for img in loaded:
+            exp = (img.header or {}).get("EXPTIME", (img.header or {}).get("EXPOSURE", None))
+            if exp is not None:
+                try:
+                    total_time += float(exp)
+                except (ValueError, TypeError):
+                    pass
+        session = SessionGroup(
+            frames=loaded,
+            name=name.strip(),
+            integration_time=total_time if total_time > 0 else None,
+        )
+        self._ms_sessions.append(session)
+        self._tools_panel.ms_add_session(name.strip(), len(loaded))
+        self._log_panel.log(f"Session '{name}': {len(loaded)} frames loaded", "success")
+
+    @pyqtSlot()
+    def _on_ms_clear(self):
+        self._ms_sessions.clear()
+
+    @pyqtSlot()
+    def _on_run_multi_session(self):
+        if len(self._ms_sessions) < 2:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self, "Multi-Session",
+                "Please add at least 2 sessions using 'Add Session…' before stacking."
+            )
+            return
+
+        ms_params_dict = self._tools_panel.get_multi_session_params()
+        stacking_params = self._tools_panel.get_stacking_params()
+
+        from cosmica.core.multi_session import MultiSessionParams, stack_multi_session
+        from cosmica.core.stacking import RejectionMethod, IntegrationMethod
+
+        ms_params = MultiSessionParams(
+            per_session_params=stacking_params,
+            weight_mode=ms_params_dict["weight_mode"],
+            normalize_background=ms_params_dict["normalize_background"],
+            align_sub_stacks=ms_params_dict["align_sub_stacks"],
+        )
+
+        sessions_snapshot = list(self._ms_sessions)
+        n = len(sessions_snapshot)
+        names = [s.name for s in sessions_snapshot]
+        self._log_panel.log(
+            f"Multi-session stacking: {n} sessions ({', '.join(names)})…", "info"
+        )
+
+        def _ms_work(sessions, params, progress=None):
+            from cosmica.core.multi_session import stack_multi_session as _ms
+            return _ms(sessions, params, progress=progress or (lambda f, m: None))
+
+        self._start_worker(_ms_work, sessions_snapshot, ms_params,
+                           on_done=self._on_multi_session_done)
+
+    @pyqtSlot(object)
+    def _on_multi_session_done(self, result):
+        self._display_image(result.image)
+        total_frames = sum(r.n_frames for r in result.sub_stacks)
+        weight_info = ", ".join(
+            f"{name}: {w:.2f}"
+            for name, w in zip(result.session_names, result.weights)
+        )
+        self._log_panel.log(
+            f"Multi-session complete: {result.n_sessions} sessions, "
+            f"{total_frames} total frames  [weights: {weight_info}]",
+            "success",
+        )
+        if self._project:
+            self._project.add_history(
+                "Multi-Session Stack",
+                {"n_sessions": result.n_sessions, "n_frames": total_frames},
+            )
             self._save_project()
 
     @pyqtSlot()

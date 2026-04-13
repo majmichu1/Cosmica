@@ -121,12 +121,16 @@ def normalize_stack(
 
     Parameters
     ----------
-    stack : ndarray, shape (N, H, W)
+    stack : ndarray, shape (N, H, W) or (N, C, H, W)
     method : NormalizationMethod
     """
     n = stack.shape[0]
     if n < 2 or method == NormalizationMethod.NONE:
         return stack
+
+    # Build broadcast shape: (N, 1, 1, ...) matching extra trailing dims
+    extra_dims = stack.ndim - 1  # number of non-N dimensions
+    broadcast = (slice(None),) + (None,) * extra_dims  # e.g. [:, None, None] or [:, None, None, None]
 
     flat = stack.reshape(n, -1)
     ref_med = float(np.median(flat[0]))
@@ -134,13 +138,13 @@ def normalize_stack(
     if method == NormalizationMethod.ADDITIVE:
         frame_meds = np.median(flat, axis=1)
         shifts = ref_med - frame_meds
-        return stack + shifts[:, None, None]
+        return stack + shifts[broadcast]
 
     if method == NormalizationMethod.MULTIPLICATIVE:
         frame_meds = np.median(flat, axis=1)
         safe_meds = np.where(np.abs(frame_meds) > 1e-8, frame_meds, 1.0)
         scales = ref_med / safe_meds
-        return stack * scales[:, None, None]
+        return stack * scales[broadcast]
 
     # ADDITIVE_SCALING (default): robust MAD-based scale + shift
     ref_mad = float(np.median(np.abs(flat[0] - ref_med))) * 1.4826
@@ -151,13 +155,13 @@ def normalize_stack(
         # Reference has no structure: offset-only correction
         shifts = ref_med - frame_meds
         log.debug("Normalization: offset-only (reference has no structure)")
-        return stack + shifts[:, None, None]
+        return stack + shifts[broadcast]
 
     safe_mads = np.maximum(frame_mads, 1e-8)
     scales = ref_mad / safe_mads
     shifts = ref_med - scales * frame_meds
     log.debug("Normalization: scale range [%.4f, %.4f]", scales.min(), scales.max())
-    return stack * scales[:, None, None] + shifts[:, None, None]
+    return stack * scales[broadcast] + shifts[broadcast]
 
 
 def normalize_stack_linear_fit(stack: np.ndarray) -> np.ndarray:

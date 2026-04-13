@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QListWidget,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -198,6 +199,11 @@ class ToolsPanel(QWidget):
     # Preview signal: emitted with tool name when preview is requested
     preview_requested = pyqtSignal(str)  # tool_name
     preview_cancelled = pyqtSignal()
+
+    # Multi-session stacking
+    run_multi_session = pyqtSignal()
+    multi_session_add_folder = pyqtSignal()
+    multi_session_clear = pyqtSignal()
 
     # Smart Processor signals
     open_smart_processor = pyqtSignal()
@@ -699,6 +705,60 @@ class ToolsPanel(QWidget):
         self._drizzle_drop_spin.setEnabled(False)
 
         layout.addWidget(drizzle_group)
+
+        # --- Multi-Session / Multi-Setup Integration ---
+        ms_group = QGroupBox("Multi-Session Integration")
+        ms_layout = QVBoxLayout(ms_group)
+        ms_layout.addWidget(_info_label(
+            "Stack frames from different telescopes, cameras, or nights into one image. "
+            "Each session is stacked independently then combined with weighted integration."
+        ))
+
+        self._ms_session_list = QListWidget()
+        self._ms_session_list.setMaximumHeight(90)
+        self._ms_session_list.setToolTip("Sessions to integrate. Each session = one folder of frames.")
+        ms_layout.addWidget(self._ms_session_list)
+
+        ms_btn_row = QHBoxLayout()
+        btn_ms_add = QPushButton("Add Session…")
+        btn_ms_add.setToolTip("Add a folder of light frames as a new session")
+        btn_ms_add.clicked.connect(self.multi_session_add_folder.emit)
+        ms_btn_row.addWidget(btn_ms_add)
+        btn_ms_clear = QPushButton("Clear All")
+        btn_ms_clear.clicked.connect(self._on_ms_clear)
+        ms_btn_row.addWidget(btn_ms_clear)
+        ms_layout.addLayout(ms_btn_row)
+
+        self._ms_weight_combo = QComboBox()
+        self._ms_weight_combo.addItems(["SNR (recommended)", "Integration time", "Equal weight"])
+        self._ms_weight_combo.setToolTip(
+            "SNR: weight each session by estimated signal-to-noise (best for mixed setups).\n"
+            "Integration time: weight by total exposure — requires EXPTIME headers.\n"
+            "Equal: all sessions contribute equally regardless of depth."
+        )
+        ms_layout.addLayout(_h_row("Weighting:", self._ms_weight_combo))
+
+        self._ms_normalize_check = QCheckBox("Normalize background across sessions")
+        self._ms_normalize_check.setChecked(True)
+        self._ms_normalize_check.setToolTip(
+            "Match sky background level between sessions before integrating. "
+            "Recommended when sessions have different sky brightness."
+        )
+        ms_layout.addWidget(self._ms_normalize_check)
+
+        self._ms_align_check = QCheckBox("Align sub-stacks")
+        self._ms_align_check.setChecked(True)
+        self._ms_align_check.setToolTip(
+            "Star-align the per-session stacks to each other before final integration."
+        )
+        ms_layout.addWidget(self._ms_align_check)
+
+        self._btn_ms_stack = QPushButton("Stack All Sessions")
+        self._btn_ms_stack.setToolTip("Stack each session then combine with weighted integration")
+        self._btn_ms_stack.clicked.connect(self.run_multi_session.emit)
+        self._btn_ms_stack.setEnabled(False)
+        ms_layout.addWidget(self._btn_ms_stack)
+        layout.addWidget(ms_group)
 
         # --- Batch Processing ---
         batch_group = QGroupBox("Batch Processing")
@@ -2272,6 +2332,29 @@ class ToolsPanel(QWidget):
         self._quality_sigma_spin.setEnabled(
             checked and self._quality_mode_combo.currentIndex() == 2
         )
+
+    # ── Multi-session helpers ─────────────────────────────────────────────────
+
+    def _on_ms_clear(self):
+        self._ms_session_list.clear()
+        self._btn_ms_stack.setEnabled(False)
+        self.multi_session_clear.emit()
+
+    def ms_add_session(self, name: str, n_frames: int):
+        """Called by main_window after loading a session folder."""
+        self._ms_session_list.addItem(f"{name}  [{n_frames} frames]")
+        self._btn_ms_stack.setEnabled(self._ms_session_list.count() >= 2)
+
+    def ms_session_count(self) -> int:
+        return self._ms_session_list.count()
+
+    def get_multi_session_params(self) -> dict:
+        weight_map = {0: "snr", 1: "time", 2: "equal"}
+        return {
+            "weight_mode": weight_map.get(self._ms_weight_combo.currentIndex(), "snr"),
+            "normalize_background": self._ms_normalize_check.isChecked(),
+            "align_sub_stacks": self._ms_align_check.isChecked(),
+        }
 
     def get_alignment_params(self) -> dict:
         mode_map = {

@@ -590,6 +590,29 @@ class ToolsPanel(QWidget):
         self._ransac_thresh_spin.setToolTip("RANSAC inlier threshold for transform estimation")
         reg_layout.addLayout(_h_row("RANSAC Threshold:", self._ransac_thresh_spin))
 
+        # --- Reference frame selection ---
+        self._ref_frame_combo = QComboBox()
+        self._ref_frame_combo.addItems([
+            "Auto (best quality)",
+            "First frame",
+            "Last frame",
+            "Specific frame #",
+        ])
+        self._ref_frame_combo.setToolTip(
+            "Auto: picks the frame with the most stars / highest variance.\n"
+            "First / Last: use temporal position.\n"
+            "Specific #: enter any frame number manually."
+        )
+        self._ref_frame_combo.currentIndexChanged.connect(self._on_ref_frame_mode_changed)
+        reg_layout.addLayout(_h_row("Reference frame:", self._ref_frame_combo))
+
+        self._ref_frame_spin = QSpinBox()
+        self._ref_frame_spin.setRange(1, 9999)
+        self._ref_frame_spin.setValue(1)
+        self._ref_frame_spin.setToolTip("1-based frame number to use as alignment reference")
+        self._ref_frame_spin.setVisible(False)
+        reg_layout.addLayout(_h_row("Frame #:", self._ref_frame_spin))
+
         self._btn_align = QPushButton("Align Frames")
         self._btn_align.setToolTip("Detect stars and align all frames without stacking")
         self._btn_align.clicked.connect(self.run_alignment.emit)
@@ -2357,6 +2380,17 @@ class ToolsPanel(QWidget):
             2: RegistrationMode.FFT_TRANSLATION,
             3: RegistrationMode.COMET,
         }
+        # Reference frame index: -1=auto, 0=first, -2=last, or 1-based user input → 0-based
+        ref_mode = self._ref_frame_combo.currentIndex()
+        if ref_mode == 0:
+            ref_idx = -1       # auto
+        elif ref_mode == 1:
+            ref_idx = 0        # first
+        elif ref_mode == 2:
+            ref_idx = -2       # last (sentinel, handled below in align_frames)
+        else:
+            ref_idx = self._ref_frame_spin.value() - 1  # convert 1-based → 0-based
+
         kappa = self._kappa_spin.value()
         return StackingParams(
             rejection=rejection_map.get(
@@ -2371,6 +2405,7 @@ class ToolsPanel(QWidget):
             kappa_low=kappa,
             kappa_high=kappa,
             comet_nucleus_radius=self._comet_radius_spin.value(),
+            reference_frame_index=ref_idx,
         )
 
     def get_quality_filter_params(self) -> dict | None:
@@ -2404,6 +2439,14 @@ class ToolsPanel(QWidget):
     def _on_reg_mode_changed(self, index: int):
         """Show comet nucleus radius spin only when Comet mode is selected."""
         self._comet_radius_spin.setVisible(index == 3)
+
+    def _on_ref_frame_mode_changed(self, index: int):
+        """Show frame number spin only when 'Specific frame #' is selected."""
+        self._ref_frame_spin.setVisible(index == 3)
+
+    def set_ref_frame_max(self, n_frames: int):
+        """Called by main window to update the max value when frames are loaded."""
+        self._ref_frame_spin.setMaximum(max(1, n_frames))
 
     def _on_quality_mode_changed(self, index: int):
         """Handle quality filter mode change - show/hide relevant spin boxes."""
@@ -2449,12 +2492,24 @@ class ToolsPanel(QWidget):
             0: RegistrationMode.STAR_1_PASS,
             1: RegistrationMode.STAR_2_PASS,
             2: RegistrationMode.FFT_TRANSLATION,
+            3: RegistrationMode.COMET,
         }
+        ref_mode = self._ref_frame_combo.currentIndex()
+        if ref_mode == 0:
+            ref_idx = -1
+        elif ref_mode == 1:
+            ref_idx = 0
+        elif ref_mode == 2:
+            ref_idx = -2
+        else:
+            ref_idx = self._ref_frame_spin.value() - 1
         return {
             "mode": mode_map.get(self._reg_mode_combo.currentIndex(), RegistrationMode.STAR_1_PASS),
             "star_sensitivity": self._star_sens_spin.value(),
             "max_match_distance": self._max_shift_spin.value(),
             "ransac_threshold": self._ransac_thresh_spin.value(),
+            "reference_frame_index": ref_idx,
+            "comet_nucleus_radius": self._comet_radius_spin.value(),
         }
 
     def get_stretch_params(self) -> StretchParams:

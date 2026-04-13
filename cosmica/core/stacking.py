@@ -97,6 +97,7 @@ class StackingParams:
     upsample_factor: int = 10       # sub-pixel refinement for FFT alignment
     use_gpu: bool = True            # prefer GPU; falls back to CPU automatically
     comet_nucleus_radius: int = 15  # search radius for nucleus peak (COMET mode)
+    reference_frame_index: int = -1 # -1 = auto (highest variance), ≥0 = explicit index
 
 
 @dataclass
@@ -680,10 +681,17 @@ def align_frames(
     dm = get_device_manager()
     gpu_available = params.use_gpu and dm.device.type != "cpu"
 
-    # Select reference frame by variance
+    # Select reference frame
     progress(0.0, "Selecting reference frame...")
-    ref_idx = int(np.argmax([np.var(img.data) for img in images]))
-    log.info("Star alignment: reference frame #%d", ref_idx + 1)
+    if params.reference_frame_index == -2:
+        ref_idx = n - 1
+        log.info("Star alignment: using last frame (#%d) as reference", ref_idx + 1)
+    elif params.reference_frame_index >= 0:
+        ref_idx = max(0, min(params.reference_frame_index, n - 1))
+        log.info("Star alignment: using user-specified reference frame #%d", ref_idx + 1)
+    else:
+        ref_idx = int(np.argmax([np.var(img.data) for img in images]))
+        log.info("Star alignment: auto-selected reference frame #%d (highest variance)", ref_idx + 1)
     progress(0.1, f"Reference: frame #{ref_idx + 1}")
 
     ref_img = images[ref_idx]

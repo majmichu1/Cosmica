@@ -1047,6 +1047,7 @@ class MainWindow(QMainWindow):
             return
         lights = self._apply_quality_filter(lights)
 
+        self._tools_panel.set_ref_frame_max(len(lights))
         params = self._tools_panel.get_alignment_params()
 
         self._log_panel.log(f"Starting alignment ({params['mode'].name})...", "info")
@@ -1054,7 +1055,11 @@ class MainWindow(QMainWindow):
         self._start_worker(
             align_frames,
             lights,
-            params=StackingParams(registration_mode=params["mode"]),
+            params=StackingParams(
+                registration_mode=params["mode"],
+                reference_frame_index=params["reference_frame_index"],
+                comet_nucleus_radius=params.get("comet_nucleus_radius", 15),
+            ),
             on_done=self._on_alignment_done,
         )
 

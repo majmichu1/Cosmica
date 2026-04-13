@@ -5,9 +5,9 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from PyQt6.QtCore import QPoint, QPointF, QRectF, Qt, pyqtSignal
+from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QImage, QMouseEvent, QPainter, QPen, QPixmap, QWheelEvent
-from PyQt6.QtWidgets import QWidget
+from PyQt6.QtWidgets import QRubberBand, QWidget
 
 
 class ImageCanvas(QWidget):
@@ -17,6 +17,7 @@ class ImageCanvas(QWidget):
     cursor_position = pyqtSignal(int, int, list)  # x, y, pixel values
     sample_placed = pyqtSignal(float, float)       # image-space x, y
     sample_removed = pyqtSignal(float, float)      # image-space x, y (nearest)
+    crop_rect_selected = pyqtSignal(int, int, int, int)  # x, y, w, h in image-space
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -49,6 +50,11 @@ class ImageCanvas(QWidget):
         # DSO annotation overlay
         self._dso_annotations: list[tuple[float, float, str, str]] = []  # (x, y, name, type)
         self._show_dso_overlay = False
+
+        # Crop selection mode
+        self._crop_mode = False
+        self._crop_rubber_band: QRubberBand | None = None
+        self._crop_origin: QPoint = QPoint()
 
     # ── Public API ───────────────────────────────────────────────────────────
 
@@ -132,6 +138,20 @@ class ImageCanvas(QWidget):
     def set_dso_overlay_visible(self, visible: bool):
         self._show_dso_overlay = visible
         self.update()
+
+    # ── Crop selection mode ───────────────────────────────────────────────────
+
+    def set_crop_mode(self, enabled: bool):
+        """Enter/exit interactive crop selection mode.
+
+        While active the user draws a rectangle on the canvas; on mouse-release
+        :attr:`crop_rect_selected` is emitted with image-space (x, y, w, h).
+        """
+        self._crop_mode = enabled
+        if not enabled:
+            if self._crop_rubber_band:
+                self._crop_rubber_band.hide()
+        self.setCursor(Qt.CursorShape.CrossCursor if enabled else Qt.CursorShape.ArrowCursor)
 
     # ── Paint ────────────────────────────────────────────────────────────────
 
@@ -263,6 +283,14 @@ class ImageCanvas(QWidget):
     def mousePressEvent(self, event: QMouseEvent):
         img_pos = self._widget_to_image(event.position())
 
+        if self._crop_mode and event.button() == Qt.MouseButton.LeftButton:
+            self._crop_origin = event.pos()
+            if self._crop_rubber_band is None:
+                self._crop_rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self)
+            self._crop_rubber_band.setGeometry(QRect(self._crop_origin, self._crop_origin))
+            self._crop_rubber_band.show()
+            return
+
         if self._sample_mode and img_pos is not None:
             if event.button() == Qt.MouseButton.LeftButton:
                 self.sample_placed.emit(img_pos.x(), img_pos.y())
@@ -280,6 +308,12 @@ class ImageCanvas(QWidget):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
     def mouseMoveEvent(self, event: QMouseEvent):
+        if self._crop_mode and self._crop_rubber_band and self._crop_rubber_band.isVisible():
+            self._crop_rubber_band.setGeometry(
+                QRect(self._crop_origin, event.pos()).normalized()
+            )
+            return
+
         if self._dragging:
             delta = event.pos() - self._drag_start
             self._pan_offset += QPointF(delta.x(), delta.y())
@@ -300,6 +334,23 @@ class ImageCanvas(QWidget):
                     self.cursor_position.emit(ix, iy, vals)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
+        if self._crop_mode and self._crop_rubber_band and self._crop_rubber_band.isVisible():
+            if event.button() == Qt.MouseButton.LeftButton:
+                rect = QRect(self._crop_origin, event.pos()).normalized()
+                self._crop_rubber_band.hide()
+                # Convert widget-space rect corners to image-space
+                tl = self._widget_to_image(QPointF(rect.left(), rect.top()))
+                br = self._widget_to_image(QPointF(rect.right(), rect.bottom()))
+                if tl is not None and br is not None:
+                    x = max(0, int(tl.x()))
+                    y = max(0, int(tl.y()))
+                    w = max(1, int(br.x()) - x)
+                    h = max(1, int(br.y()) - y)
+                    self.crop_rect_selected.emit(x, y, w, h)
+                # Exit crop mode automatically after selection
+                self.set_crop_mode(False)
+            return
+
         if self._dragging:
             self._dragging = False
             cursor = Qt.CursorShape.CrossCursor if self._sample_mode else Qt.CursorShape.ArrowCursor

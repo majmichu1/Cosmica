@@ -189,6 +189,7 @@ class ToolsPanel(QWidget):
     blink_fps_changed = pyqtSignal(int)   # FPS changed
 
     # Transform signals
+    start_crop_draw = pyqtSignal()   # activate interactive crop rectangle on canvas
     run_crop = pyqtSignal()
     run_rotate = pyqtSignal()
     run_flip = pyqtSignal()
@@ -274,56 +275,26 @@ class ToolsPanel(QWidget):
             )
         )
 
-        # Bias
-        bias_row = QHBoxLayout()
-        self._cal_bias_label = QLabel("Bias: none")
-        self._cal_bias_label.setStyleSheet("font-size: 11px; color: #aaa;")
-        bias_row.addWidget(self._cal_bias_label, 1)
-        btn_bias_folder = QPushButton("Folder…")
-        btn_bias_folder.setFixedWidth(56)
-        btn_bias_folder.setToolTip("Load bias frames folder — master will be created automatically")
-        btn_bias_folder.clicked.connect(lambda: self._cal_load_folder("bias"))
-        bias_row.addWidget(btn_bias_folder)
-        btn_bias_master = QPushButton("Master…")
-        btn_bias_master.setFixedWidth(56)
-        btn_bias_master.setToolTip("Load a pre-made master bias FITS file")
-        btn_bias_master.clicked.connect(lambda: self._cal_load_master("bias"))
-        bias_row.addWidget(btn_bias_master)
-        cal_layout.addLayout(bias_row)
+        def _cal_row(label_text: str, frame_type: str) -> tuple:
+            """Build a two-line calibration row: status label + Folder/Master buttons."""
+            lbl = QLabel(label_text)
+            lbl.setStyleSheet("font-size: 11px; color: #aaa;")
+            cal_layout.addWidget(lbl)
+            btn_row = QHBoxLayout()
+            btn_folder = QPushButton("Folder…")
+            btn_folder.setToolTip(f"Load {frame_type} frames folder — master will be auto-created")
+            btn_folder.clicked.connect(lambda: self._cal_load_folder(frame_type))
+            btn_row.addWidget(btn_folder)
+            btn_master = QPushButton("Master…")
+            btn_master.setToolTip(f"Load a pre-made master {frame_type} FITS file")
+            btn_master.clicked.connect(lambda: self._cal_load_master(frame_type))
+            btn_row.addWidget(btn_master)
+            cal_layout.addLayout(btn_row)
+            return lbl
 
-        # Dark
-        dark_row = QHBoxLayout()
-        self._cal_dark_label = QLabel("Dark: none")
-        self._cal_dark_label.setStyleSheet("font-size: 11px; color: #aaa;")
-        dark_row.addWidget(self._cal_dark_label, 1)
-        btn_dark_folder = QPushButton("Folder…")
-        btn_dark_folder.setFixedWidth(56)
-        btn_dark_folder.setToolTip("Load dark frames folder — master will be created automatically")
-        btn_dark_folder.clicked.connect(lambda: self._cal_load_folder("dark"))
-        dark_row.addWidget(btn_dark_folder)
-        btn_dark_master = QPushButton("Master…")
-        btn_dark_master.setFixedWidth(56)
-        btn_dark_master.setToolTip("Load a pre-made master dark FITS file")
-        btn_dark_master.clicked.connect(lambda: self._cal_load_master("dark"))
-        dark_row.addWidget(btn_dark_master)
-        cal_layout.addLayout(dark_row)
-
-        # Flat
-        flat_row = QHBoxLayout()
-        self._cal_flat_label = QLabel("Flat: none")
-        self._cal_flat_label.setStyleSheet("font-size: 11px; color: #aaa;")
-        flat_row.addWidget(self._cal_flat_label, 1)
-        btn_flat_folder = QPushButton("Folder…")
-        btn_flat_folder.setFixedWidth(56)
-        btn_flat_folder.setToolTip("Load flat frames folder — master will be created automatically")
-        btn_flat_folder.clicked.connect(lambda: self._cal_load_folder("flat"))
-        flat_row.addWidget(btn_flat_folder)
-        btn_flat_master = QPushButton("Master…")
-        btn_flat_master.setFixedWidth(56)
-        btn_flat_master.setToolTip("Load a pre-made master flat FITS file")
-        btn_flat_master.clicked.connect(lambda: self._cal_load_master("flat"))
-        flat_row.addWidget(btn_flat_master)
-        cal_layout.addLayout(flat_row)
+        self._cal_bias_label = _cal_row("Bias: none", "bias")
+        self._cal_dark_label = _cal_row("Dark: none", "dark")
+        self._cal_flat_label = _cal_row("Flat: none", "flat")
 
         cal_layout.addWidget(_info_label("Light frames: add via Project panel → Import Lights"))
 
@@ -402,6 +373,14 @@ class ToolsPanel(QWidget):
         crop_group = QGroupBox("Crop")
         crop_layout = QVBoxLayout(crop_group)
         crop_layout.addWidget(_info_label("Crop image to a rectangular region."))
+
+        self._btn_crop_draw = QPushButton("Draw on Image…")
+        self._btn_crop_draw.setToolTip(
+            "Click and drag a rectangle on the image to set the crop region"
+        )
+        self._btn_crop_draw.setCheckable(True)
+        self._btn_crop_draw.clicked.connect(self._on_crop_draw_clicked)
+        crop_layout.addWidget(self._btn_crop_draw)
 
         self._crop_x_spin = QSpinBox()
         self._crop_x_spin.setRange(0, 99999)
@@ -1248,7 +1227,7 @@ class ToolsPanel(QWidget):
         pcc_row2.addWidget(self._pcc_solver_combo)
         pcc_layout.addLayout(pcc_row2)
 
-        self._btn_pcc = QPushButton("Solve & Calibrate (PCC)")
+        self._btn_pcc = QPushButton("Solve && Calibrate (PCC)")
         self._btn_pcc.setToolTip("Plate-solve and perform photometric color calibration")
         self._btn_pcc.clicked.connect(self.run_pcc.emit)
         pcc_layout.addWidget(self._btn_pcc)
@@ -1327,7 +1306,7 @@ class ToolsPanel(QWidget):
         self._lrgb_chroma_spin.setToolTip("Gaussian blur on chroma (a/b) channels to reduce color noise")
         lrgb_layout.addLayout(_h_row("Chroma denoise:", self._lrgb_chroma_spin))
 
-        self._btn_lrgb = QPushButton("Load RGB & Combine…")
+        self._btn_lrgb = QPushButton("Load RGB && Combine…")
         self._btn_lrgb.setToolTip(
             "Current image = Luminance. Opens a file picker for the RGB image."
         )
@@ -2046,40 +2025,36 @@ class ToolsPanel(QWidget):
         ))
 
         # Slot A
-        a_row = QHBoxLayout()
         self._blink_a_label = QLabel("A: —")
         self._blink_a_label.setStyleSheet("font-size: 11px; color: #aaa;")
         self._blink_a_label.setWordWrap(True)
-        a_row.addWidget(self._blink_a_label, 1)
-        btn_a_file = QPushButton("File…")
-        btn_a_file.setFixedWidth(48)
+        blink_layout.addWidget(self._blink_a_label)
+        a_btn_row = QHBoxLayout()
+        btn_a_file = QPushButton("Load File…")
         btn_a_file.setToolTip("Load Image A from file")
         btn_a_file.clicked.connect(self.blink_load_a.emit)
-        a_row.addWidget(btn_a_file)
-        btn_a_cur = QPushButton("Current")
-        btn_a_cur.setFixedWidth(60)
+        a_btn_row.addWidget(btn_a_file)
+        btn_a_cur = QPushButton("Use Current")
         btn_a_cur.setToolTip("Use current canvas image as A")
         btn_a_cur.clicked.connect(self.blink_use_current_as_a.emit)
-        a_row.addWidget(btn_a_cur)
-        blink_layout.addLayout(a_row)
+        a_btn_row.addWidget(btn_a_cur)
+        blink_layout.addLayout(a_btn_row)
 
         # Slot B
-        b_row = QHBoxLayout()
         self._blink_b_label = QLabel("B: —")
         self._blink_b_label.setStyleSheet("font-size: 11px; color: #aaa;")
         self._blink_b_label.setWordWrap(True)
-        b_row.addWidget(self._blink_b_label, 1)
-        btn_b_file = QPushButton("File…")
-        btn_b_file.setFixedWidth(48)
+        blink_layout.addWidget(self._blink_b_label)
+        b_btn_row = QHBoxLayout()
+        btn_b_file = QPushButton("Load File…")
         btn_b_file.setToolTip("Load Image B from file")
         btn_b_file.clicked.connect(self.blink_load_b.emit)
-        b_row.addWidget(btn_b_file)
-        btn_b_cur = QPushButton("Current")
-        btn_b_cur.setFixedWidth(60)
+        b_btn_row.addWidget(btn_b_file)
+        btn_b_cur = QPushButton("Use Current")
         btn_b_cur.setToolTip("Use current canvas image as B")
         btn_b_cur.clicked.connect(self.blink_use_current_as_b.emit)
-        b_row.addWidget(btn_b_cur)
-        blink_layout.addLayout(b_row)
+        b_btn_row.addWidget(btn_b_cur)
+        blink_layout.addLayout(b_btn_row)
 
         # FPS + toggle
         ctrl_row = QHBoxLayout()
@@ -2691,6 +2666,23 @@ class ToolsPanel(QWidget):
         return AISharpenParams(
             strength=self._ais_strength_slider.value() / 100.0,
         )
+
+    def _on_crop_draw_clicked(self, checked: bool):
+        if checked:
+            self._btn_crop_draw.setText("Cancel Draw")
+        else:
+            self._btn_crop_draw.setText("Draw on Image…")
+        self.start_crop_draw.emit()
+
+    def set_crop_from_rect(self, x: int, y: int, w: int, h: int):
+        """Called by main_window after the user draws a crop rect on the canvas."""
+        self._crop_x_spin.setValue(x)
+        self._crop_y_spin.setValue(y)
+        self._crop_w_spin.setValue(w)
+        self._crop_h_spin.setValue(h)
+        # Reset the button state (crop mode auto-exits after selection)
+        self._btn_crop_draw.setChecked(False)
+        self._btn_crop_draw.setText("Draw on Image…")
 
     def get_crop_params(self) -> CropParams:
         return CropParams(

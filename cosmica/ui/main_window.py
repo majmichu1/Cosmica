@@ -443,6 +443,7 @@ class MainWindow(QMainWindow):
         tp.load_macro.connect(self._on_load_macro)
 
         # Transform signals
+        tp.start_crop_draw.connect(self._on_start_crop_draw)
         tp.run_crop.connect(self._on_run_crop)
         tp.run_rotate.connect(self._on_run_rotate)
         tp.run_flip.connect(self._on_run_flip)
@@ -486,6 +487,7 @@ class MainWindow(QMainWindow):
         # Canvas sample signals
         self._canvas.sample_placed.connect(self._on_sample_placed)
         self._canvas.sample_removed.connect(self._on_sample_removed)
+        self._canvas.crop_rect_selected.connect(self._on_crop_rect_selected)
 
         # Preview signals
         tp.preview_requested.connect(self._on_preview_requested)
@@ -1451,6 +1453,18 @@ class MainWindow(QMainWindow):
     # ---------- Transform operations ----------
 
     @pyqtSlot()
+    @pyqtSlot()
+    def _on_start_crop_draw(self):
+        """Toggle interactive crop-draw mode on the canvas."""
+        currently_active = getattr(self._canvas, '_crop_mode', False)
+        self._canvas.set_crop_mode(not currently_active)
+
+    @pyqtSlot(int, int, int, int)
+    def _on_crop_rect_selected(self, x: int, y: int, w: int, h: int):
+        """Called when user finishes drawing a crop rectangle on the canvas."""
+        self._tools_panel.set_crop_from_rect(x, y, w, h)
+        self._log_panel.log(f"Crop region set: x={x}, y={y}, w={w}, h={h}", "info")
+
     def _on_run_crop(self):
         if self._current_image is None:
             return

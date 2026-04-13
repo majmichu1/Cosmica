@@ -475,6 +475,7 @@ class MainWindow(QMainWindow):
         tp.run_spcc.connect(self._on_run_spcc)
         tp.open_channel_combine_dialog.connect(self._on_open_channel_combine)
         tp.preview_stretch_toggled.connect(self._on_preview_stretch_toggled)
+        tp.run_debayer.connect(self._on_run_debayer)
 
         # Multi-session stacking
         tp.run_multi_session.connect(self._on_run_multi_session)
@@ -1087,6 +1088,7 @@ class MainWindow(QMainWindow):
         # Display reference frame before freeing memory
         ref_display = aligned_lights[0]
         self._display_image(ref_display)
+        n_aligned = len(aligned_lights)
 
         # *** Free aligned_lights from RAM — stacking reads from disk ***
         self._aligned_lights = []
@@ -1109,11 +1111,11 @@ class MainWindow(QMainWindow):
             self._aligned_paths = []
 
         self._log_panel.log(
-            f"Alignment complete: {len(aligned_lights)} frames aligned. Ready to stack.",
+            f"Alignment complete: {n_aligned} frames aligned. Ready to stack.",
             "success",
         )
         if self._project:
-            self._project.add_history("Alignment", {"n_frames": len(aligned_lights)})
+            self._project.add_history("Alignment", {"n_frames": n_aligned})
             self._save_project()
 
     def _on_run_stacking(self):
@@ -2484,6 +2486,48 @@ class MainWindow(QMainWindow):
                 f"Combined channels: palette={dlg._palette_combo.currentText()}, "
                 f"shape={rgb.shape}", "info"
             )
+
+    @pyqtSlot()
+    def _on_run_debayer(self):
+        if self._current_image is None:
+            return
+        from cosmica.core.debayer import debayer as _debayer, detect_bayer_pattern
+
+        data = self._current_image.data
+        if data.ndim == 3:
+            self._log_panel.log(
+                "Image is already color (3 channels) — debayer not needed.", "warning"
+            )
+            return
+
+        p = self._tools_panel.get_debayer_params()
+        pattern = p["pattern"]
+        method = p["method"]
+
+        # Auto-detect from header if user left on Auto-detect
+        if not pattern:
+            pattern = detect_bayer_pattern(self._current_image.header)
+            if not pattern:
+                self._log_panel.log(
+                    "No BAYERPAT in FITS header and no pattern selected. "
+                    "Select RGGB / BGGR / GRBG / GBRG manually.", "error"
+                )
+                return
+
+        self._log_panel.log(f"Debayering: pattern={pattern} method={method}…", "info")
+
+        def _work(d, pat, meth, progress=None):
+            return _debayer(d, pattern=pat, method=meth)
+
+        def _done(result):
+            self._update_current_image(result, f"Debayer ({pattern}) complete")
+            if self._project:
+                self._project.add_history("Debayer", {"pattern": pattern, "method": method})
+            self._log_panel.log(
+                f"Debayer complete: {pattern} → shape {result.shape}", "success"
+            )
+
+        self._start_worker(_work, data, pattern, method, on_done=_done)
 
     @pyqtSlot(bool)
     def _on_preview_stretch_toggled(self, enabled: bool):

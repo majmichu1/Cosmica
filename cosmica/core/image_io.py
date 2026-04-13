@@ -210,6 +210,16 @@ def load_fits(path: Path) -> ImageData:
         raise ValueError(f"Unexpected FITS data shape: {data.shape}")
 
     frame_type = _guess_frame_type(header, path)
+
+    # Auto-debayer raw OSC frames when loaded individually
+    # (stacking pipeline keeps Bayer for best SNR and debayers the final stack)
+    if data.ndim == 2 and frame_type == FrameType.LIGHT:
+        from cosmica.core.debayer import detect_bayer_pattern, debayer as _debayer
+        bayer = detect_bayer_pattern(header)
+        if bayer:
+            data = _debayer(data, pattern=bayer, method="vng")
+            log.debug("Auto-debayered light frame: %s → %s", path.name, data.shape)
+
     return ImageData(data=data, header=header, file_path=path, frame_type=frame_type)
 
 

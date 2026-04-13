@@ -212,6 +212,9 @@ class ToolsPanel(QWidget):
     # Non-destructive preview stretch (for linear workflow)
     preview_stretch_toggled = pyqtSignal(bool)  # True = show stretched, False = show linear
 
+    # Debayer
+    run_debayer = pyqtSignal()
+
     # Smart Processor signals
     open_smart_processor = pyqtSignal()
     open_equipment_dialog = pyqtSignal()
@@ -363,6 +366,42 @@ class ToolsPanel(QWidget):
         btn_subframe.clicked.connect(self.open_subframe_selector.emit)
         sub_layout.addWidget(btn_subframe)
         layout.addWidget(sub_group)
+
+        # --- Debayer (OSC / One-Shot Color) ---
+        debayer_group = QGroupBox("Debayer (OSC / Color Camera)")
+        debayer_layout = QVBoxLayout(debayer_group)
+        debayer_layout.addWidget(
+            _info_label(
+                "Convert raw Bayer mosaic to color image. Applied automatically after stacking "
+                "and when loading individual light frames with BAYERPAT header. "
+                "Use this button to debayer the current image manually."
+            )
+        )
+
+        self._debayer_pattern_combo = QComboBox()
+        self._debayer_pattern_combo.addItems(["Auto-detect", "RGGB", "BGGR", "GRBG", "GBRG"])
+        self._debayer_pattern_combo.setToolTip(
+            "Bayer CFA pattern.\n"
+            "RGGB: most Sony/Canon/most OSC astro cameras (QHY163C, ZWO ASI533MC, etc.)\n"
+            "BGGR: some Nikon sensors\n"
+            "Auto-detect reads BAYERPAT keyword from FITS header."
+        )
+        debayer_layout.addLayout(_h_row("Pattern:", self._debayer_pattern_combo))
+
+        self._debayer_method_combo = QComboBox()
+        self._debayer_method_combo.addItems(["VNG (best quality)", "Edge-Aware (EA)", "Bilinear (fastest)"])
+        self._debayer_method_combo.setToolTip(
+            "VNG: Variable Number of Gradients — best for astrophotography (default)\n"
+            "EA: Edge-Aware — sharpest edges, good for stars\n"
+            "Bilinear: fastest but softest"
+        )
+        debayer_layout.addLayout(_h_row("Method:", self._debayer_method_combo))
+
+        btn_debayer = QPushButton("Apply Debayer")
+        btn_debayer.setToolTip("Debayer the current image — converts mono Bayer to color (3-channel)")
+        btn_debayer.clicked.connect(self.run_debayer.emit)
+        debayer_layout.addWidget(btn_debayer)
+        layout.addWidget(debayer_group)
 
         layout.addStretch()
         self._tabs.addTab(_scrollable_tab(layout), "Pre-Process")
@@ -2885,6 +2924,15 @@ class ToolsPanel(QWidget):
             if recording
             else "color: #969696; font-size: 11px;"
         )
+
+    def get_debayer_params(self) -> dict:
+        """Return debayer pattern and method from UI."""
+        pattern_items = ["", "RGGB", "BGGR", "GRBG", "GBRG"]
+        method_items = ["vng", "ea", "bilinear"]
+        return {
+            "pattern": pattern_items[self._debayer_pattern_combo.currentIndex()],  # "" = auto
+            "method": method_items[self._debayer_method_combo.currentIndex()],
+        }
 
     def _on_curve_channel_changed(self, index: int):
         """Switch curve editor to show the selected channel's curve."""

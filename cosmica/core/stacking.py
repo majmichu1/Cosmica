@@ -1100,6 +1100,14 @@ def stack_from_paths(
             output[y0:y1, :] = tile_result
 
     output = np.clip(output, 0, 1).astype(np.float32)
+
+    # Auto-debayer if raw Bayer mosaic detected
+    if bayer_pat and not is_color:
+        progress(0.97, f"Debayering stacked result ({bayer_pat})…")
+        from cosmica.core.debayer import debayer as _debayer
+        output = _debayer(output, pattern=bayer_pat, method="vng")
+        log.info("Auto-debayered stacked result: %s → %s", bayer_pat, output.shape)
+
     progress(1.0, f"Stacking complete: {n} files, {total_rejected} pixels rejected")
     log.info("Tiled stacking complete: %d frames, %d rejected", n, total_rejected)
 

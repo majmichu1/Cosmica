@@ -172,7 +172,7 @@ def _extract_and_save(file_list: list[Path], save_path: Path, set_name: str):
     del fp
     
     # Trim file? Not strictly necessary for reading, just track actual_size in metadata
-    meta_path = save_path.parent / f"{set_name}_meta.txt"
+    meta_path = save_path.parent / f"{set_name.lower()}_meta.txt"
     with open(meta_path, 'w') as f: f.write(str(actual_size))
     
     log.info(f"{set_name} DONE. Total patches: {actual_size}. Saved to {save_path}")

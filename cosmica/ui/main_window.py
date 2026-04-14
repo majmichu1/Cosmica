@@ -1173,6 +1173,9 @@ class MainWindow(QMainWindow):
                 self._log_panel.log("No project — cannot determine output directory", "error")
                 return
             aligned_dir = os.path.join(self._project.directory, "aligned")
+            import re as _re
+            raw_name = getattr(self._project, "name", None) or "frame"
+            file_prefix = _re.sub(r"[^\w\-]", "_", raw_name) + "_reg"
 
             self._log_panel.log(
                 f"Starting alignment ({params_dict['mode'].name}) — "
@@ -1184,6 +1187,7 @@ class MainWindow(QMainWindow):
                 paths,
                 aligned_dir,
                 params=stk_params,
+                filename_prefix=file_prefix,
                 on_done=self._on_path_alignment_done,
             )
 
@@ -2713,8 +2717,10 @@ class MainWindow(QMainWindow):
             from cosmica.core.stretch import auto_stretch
             params = self._tools_panel.get_stretch_params()
             stretched = auto_stretch(self._current_image.data, params)
-            from cosmica.core.image_io import ImageData
-            self._canvas.set_image(ImageData(data=stretched, header=self._current_image.header.copy()))
+            preview_img = ImageData(data=stretched, header=self._current_image.header.copy())
+            # to_display(stretch=False) — data already stretched, just convert to uint8 RGB
+            rgb = preview_img.to_display(stretch=False)
+            self._canvas.set_image(rgb)
             self._log_panel.log(
                 "Preview stretch ON — canvas shows stretched view, data stays linear", "info"
             )

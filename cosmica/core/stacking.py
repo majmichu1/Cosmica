@@ -799,6 +799,7 @@ def align_from_paths(
     output_dir,
     params: StackingParams | None = None,
     progress: ProgressCallback = _noop_progress,
+    filename_prefix: str = "aligned",
 ) -> list:
     """Align frames directly from disk, writing results to output_dir immediately.
 
@@ -895,7 +896,7 @@ def align_from_paths(
 
     # ── Write reference frame aligned (it's already aligned to itself) ────────
     out_paths: list = [None] * n
-    ref_out = output_dir / f"aligned_{ref_idx + 1:05d}.fits"
+    ref_out = output_dir / f"{filename_prefix}_{ref_idx + 1:05d}.fits"
     _write_aligned_fits(ref_img, ref_out)
     out_paths[ref_idx] = ref_out
     log.info("align_from_paths: reference saved → %s", ref_out.name)
@@ -915,7 +916,7 @@ def align_from_paths(
 
         if frame.data.shape != ref_shape:
             log.warning("align_from_paths: frame %d shape mismatch, copying as-is", i + 1)
-            out_p = output_dir / f"aligned_{i + 1:05d}.fits"
+            out_p = output_dir / f"{filename_prefix}_{i + 1:05d}.fits"
             _write_aligned_fits(frame, out_p)
             out_paths[i] = out_p
             del frame
@@ -971,7 +972,7 @@ def align_from_paths(
                 res = _cpu_align_image(frame.data, transform, ref_shape).astype(np.float32)
 
         aligned_img = ImageData(data=res, header=frame.header.copy(), frame_type=frame.frame_type)
-        out_p = output_dir / f"aligned_{i + 1:05d}.fits"
+        out_p = output_dir / f"{filename_prefix}_{i + 1:05d}.fits"
         _write_aligned_fits(aligned_img, out_p)
         out_paths[i] = out_p
 

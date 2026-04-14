@@ -51,9 +51,9 @@ def _ht_gpu(
     mask: Mask | None,
     dm,
 ) -> np.ndarray:
-    """GPU-accelerated histogram transform."""
+    """GPU-accelerated histogram transform — stays on GPU throughout."""
     original = image.copy()
-    t = dm.from_numpy(image)
+    t = dm.from_numpy(image)  # CPU → GPU (once)
     bp = params.black_point
     wp = params.white_point
     mt = params.midtone
@@ -61,19 +61,18 @@ def _ht_gpu(
     range_width = max(wp - bp, 1e-10)
     rescaled = torch.clamp((t - bp) / range_width, 0.0, 1.0)
 
-    # Use GPU-accelerated MTF from stretch.py
-    rescaled_np = rescaled.cpu().numpy()
     if abs(mt - 0.5) > 1e-6:
-        if image.ndim == 2:
-            result = midtone_transfer_function(rescaled_np, mt)
-        else:
-            result = np.empty_like(rescaled_np)
-            for ch in range(image.shape[0]):
-                result[ch] = midtone_transfer_function(rescaled_np[ch], mt)
+        # MTF entirely on GPU — no round-trip to CPU
+        nonzero = rescaled > 0
+        denom = (2.0 * mt - 1.0) * rescaled - mt
+        safe = nonzero & (torch.abs(denom) > 1e-10)
+        result_t = torch.zeros_like(rescaled)
+        result_t[safe] = (mt - 1.0) * rescaled[safe] / denom[safe]
+        result_t = torch.clamp(result_t, 0.0, 1.0)
     else:
-        result = rescaled_np
+        result_t = rescaled
 
-    result = np.clip(result, 0.0, 1.0).astype(np.float32)
+    result = result_t.cpu().numpy().astype(np.float32)  # GPU → CPU (once, at end)
     return apply_mask(original, result, mask)
 
 

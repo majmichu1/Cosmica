@@ -73,23 +73,33 @@ def detect_stars_gpu(
     if len(coords) == 0:
         return []
 
+    rows = coords[:, 0]
+    cols = coords[:, 1]
+    fluxes = image[rows, cols]
+
+    # Sort by flux descending and truncate BEFORE the patch loop —
+    # avoids computing FWHM for stars we'd discard anyway.
+    order = torch.argsort(fluxes, descending=True)[:max_stars]
+    rows = rows[order]
+    cols = cols[order]
+    fluxes = fluxes[order]
+
+    H, W = image.shape
+    patch_r = 5
+    img_cpu = image.cpu()
     stars: list[Star] = []
-    for r, c in coords:
-        flux = image[r, c].item()
-        # Estimate FWHM from local peak spread: sample 2 pixels outward
-        r_i, c_i = r.item(), c.item()
-        h, w = image.shape
-        half_max = flux * 0.5
-        # Count pixels above half-max in a small window
-        r0, r1 = max(0, r_i - 5), min(h, r_i + 6)
-        c0, c1 = max(0, c_i - 5), min(w, c_i + 6)
-        patch = image[r0:r1, c0:c1]
-        area = float((patch > half_max).sum().item())
+    for i in range(rows.shape[0]):
+        r_i = int(rows[i].item())
+        c_i = int(cols[i].item())
+        flux = float(fluxes[i].item())
+        r0, r1 = max(0, r_i - patch_r), min(H, r_i + patch_r + 1)
+        c0, c1 = max(0, c_i - patch_r), min(W, c_i + patch_r + 1)
+        patch = img_cpu[r0:r1, c0:c1]
+        area = float((patch > flux * 0.5).sum().item())
         fwhm = 2.0 * (area / 3.14159) ** 0.5 if area > 0 else 3.0
         stars.append(Star(x=float(c_i), y=float(r_i), flux=flux, fwhm=fwhm))
 
-    stars.sort(key=lambda s: s.flux, reverse=True)
-    return stars[:max_stars]
+    return stars
 
 
 def match_stars_gpu(

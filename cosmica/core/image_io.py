@@ -101,29 +101,43 @@ class ImageData:
 
 
 def auto_stretch_for_display(img: np.ndarray) -> np.ndarray:
-    """Quick auto-stretch for preview display using median + MAD."""
+    """Quick auto-stretch for preview display using median + MAD.
+
+    Stats are computed on a thumbnail (≤1024px longest side) for speed,
+    then applied to the full-resolution image.
+    """
+    h, w = img.shape[0], img.shape[1]
+    max_side = 1024
+    scale = min(1.0, max_side / max(h, w))
+    if scale < 1.0:
+        sr = max(1, h // max(1, int(h * scale)))
+        sc = max(1, w // max(1, int(w * scale)))
+        thumb = img[::sr, ::sc, :]
+    else:
+        thumb = img
+
     result = np.empty_like(img)
     for ch in range(img.shape[-1]):
-        channel = img[..., ch]
-        med = np.median(channel)
-        mad = np.median(np.abs(channel - med))
+        t_ch = thumb[..., ch]
+        med = float(np.median(t_ch))
+        mad = float(np.median(np.abs(t_ch - med)))
         if mad < 1e-10:
-            mad = np.std(channel)
+            mad = float(np.std(t_ch))
         if mad < 1e-10:
-            result[..., ch] = channel
+            result[..., ch] = img[..., ch]
             continue
         shadow_clip = max(0.0, med - 2.8 * mad)
-        scale = 1.0 / max(1e-10, 1.0 - shadow_clip)
-        stretched = (channel - shadow_clip) * scale
-        # Midtone transfer function (MTF)
+        scale_factor = 1.0 / max(1e-10, 1.0 - shadow_clip)
+        src = img[..., ch]
+        stretched = np.clip((src - shadow_clip) * scale_factor, 0.0, 1.0)
         midtone = 0.25
-        stretched = np.clip(stretched, 0, 1)
         mask = stretched > 0
         mtf = np.zeros_like(stretched)
         mtf[mask] = (
-            (midtone - 1) * stretched[mask] / ((2 * midtone - 1) * stretched[mask] - midtone)
+            (midtone - 1.0) * stretched[mask]
+            / ((2.0 * midtone - 1.0) * stretched[mask] - midtone)
         )
-        result[..., ch] = np.clip(mtf, 0, 1)
+        result[..., ch] = np.clip(mtf, 0.0, 1.0)
     return result
 
 

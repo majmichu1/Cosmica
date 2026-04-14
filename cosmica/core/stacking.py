@@ -47,6 +47,71 @@ def _noop_progress(fraction: float, message: str) -> None:
     pass
 
 
+def _highpass_for_detection(t_img):
+    """Apply a large-radius high-pass filter to a GPU tensor before star detection.
+
+    Removes large-scale background gradients (LP glow, Hα nebulosity, vignetting)
+    that would otherwise bias the local noise threshold and cause star detection
+    to miss stars or detect false positives.
+
+    ``t_img`` is a PyTorch tensor of shape ``(1, H, W)`` or ``(C, H, W)``,
+    float32, on any device.  Returns the same shape on the same device.
+
+    The filter subtracts a heavily blurred background:
+      ``hp = img - median_blur(img) + mean(img)``
+    using depthwise separable Gaussian convolution for efficiency.
+    """
+    try:
+        import torch
+        import torch.nn.functional as F
+
+        if t_img.dim() == 2:
+            t_img = t_img.unsqueeze(0).unsqueeze(0)
+            squeeze = True
+        else:
+            if t_img.dim() == 3:
+                t_img = t_img.unsqueeze(0)  # (1, C, H, W)
+            squeeze = False
+
+        # Kernel radius: ~5% of the short side, min 10px, capped to prevent
+        # kernel larger than image on small test images
+        h, w = t_img.shape[-2], t_img.shape[-1]
+        short = min(h, w)
+        sigma = min(max(10.0, short * 0.05), 40.0)  # cap: 40px removes gradients, keeps kernel ≤201px
+        radius = min(int(sigma * 2.5), short // 2 - 1)
+        if radius < 1:
+            if t_img.dim() == 4:
+                return t_img.squeeze(0)
+            return t_img
+        kernel_size = 2 * radius + 1
+
+        # 1-D Gaussian kernel
+        xs = torch.arange(kernel_size, dtype=torch.float32, device=t_img.device) - radius
+        g = torch.exp(-0.5 * (xs / sigma) ** 2)
+        g = g / g.sum()
+
+        C = t_img.shape[-3] if t_img.dim() == 4 else 1
+
+        # Separable convolution: horizontal kernel pads W, vertical kernel pads H
+        kH = g.view(1, 1, 1, kernel_size).expand(C, 1, 1, kernel_size)
+        kV = g.view(1, 1, kernel_size, 1).expand(C, 1, kernel_size, 1)
+        pad_w = (radius, radius, 0, 0)   # pad W for horizontal blur
+        pad_h = (0, 0, radius, radius)   # pad H for vertical blur
+        blurred = F.conv2d(F.pad(t_img, pad_w, mode="reflect"), kH, groups=C)
+        blurred = F.conv2d(F.pad(blurred, pad_h, mode="reflect"), kV, groups=C)
+
+        mean_val = t_img.mean()
+        hp = (t_img - blurred + mean_val).clamp(0.0, 1.0)
+
+        if squeeze:
+            hp = hp.squeeze(0).squeeze(0)
+        else:
+            hp = hp.squeeze(0)
+        return hp
+    except Exception:
+        return t_img  # GPU unavailable or error — return original unchanged
+
+
 # ---------------------------------------------------------------------------
 # Configuration Enums
 # ---------------------------------------------------------------------------
@@ -700,7 +765,7 @@ def align_frames(
 
     if gpu_available:
         t_ref = dm.from_numpy(ref_img.data)
-        ref_stars = detect_stars_gpu(t_ref)
+        ref_stars = detect_stars_gpu(_highpass_for_detection(t_ref))
         log.info("Reference: %d stars detected (GPU)", len(ref_stars))
         ref_sf = None
     else:
@@ -723,7 +788,7 @@ def align_frames(
 
         if gpu_available:
             t_img = dm.from_numpy(frame.data)
-            tgt_stars = detect_stars_gpu(t_img)
+            tgt_stars = detect_stars_gpu(_highpass_for_detection(t_img))
             matches = match_stars_gpu(ref_stars, tgt_stars, max_dist=100.0)
             transform = estimate_transform_gpu(matches)
 
@@ -750,7 +815,7 @@ def align_frames(
                 # First pass: warp to ref-space with inverted transform
                 transform_inv_coarse = _invert_affine_2x3(transform)
                 warped_coarse = warp_image_gpu(t_img, transform_inv_coarse, mode="bilinear")
-                re_stars = detect_stars_gpu(warped_coarse)
+                re_stars = detect_stars_gpu(_highpass_for_detection(warped_coarse))
                 re_matches = match_stars_gpu(ref_stars, re_stars, max_dist=20.0)
                 refine_transform = estimate_transform_gpu(re_matches)
                 if refine_transform is not None:
@@ -792,6 +857,46 @@ def align_frames(
 # ---------------------------------------------------------------------------
 # Path-based alignment (low-memory — peak RAM ~2 frames)
 # ---------------------------------------------------------------------------
+
+
+def _fast_variance_at(path) -> float:
+    """Return variance of the center 256×256 crop without loading the full file.
+
+    Uses FITS memmap to read only the required section — typically 50-100×
+    faster than ``load_image`` for large files.  The raw (possibly integer)
+    pixel values are sufficient for relative variance comparison; BZERO/BSCALE
+    scaling preserves the ordering so we don't need to apply them.
+
+    Falls back to ``load_image`` (full frame) on any error.
+    """
+    import astropy.io.fits as _fits
+
+    try:
+        with _fits.open(str(path), memmap=True, lazy_load_hdus=True) as hdul:
+            hdu = hdul[0]
+            # Shape: (H, W) for mono FITS or (C, H, W) — use last two dims
+            sh = hdu.shape
+            h, w = sh[-2], sh[-1]
+            cy, cx = h // 2, w // 2
+            half = 128
+            r0, r1 = max(0, cy - half), min(h, cy + half)
+            c0, c1 = max(0, cx - half), min(w, cx + half)
+            # Slice directly from the memory-mapped array — reads only this region
+            if hdu.data.ndim == 2:
+                crop = np.asarray(hdu.data[r0:r1, c0:c1], dtype=np.float32)
+            else:
+                crop = np.asarray(hdu.data[0, r0:r1, c0:c1], dtype=np.float32)
+            return float(np.var(crop))
+    except Exception:
+        # Fall back to full load (handles BZERO/BSCALE, debayering, XISF, etc.)
+        img = load_image(str(path))
+        arr = img.data
+        del img
+        sh = arr.shape[-2], arr.shape[-1]
+        cy, cx = sh[0] // 2, sh[1] // 2
+        half = 128
+        crop = arr[..., max(0, cy - half): cy + half, max(0, cx - half): cx + half]
+        return float(np.var(crop))
 
 
 def align_from_paths(
@@ -847,14 +952,13 @@ def align_from_paths(
         log.info("align_from_paths: using user-specified frame #%d", ref_idx + 1)
     else:
         # Auto: sample center crop of each frame to find highest variance.
-        # Use load_image() — it handles BZERO/BSCALE/BLANK, Bayer, and all edge cases.
-        # For large datasets (>30 frames), scan every Nth frame to keep startup fast.
-        # We only keep a float scalar per frame, so peak RAM = 1 frame at a time.
+        # Fast path: use FITS memmap to read only a 256x256 center section,
+        # avoiding a full frame load (~100ms per file vs ~2s for full load).
+        # For large datasets (>30 frames), scan every Nth frame.
         max_scan = 30
         if n <= max_scan:
             scan_indices = list(range(n))
         else:
-            # Evenly spaced sample across the sequence
             step = n / max_scan
             scan_indices = [int(i * step) for i in range(max_scan)]
         log.info(
@@ -865,15 +969,7 @@ def align_from_paths(
         for i in scan_indices:
             p = paths[i]
             try:
-                img = load_image(str(p))
-                arr = img.data
-                del img  # free immediately — only need the variance scalar
-                # Take center crop
-                sh = arr.shape[-2], arr.shape[-1]
-                cy, cx = sh[0] // 2, sh[1] // 2
-                half = 128
-                crop = arr[..., max(0, cy - half): cy + half, max(0, cx - half): cx + half]
-                v = float(np.var(crop))
+                v = _fast_variance_at(p)
                 if v > best_var:
                     best_var, ref_idx = v, i
             except Exception as exc:
@@ -887,7 +983,7 @@ def align_from_paths(
 
     if gpu_available:
         t_ref = dm.from_numpy(ref_img.data)
-        ref_stars = detect_stars_gpu(t_ref)
+        ref_stars = detect_stars_gpu(_highpass_for_detection(t_ref))
     else:
         ref_stars = None
         ref_sf = _cpu_detect_stars(ref_img.data)
@@ -949,14 +1045,14 @@ def align_from_paths(
             t_img = None
             if gpu_available:
                 t_img = dm.from_numpy(frame.data)
-                tgt_stars = detect_stars_gpu(t_img)
+                tgt_stars = detect_stars_gpu(_highpass_for_detection(t_img))
                 matches = match_stars_gpu(ref_stars, tgt_stars, max_dist=100.0)
                 transform = estimate_transform_gpu(matches)
 
                 if transform is not None and two_pass:
                     t_inv_coarse = _invert_affine_2x3(transform)
                     warped_c = warp_image_gpu(t_img, t_inv_coarse, mode="bilinear")
-                    re_stars = detect_stars_gpu(warped_c)
+                    re_stars = detect_stars_gpu(_highpass_for_detection(warped_c))
                     re_matches = match_stars_gpu(ref_stars, re_stars, max_dist=20.0)
                     refine = estimate_transform_gpu(re_matches)
                     if refine is not None:

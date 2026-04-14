@@ -59,7 +59,7 @@ from cosmica.core.morphology import morphology_transform
 from cosmica.core.presets import load_default_presets
 from cosmica.core.project import Project
 from cosmica.core.scripting import MacroRecorder, load_macro, play_macro, save_macro
-from cosmica.core.stacking import StackingParams, align_frames, stack_from_paths, stack_images
+from cosmica.core.stacking import StackingParams, align_frames, align_from_paths, stack_from_paths, stack_images
 from cosmica.core.star_reduction import reduce_stars
 from cosmica.core.statistics import compute_image_statistics
 from cosmica.core.stretch import (
@@ -1040,28 +1040,187 @@ class MainWindow(QMainWindow):
             self._log_panel.log("Quality filter: all frames accepted", "info")
         return accepted if accepted else lights  # never drop everything
 
+    def _get_light_paths(self) -> list | None:
+        """Return raw light frame paths from project without loading them into RAM.
+
+        Returns None if the user cancels or there are no lights.
+        """
+        if not self._project:
+            self._log_panel.log("No project loaded", "error")
+            return None
+        light_frames = [f for f in self._project.frames if f.frame_type == FrameType.LIGHT]
+        if not light_frames:
+            self._log_panel.log("No light frames in project", "error")
+            return None
+
+        settings = QSettings("Cosmica", "Cosmica")
+        if not settings.value("stacking/raw_warning_acknowledged", False, type=bool):
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Icon.Warning)
+            msg.setWindowTitle("Uncalibrated Frames")
+            msg.setText("No calibrated frames found. Do you want to align/stack raw frames?")
+            msg.setInformativeText(
+                "Stacking raw frames without calibration (bias/dark/flat correction) "
+                "may result in artifacts. It is recommended to calibrate frames first."
+            )
+            msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            msg.setDefaultButton(QMessageBox.StandardButton.No)
+            cb = QCheckBox("Do not show this warning again")
+            msg.setCheckBox(cb)
+            if msg.exec() == QMessageBox.StandardButton.No:
+                return None
+            if cb.isChecked():
+                settings.setValue("stacking/raw_warning_acknowledged", True)
+
+        return [f.path for f in light_frames]
+
+    def _apply_quality_filter_paths(self, paths: list) -> list:
+        """Quality filter operating on file paths — no full frames loaded.
+
+        Returns filtered path list (falls back to full list on any error).
+        """
+        from cosmica.core.subframe_selector import SubframeSelectorParams, filter_by_metric, score_subframes
+
+        qf = self._tools_panel.get_quality_filter_params()
+        if qf is None:
+            return paths
+
+        str_paths = [str(p) for p in paths]
+        self._log_panel.log(f"Running quality filter on {len(str_paths)} frames...", "info")
+        try:
+            sf_params = SubframeSelectorParams(rejection_sigma=qf.get("rejection_sigma", 1.5))
+            scores = score_subframes(str_paths, sf_params)
+            filtered = filter_by_metric(
+                scores,
+                metric=qf.get("metric", "quality_score"),
+                mode=qf.get("mode", "sigma"),
+                top_n=qf.get("top_n"),
+                top_percent=qf.get("top_percent", 80.0),
+                sigma=qf.get("rejection_sigma", 1.5),
+            )
+            accepted = [p for p, sc in zip(paths, filtered) if sc.accepted]
+            n_rejected = len(paths) - len(accepted)
+            if n_rejected:
+                self._log_panel.log(
+                    f"Quality filter: rejected {n_rejected} frame(s) "
+                    f"(metric={qf.get('metric')}, mode={qf.get('mode')})",
+                    "warning",
+                )
+            else:
+                self._log_panel.log("Quality filter: all frames accepted", "info")
+            return accepted if accepted else paths
+        except Exception as exc:
+            log.warning("Quality filter failed: %s", exc)
+            self._log_panel.log(f"Quality filter skipped: {exc}", "warning")
+            return paths
+
     @pyqtSlot()
     def _on_run_alignment(self):
-        lights = self._get_lights_for_stacking()
-        if not lights:
+        """Start alignment.
+
+        If calibrated lights are in memory, use in-memory align_frames (fast, small N).
+        Otherwise stream from disk via align_from_paths (safe for 100+ frames).
+        """
+        params_dict = None
+
+        if self._calibrated_lights:
+            # Calibrated lights already in RAM — use in-memory path
+            lights = self._calibrated_lights
+            lights = self._apply_quality_filter(lights)
+            self._tools_panel.set_ref_frame_max(len(lights))
+            params_dict = self._tools_panel.get_alignment_params()
+            stk_params = StackingParams(
+                registration_mode=params_dict["mode"],
+                reference_frame_index=params_dict["reference_frame_index"],
+                comet_nucleus_radius=params_dict.get("comet_nucleus_radius", 15),
+            )
+            self._log_panel.log(
+                f"Starting alignment ({params_dict['mode'].name}) — "
+                f"{len(lights)} calibrated frames (in-memory)...",
+                "info",
+            )
+            self._start_worker(
+                align_frames,
+                lights,
+                params=stk_params,
+                on_done=self._on_alignment_done,
+            )
+        else:
+            # Raw project frames — stream from disk to avoid OOM
+            paths = self._get_light_paths()
+            if not paths:
+                return
+            paths = self._apply_quality_filter_paths(paths)
+            self._tools_panel.set_ref_frame_max(len(paths))
+            params_dict = self._tools_panel.get_alignment_params()
+            stk_params = StackingParams(
+                registration_mode=params_dict["mode"],
+                reference_frame_index=params_dict["reference_frame_index"],
+                comet_nucleus_radius=params_dict.get("comet_nucleus_radius", 15),
+            )
+
+            if not self._project:
+                self._log_panel.log("No project — cannot determine output directory", "error")
+                return
+            aligned_dir = os.path.join(self._project.directory, "aligned")
+
+            self._log_panel.log(
+                f"Starting alignment ({params_dict['mode'].name}) — "
+                f"{len(paths)} raw frames (streaming from disk, low-RAM)...",
+                "info",
+            )
+            self._start_worker(
+                align_from_paths,
+                paths,
+                aligned_dir,
+                params=stk_params,
+                on_done=self._on_path_alignment_done,
+            )
+
+    def _on_path_alignment_done(self, result_paths: list):
+        """Callback when path-based alignment finishes.
+
+        result_paths is already a list[Path] written to disk by align_from_paths.
+        """
+        if not result_paths:
+            self._log_panel.log("Alignment failed: no frames produced", "error")
             return
-        lights = self._apply_quality_filter(lights)
 
-        self._tools_panel.set_ref_frame_max(len(lights))
-        params = self._tools_panel.get_alignment_params()
+        from pathlib import Path
+        result_paths = [Path(p) for p in result_paths if p is not None]
 
-        self._log_panel.log(f"Starting alignment ({params['mode'].name})...", "info")
-
-        self._start_worker(
-            align_frames,
-            lights,
-            params=StackingParams(
-                registration_mode=params["mode"],
-                reference_frame_index=params["reference_frame_index"],
-                comet_nucleus_radius=params.get("comet_nucleus_radius", 15),
-            ),
-            on_done=self._on_alignment_done,
+        self._log_panel.log(
+            f"Alignment complete: {len(result_paths)} frames saved to 'aligned/' folder",
+            "info",
         )
+
+        # Register aligned frames in project
+        if self._project:
+            for p in result_paths:
+                if p.exists():
+                    self._project.remove_frame(p)
+            self._project.add_frames([p for p in result_paths if p.exists()], FrameType.ALIGNED)
+            self._aligned_paths = result_paths
+
+            if hasattr(self, "_project_panel"):
+                self._project_panel.refresh()
+        else:
+            self._aligned_paths = result_paths
+
+        # Display first aligned frame
+        try:
+            first = load_image(str(result_paths[0]))
+            self._display_image(first)
+        except Exception as exc:
+            log.warning("Could not display first aligned frame: %s", exc)
+
+        self._log_panel.log(
+            f"Alignment complete: {len(result_paths)} frames aligned. Ready to stack.",
+            "success",
+        )
+        if self._project:
+            self._project.add_history("Alignment", {"n_frames": len(result_paths)})
+            self._save_project()
 
     def _on_alignment_done(self, aligned_lights: list):
         """Callback when alignment finishes."""

@@ -11,6 +11,7 @@ from cosmica.core.stacking import (
     RejectionMethod,
     StackingParams,
     StackResult,
+    align_from_paths,
     normalize_stack,
     normalize_stack_linear_fit,
     stack_images,
@@ -258,3 +259,53 @@ class TestCometAlignment:
     def test_stacking_params_comet_radius(self):
         p = StackingParams(registration_mode=RegistrationMode.COMET, comet_nucleus_radius=25)
         assert p.comet_nucleus_radius == 25
+
+
+class TestAlignFromPaths:
+    """align_from_paths — streaming path-based alignment (low-RAM)."""
+
+    def _make_fits(self, tmp_path, name: str, data: np.ndarray):
+        from astropy.io import fits
+        p = tmp_path / name
+        fits.PrimaryHDU(data=data.astype(np.float32)).writeto(str(p), overwrite=True)
+        return p
+
+    def test_produces_output_files(self, tmp_path):
+        """align_from_paths writes one file per input frame."""
+        rng = np.random.default_rng(0)
+        frames = [rng.random((64, 64)).astype(np.float32) for _ in range(3)]
+        paths = [self._make_fits(tmp_path, f"frame_{i}.fits", f) for i, f in enumerate(frames)]
+        out_dir = tmp_path / "aligned"
+        params = StackingParams(registration_mode=RegistrationMode.FFT_TRANSLATION, use_gpu=False)
+        result = align_from_paths(paths, out_dir, params=params)
+        assert len(result) == 3
+        for p in result:
+            assert p.exists(), f"Expected output file: {p}"
+
+    def test_last_frame_sentinel(self, tmp_path):
+        """reference_frame_index=-2 selects the last frame."""
+        rng = np.random.default_rng(1)
+        frames = [rng.random((32, 32)).astype(np.float32) for _ in range(4)]
+        paths = [self._make_fits(tmp_path, f"f_{i}.fits", f) for i, f in enumerate(frames)]
+        out_dir = tmp_path / "aligned_last"
+        params = StackingParams(
+            registration_mode=RegistrationMode.FFT_TRANSLATION,
+            reference_frame_index=-2,
+            use_gpu=False,
+        )
+        result = align_from_paths(paths, out_dir, params=params)
+        assert len(result) == 4
+
+    def test_explicit_reference_frame(self, tmp_path):
+        """reference_frame_index=2 uses frame #3 (0-based index 2) as reference."""
+        rng = np.random.default_rng(2)
+        frames = [rng.random((32, 32)).astype(np.float32) for _ in range(4)]
+        paths = [self._make_fits(tmp_path, f"g_{i}.fits", f) for i, f in enumerate(frames)]
+        out_dir = tmp_path / "aligned_explicit"
+        params = StackingParams(
+            registration_mode=RegistrationMode.FFT_TRANSLATION,
+            reference_frame_index=2,
+            use_gpu=False,
+        )
+        result = align_from_paths(paths, out_dir, params=params)
+        assert len(result) == 4

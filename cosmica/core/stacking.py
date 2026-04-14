@@ -790,6 +790,223 @@ def align_frames(
 
 
 # ---------------------------------------------------------------------------
+# Path-based alignment (low-memory — peak RAM ~2 frames)
+# ---------------------------------------------------------------------------
+
+
+def align_from_paths(
+    paths: list,
+    output_dir,
+    params: StackingParams | None = None,
+    progress: ProgressCallback = _noop_progress,
+) -> list:
+    """Align frames directly from disk, writing results to output_dir immediately.
+
+    Peak RAM usage: ~2 frames (reference + current frame being processed).
+    Suitable for large datasets (100+ frames) that would OOM with align_frames().
+
+    Parameters
+    ----------
+    paths : list of str or Path
+        Input FITS file paths.
+    output_dir : str or Path
+        Directory to write aligned FITS files.  Created if absent.
+    params : StackingParams, optional
+    progress : callable
+
+    Returns
+    -------
+    list of Path
+        Paths of written aligned files, same order as input.
+    """
+    import gc
+    from pathlib import Path
+
+    from astropy.io import fits as _fits
+
+    if params is None:
+        params = StackingParams()
+
+    paths = [Path(p) for p in paths]
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    n = len(paths)
+    if n == 0:
+        raise ValueError("align_from_paths: no paths provided")
+
+    dm = get_device_manager()
+    gpu_available = params.use_gpu and dm.device.type != "cpu"
+
+    # ── Select reference frame index ─────────────────────────────────────────
+    progress(0.0, "Selecting reference frame...")
+    if params.reference_frame_index == -2:
+        ref_idx = n - 1
+        log.info("align_from_paths: using last frame (#%d) as reference", ref_idx + 1)
+    elif params.reference_frame_index >= 0:
+        ref_idx = max(0, min(params.reference_frame_index, n - 1))
+        log.info("align_from_paths: using user-specified frame #%d", ref_idx + 1)
+    else:
+        # Auto: sample center 256×256 crop of each frame to find highest variance
+        log.info("align_from_paths: scanning %d frames for highest variance (auto ref)...", n)
+        best_var, ref_idx = -1.0, 0
+        for i, p in enumerate(paths):
+            try:
+                with _fits.open(str(p), memmap=True) as hdul:
+                    raw = hdul[0].data
+                    if raw is None and len(hdul) > 1:
+                        raw = hdul[1].data
+                    if raw is None:
+                        continue
+                    arr = np.array(raw, dtype=np.float32)
+                    # Take center crop
+                    sh = arr.shape[-2], arr.shape[-1]
+                    cy, cx = sh[0] // 2, sh[1] // 2
+                    half = 128
+                    crop = arr[..., max(0, cy - half): cy + half, max(0, cx - half): cx + half]
+                    v = float(np.var(crop))
+                    if v > best_var:
+                        best_var, ref_idx = v, i
+            except Exception as exc:
+                log.warning("align_from_paths: failed to sample %s: %s", p.name, exc)
+        log.info("align_from_paths: auto-selected reference frame #%d", ref_idx + 1)
+    progress(0.05, f"Reference: frame #{ref_idx + 1}")
+
+    # ── Load reference frame fully ────────────────────────────────────────────
+    ref_img = load_image(str(paths[ref_idx]))
+    ref_shape = ref_img.data.shape
+
+    if gpu_available:
+        t_ref = dm.from_numpy(ref_img.data)
+        ref_stars = detect_stars_gpu(t_ref)
+    else:
+        ref_stars = None
+        ref_sf = _cpu_detect_stars(ref_img.data)
+
+    two_pass = params.registration_mode == RegistrationMode.STAR_2_PASS
+
+    # ── Write reference frame aligned (it's already aligned to itself) ────────
+    out_paths: list = [None] * n
+    ref_out = output_dir / f"aligned_{ref_idx + 1:05d}.fits"
+    _write_aligned_fits(ref_img, ref_out)
+    out_paths[ref_idx] = ref_out
+    log.info("align_from_paths: reference saved → %s", ref_out.name)
+
+    # ── Align all other frames one at a time ─────────────────────────────────
+    for i, p in enumerate(paths):
+        if i == ref_idx:
+            continue
+        frac = 0.05 + 0.90 * (i / n)
+        progress(frac, f"Aligning frame {i + 1}/{n}...")
+
+        try:
+            frame = load_image(str(p))
+        except Exception as exc:
+            log.warning("align_from_paths: failed to load %s: %s", p.name, exc)
+            continue
+
+        if frame.data.shape != ref_shape:
+            log.warning("align_from_paths: frame %d shape mismatch, copying as-is", i + 1)
+            out_p = output_dir / f"aligned_{i + 1:05d}.fits"
+            _write_aligned_fits(frame, out_p)
+            out_paths[i] = out_p
+            del frame
+            gc.collect()
+            continue
+
+        transform = None
+        if gpu_available:
+            t_img = dm.from_numpy(frame.data)
+            tgt_stars = detect_stars_gpu(t_img)
+            matches = match_stars_gpu(ref_stars, tgt_stars, max_dist=100.0)
+            transform = estimate_transform_gpu(matches)
+
+            if transform is not None and two_pass:
+                t_inv_coarse = _invert_affine_2x3(transform)
+                warped_c = warp_image_gpu(t_img, t_inv_coarse, mode="bilinear")
+                re_stars = detect_stars_gpu(warped_c)
+                re_matches = match_stars_gpu(ref_stars, re_stars, max_dist=20.0)
+                refine = estimate_transform_gpu(re_matches)
+                if refine is not None:
+                    transform = compose_affine_transforms(transform, refine)
+
+            if transform is not None:
+                transform_inv = _invert_affine_2x3(transform)
+                final = warp_image_gpu(t_img, transform_inv, mode="bicubic")
+                res = dm.to_cpu(final).numpy().astype(np.float32)
+                if res.ndim == 3 and res.shape[0] == 1:
+                    res = res[0]
+            else:
+                # GPU failed — CPU fallback
+                log.warning("Frame %d: GPU transform failed, trying CPU", i + 1)
+                ref_sf2 = _cpu_detect_stars(ref_img.data)
+                tgt_sf2 = _cpu_detect_stars(frame.data)
+                cpu_t = _cpu_find_transform(ref_sf2, tgt_sf2)
+                if cpu_t is None:
+                    log.warning("Frame %d: CPU fallback also failed, copying as-is", i + 1)
+                    res = frame.data
+                else:
+                    res = _cpu_align_image(frame.data, cpu_t, ref_shape).astype(np.float32)
+        else:
+            tgt_sf = _cpu_detect_stars(frame.data)
+            transform = _cpu_find_transform(ref_sf, tgt_sf)
+            if transform is None:
+                log.warning("Frame %d: no transform found, copying as-is", i + 1)
+                res = frame.data
+            else:
+                if two_pass:
+                    warped_c = _cpu_align_image(frame.data, transform, ref_shape)
+                    tgt_sf2 = _cpu_detect_stars(warped_c)
+                    refine = _cpu_find_transform(ref_sf, tgt_sf2)
+                    if refine is not None:
+                        transform = compose_affine_transforms(transform, refine)
+                res = _cpu_align_image(frame.data, transform, ref_shape).astype(np.float32)
+
+        aligned_img = ImageData(data=res, header=frame.header.copy(), frame_type=frame.frame_type)
+        out_p = output_dir / f"aligned_{i + 1:05d}.fits"
+        _write_aligned_fits(aligned_img, out_p)
+        out_paths[i] = out_p
+
+        # *** Free frame and GPU tensor immediately ***
+        del frame, aligned_img, res
+        if gpu_available and 't_img' in dir():
+            del t_img
+        gc.collect()
+
+    del ref_img
+    gc.collect()
+
+    result = [p for p in out_paths if p is not None]
+    progress(1.0, f"Path-based alignment complete: {len(result)}/{n} frames saved")
+    log.info("align_from_paths: %d/%d frames aligned → %s", len(result), n, output_dir)
+    return result
+
+
+def _write_aligned_fits(img: ImageData, out_path) -> None:
+    """Write an ImageData to a FITS file for aligned output."""
+    from pathlib import Path
+
+    from astropy.io import fits as _fits
+
+    out_path = Path(out_path)
+    data = img.data
+    if data.ndim == 3:
+        # (C, H, W) — save as multi-extension or transpose to (H, W, C)?
+        # Store as (C, H, W) NAXIS3=C, NAXIS2=H, NAXIS1=W (FITS convention for cubes)
+        pass  # astropy handles ndim=3 natively
+    hdr = _fits.Header()
+    if img.header:
+        for k, v in img.header.items():
+            try:
+                hdr[k] = v
+            except Exception:
+                pass
+    hdr["ALIGNED"] = True
+    hdu = _fits.PrimaryHDU(data=data.astype(np.float32), header=hdr)
+    hdu.writeto(str(out_path), overwrite=True)
+
+
+# ---------------------------------------------------------------------------
 # GPU rejection helpers (used by stack_from_paths tiled path)
 # ---------------------------------------------------------------------------
 

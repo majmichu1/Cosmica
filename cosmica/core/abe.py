@@ -1,9 +1,13 @@
-"""Automatic Background Extraction — RBF-based gradient removal.
+"""Automatic Background Extraction — polynomial and RBF-based gradient removal.
 
-Uses Radial Basis Function interpolation to model and remove large-scale
-background gradients (light pollution, vignetting, sky glow) from
-astrophotography images.  Unlike polynomial fitting, RBF interpolation
-adapts locally to complex, non-polynomial gradient shapes.
+Models and removes large-scale background gradients (light pollution,
+vignetting, sky glow) from astrophotography images.
+
+Default model: 2-D polynomial surface (degree 2).  Polynomials extrapolate
+smoothly everywhere and have no edge-extrapolation artefacts.  RBF
+(Radial Basis Function) is available as an alternative for complex,
+non-polynomial gradients but is more sensitive to sampling density at
+the image boundaries.
 
 Requires scipy >= 1.7 for ``scipy.interpolate.RBFInterpolator``.
 """
@@ -11,7 +15,7 @@ Requires scipy >= 1.7 for ``scipy.interpolate.RBFInterpolator``.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
@@ -36,6 +40,14 @@ class ABEParams:
         Sigma-clipping threshold for rejecting star-contaminated samples.
         Samples whose measured value exceeds ``median + sigma_clip * MAD``
         are discarded.
+    model_type : str
+        Background model type: ``"polynomial"`` (default) or ``"rbf"``.
+        Polynomial fitting is numerically stable everywhere and recommended
+        for most images.  RBF can model more complex gradients but is prone
+        to edge extrapolation artefacts.
+    polynomial_degree : int
+        Degree of the 2-D polynomial surface (1=plane, 2=quadratic,
+        3=cubic).  Only used when ``model_type="polynomial"``.
     rbf_kernel : str
         Kernel function passed to ``RBFInterpolator``.  Valid choices
         include ``"thin_plate_spline"``, ``"multiquadric"``,
@@ -58,6 +70,8 @@ class ABEParams:
     grid_size: int = 10
     box_size: int = 48
     sigma_clip: float = 2.0
+    model_type: str = "polynomial"   # "polynomial" | "rbf"
+    polynomial_degree: int = 2
     rbf_kernel: str = "thin_plate_spline"
     rbf_smoothing: float = 0.5
     correction_mode: str = "subtraction"
@@ -75,7 +89,7 @@ def abe_extract(
     mask: Mask | None = None,
     progress=None,  # accepts but ignores — keeps ProcessingWorker happy
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Extract and remove background using RBF interpolation.
+    """Extract and remove background using polynomial or RBF interpolation.
 
     Parameters
     ----------
@@ -101,11 +115,10 @@ def abe_extract(
         params = ABEParams()
 
     log.info(
-        "ABE: grid=%d, box=%d, kernel=%s, smoothing=%.2f, mode=%s, iters=%d",
+        "ABE: model=%s, grid=%d, box=%d, mode=%s, iters=%d",
+        params.model_type,
         params.grid_size,
         params.box_size,
-        params.rbf_kernel,
-        params.rbf_smoothing,
         params.correction_mode,
         params.iterations,
     )
@@ -133,16 +146,9 @@ def _extract_channel(
     channel: np.ndarray,
     params: ABEParams,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Run the full ABE pipeline on a single (H, W) channel.
-
-    When ``params.iterations > 1`` the algorithm iteratively refines its
-    estimate: each pass re-samples on the *latest corrected* image, but
-    the individual per-iteration models are accumulated so that the final
-    model represents the total background removed.
-    """
+    """Run the full ABE pipeline on a single (H, W) channel."""
     h, w = channel.shape
 
-    # Accumulate the total background model across iterations.
     if params.correction_mode == "subtraction":
         total_bg = np.zeros((h, w), dtype=np.float32)
     else:
@@ -153,7 +159,6 @@ def _extract_channel(
     for it in range(params.iterations):
         log.info("ABE iteration %d/%d", it + 1, params.iterations)
 
-        # 1. Sample the background on the current working image.
         points, values = _sample_background(working, params)
 
         if len(values) < 6:
@@ -165,10 +170,11 @@ def _extract_channel(
             )
             break
 
-        # 2. Build the RBF model and evaluate it over the full image.
-        iter_bg = _build_rbf_model(points, values, h, w, params)
+        if params.model_type == "rbf":
+            iter_bg = _build_rbf_model(points, values, h, w, params)
+        else:
+            iter_bg = _build_poly_model(points, values, h, w, params)
 
-        # 3. Apply correction to the working image.
         if params.correction_mode == "division":
             safe_bg = np.maximum(iter_bg, 1e-7)
             working = np.clip(working / safe_bg, 0.0, 1.0).astype(np.float32)
@@ -177,8 +183,7 @@ def _extract_channel(
             working = np.clip(working - iter_bg, 0.0, 1.0).astype(np.float32)
             total_bg += iter_bg
 
-    corrected = working
-    return corrected, total_bg
+    return working, total_bg
 
 
 # ---------------------------------------------------------------------------
@@ -192,12 +197,7 @@ def _generate_grid_points(
     grid_size: int,
     box_size: int,
 ) -> np.ndarray:
-    """Return an (N, 2) array of (row, col) sample-point coordinates.
-
-    Points are placed on a regular ``grid_size x grid_size`` lattice
-    with a margin of ``box_size // 2`` from the image edges so that
-    measurement boxes are fully inside the image.
-    """
+    """Return an (N, 2) array of (row, col) sample-point coordinates."""
     margin = box_size // 2
     ys = np.linspace(margin, h - margin - 1, grid_size).astype(int)
     xs = np.linspace(margin, w - margin - 1, grid_size).astype(int)
@@ -211,15 +211,7 @@ def _measure_background_at(
     col: int,
     box_size: int,
 ) -> float | None:
-    """Measure background level in a box centred at (*row*, *col*).
-
-    Takes the ``box_size x box_size`` neighbourhood, sorts the pixel
-    values, and returns the median of the darkest 50 %.  This rejects
-    stars that may fall inside the box.
-
-    Returns *None* when the box is empty (should not happen with proper
-    margin handling, but guarded defensively).
-    """
+    """Measure background level in a box centred at (*row*, *col*)."""
     h, w = channel.shape
     half = box_size // 2
     r0 = max(0, row - half)
@@ -243,15 +235,7 @@ def _sample_background(
     channel: np.ndarray,
     params: ABEParams,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Generate grid samples and sigma-clip to reject star contamination.
-
-    Returns
-    -------
-    points : ndarray, shape (M, 2)
-        Row/col coordinates of the surviving sample points.
-    values : ndarray, shape (M,)
-        Measured background value at each surviving point.
-    """
+    """Generate grid samples and sigma-clip to reject star contamination."""
     h, w = channel.shape
     grid_pts = _generate_grid_points(h, w, params.grid_size, params.box_size)
 
@@ -273,12 +257,8 @@ def _sample_background(
     points = np.column_stack([rows, cols]).astype(np.float64)
     values = np.asarray(vals, dtype=np.float64)
 
-    # Sigma-clip: reject points where value > median + sigma_clip * MAD.
     median_val = np.median(values)
     mad = np.median(np.abs(values - median_val))
-    # Convert MAD to a standard-deviation-like scale (* 1.4826) is the
-    # classic estimator, but the spec says "median + sigma_clip * MAD"
-    # directly, so we honour that literally.
     threshold = median_val + params.sigma_clip * mad
     keep = values <= threshold
 
@@ -295,7 +275,82 @@ def _sample_background(
 
 
 # ---------------------------------------------------------------------------
-# RBF model construction
+# Polynomial background model
+# ---------------------------------------------------------------------------
+
+
+def _build_poly_model(
+    points: np.ndarray,
+    values: np.ndarray,
+    h: int,
+    w: int,
+    params: ABEParams,
+) -> np.ndarray:
+    """Fit a 2-D polynomial surface to the sample points.
+
+    Coordinates are normalised to [-1, 1] before fitting for numerical
+    stability.  The polynomial is evaluated on the full image grid.
+
+    For a degree-2 surface the basis is:
+      ``{1, r, c, r², rc, c²}``  (6 terms)
+
+    Polynomial surfaces extrapolate smoothly by construction — no edge
+    artefacts regardless of the sample distribution.
+
+    Parameters
+    ----------
+    points : (M, 2) row/col sample coordinates.
+    values : (M,) background values.
+    h, w : image dimensions.
+    params : ABEParams (uses ``polynomial_degree``).
+
+    Returns
+    -------
+    ndarray, shape (h, w), float32
+    """
+    degree = params.polynomial_degree
+
+    # Normalise sample coordinates to [-1, 1]
+    row_n = points[:, 0] / max(h - 1, 1) * 2.0 - 1.0
+    col_n = points[:, 1] / max(w - 1, 1) * 2.0 - 1.0
+
+    # Build the Vandermonde matrix: one column per monomial r^i * c^j
+    def _vander(r_arr: np.ndarray, c_arr: np.ndarray) -> np.ndarray:
+        cols = []
+        for i in range(degree + 1):
+            for j in range(degree + 1 - i):
+                cols.append(r_arr ** i * c_arr ** j)
+        return np.column_stack(cols)
+
+    A = _vander(row_n, col_n)
+
+    # Least-squares fit
+    coeffs, _, _, _ = np.linalg.lstsq(A, values, rcond=None)
+
+    # Evaluate on the full image grid
+    r_full = np.linspace(-1.0, 1.0, h)
+    c_full = np.linspace(-1.0, 1.0, w)
+    RR, CC = np.meshgrid(r_full, c_full, indexing="ij")
+    A_full = _vander(RR.ravel(), CC.ravel())
+    bg_full = (A_full @ coeffs).reshape(h, w)
+
+    # Clamp to measured sample range + small tolerance
+    val_min = float(values.min())
+    val_max = float(values.max())
+    margin = max(0.01, (val_max - val_min) * 0.1)
+    bg_full = np.clip(bg_full, max(0.0, val_min - margin), val_max + margin)
+
+    log.info(
+        "ABE poly model: degree=%d, bg range [%.5f, %.5f]",
+        degree,
+        float(bg_full.min()),
+        float(bg_full.max()),
+    )
+    return bg_full.astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# RBF background model (alternative)
 # ---------------------------------------------------------------------------
 
 _DOWNSAMPLE_STEP = 8  # evaluate RBF every Nth pixel, then upscale
@@ -309,37 +364,27 @@ def _add_boundary_anchors(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Extend the sample set with anchor points at the image boundary.
 
-    RBF kernels like thin-plate spline extrapolate wildly outside the
-    convex hull of sample points.  The measurement grid has a ``box_size/2``
-    inward margin, so the image edges and corners sit outside that hull —
-    leading to runaway extrapolation and a bright-edge halo artefact.
-
-    Anchors are placed at the 4 corners and along each edge.  Each anchor
-    takes the value of the nearest real sample so the RBF is guided toward
-    measured data at the boundary rather than inventing values.
+    Anchors prevent wild RBF extrapolation beyond the convex hull of the
+    measurement grid by extending that hull to the full image extent.
+    Each anchor takes the value of the nearest real sample point.
     """
     if len(points) == 0:
         return points, values
 
-    n_edge = 5  # evenly-spaced points per side (excluding corners)
+    n_edge = 5
 
     anchors: list[tuple[float, float]] = []
-
-    # 4 corners
     for r in (0.0, float(h - 1)):
         for c in (0.0, float(w - 1)):
             anchors.append((r, c))
 
-    # Points along each of the 4 edges (corners already added)
     for frac in np.linspace(0, 1, n_edge + 2)[1:-1]:
-        anchors.append((0.0,           frac * (w - 1)))   # top edge
-        anchors.append((float(h - 1),  frac * (w - 1)))   # bottom edge
-        anchors.append((frac * (h - 1), 0.0))             # left edge
-        anchors.append((frac * (h - 1), float(w - 1)))    # right edge
+        anchors.append((0.0,           frac * (w - 1)))
+        anchors.append((float(h - 1),  frac * (w - 1)))
+        anchors.append((frac * (h - 1), 0.0))
+        anchors.append((frac * (h - 1), float(w - 1)))
 
     anchors_arr = np.array(anchors, dtype=np.float64)
-
-    # Each anchor gets the value of the nearest real sample.
     anchor_vals: list[float] = []
     for ry, cx in anchors_arr:
         dists = np.sqrt((points[:, 0] - ry) ** 2 + (points[:, 1] - cx) ** 2)
@@ -364,30 +409,12 @@ def _build_rbf_model(
     with bicubic interpolation.
 
     Boundary anchor points are added before fitting so that the RBF hull
-    covers the full image extent, eliminating edge-extrapolation artefacts.
-
-    Parameters
-    ----------
-    points : ndarray, shape (M, 2)
-        Sample coordinates (row, col).
-    values : ndarray, shape (M,)
-        Background values at the sample points.
-    h, w : int
-        Full image height and width.
-    params : ABEParams
-        Kernel and smoothing configuration.
-
-    Returns
-    -------
-    ndarray, shape (h, w), float32
-        Background model at full resolution.
+    covers the full image extent, reducing edge-extrapolation artefacts.
     """
     step = _DOWNSAMPLE_STEP
 
-    # Add boundary anchors to prevent wild RBF extrapolation at image edges.
     aug_points, aug_values = _add_boundary_anchors(points, values, h, w)
 
-    # Fit the RBF interpolator on the augmented point set.
     rbf = RBFInterpolator(
         aug_points,
         aug_values,
@@ -395,7 +422,6 @@ def _build_rbf_model(
         smoothing=params.rbf_smoothing,
     )
 
-    # Coarse evaluation grid.
     coarse_rows = np.arange(0, h, step)
     coarse_cols = np.arange(0, w, step)
     cr, cc = np.meshgrid(coarse_rows, coarse_cols, indexing="ij")
@@ -403,12 +429,9 @@ def _build_rbf_model(
 
     coarse_vals = rbf(eval_pts).reshape(cr.shape)
 
-    # Upscale to full resolution using bicubic interpolation.
     coarse_f32 = coarse_vals.astype(np.float32)
     bg_full = cv2.resize(coarse_f32, (w, h), interpolation=cv2.INTER_CUBIC)
 
-    # Final safety clamp: model must stay within the measured value range.
-    # Lower bound is clamped to 0 so we never subtract a negative background.
     val_min = float(values.min())
     val_max = float(values.max())
     margin = max(0.01, (val_max - val_min) * 0.1)

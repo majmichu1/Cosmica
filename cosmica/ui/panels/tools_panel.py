@@ -1155,23 +1155,33 @@ class ToolsPanel(QWidget):
         abe_group = QGroupBox("ABE (Advanced)")
         abe_layout = QVBoxLayout(abe_group)
         abe_layout.addWidget(
-            _info_label("RBF-based background extraction — handles complex LP gradients better.")
+            _info_label("Background extraction using polynomial or RBF surface fitting.")
         )
 
         self._abe_grid_spin = QSpinBox()
-        self._abe_grid_spin.setRange(5, 20)
+        self._abe_grid_spin.setRange(5, 30)
         self._abe_grid_spin.setValue(10)
         abe_layout.addLayout(_h_row("Grid size:", self._abe_grid_spin))
 
+        self._abe_model_combo = QComboBox()
+        self._abe_model_combo.addItems(["Polynomial (recommended)", "RBF"])
+        abe_layout.addLayout(_h_row("Model:", self._abe_model_combo))
+
+        self._abe_degree_spin = QSpinBox()
+        self._abe_degree_spin.setRange(1, 5)
+        self._abe_degree_spin.setValue(2)
+        self._abe_degree_spin.setToolTip("Polynomial degree: 1=plane, 2=quadratic, 3=cubic")
+        abe_layout.addLayout(_h_row("Poly degree:", self._abe_degree_spin))
+
         self._abe_kernel_combo = QComboBox()
         self._abe_kernel_combo.addItems(["Thin Plate Spline", "Multiquadric", "Gaussian"])
-        abe_layout.addLayout(_h_row("Kernel:", self._abe_kernel_combo))
+        abe_layout.addLayout(_h_row("RBF kernel:", self._abe_kernel_combo))
 
         self._abe_smoothing_spin = QDoubleSpinBox()
         self._abe_smoothing_spin.setRange(0.0, 5.0)
         self._abe_smoothing_spin.setValue(0.5)
         self._abe_smoothing_spin.setSingleStep(0.1)
-        abe_layout.addLayout(_h_row("Smoothing:", self._abe_smoothing_spin))
+        abe_layout.addLayout(_h_row("RBF smoothing:", self._abe_smoothing_spin))
 
         self._abe_mode_combo = QComboBox()
         self._abe_mode_combo.addItems(["Subtraction", "Division"])
@@ -2915,10 +2925,13 @@ class ToolsPanel(QWidget):
         return MedianFilterParams(kernel_size=k)
 
     def get_abe_params(self) -> ABEParams:
+        model_map = {0: "polynomial", 1: "rbf"}
         kernel_map = {0: "thin_plate_spline", 1: "multiquadric", 2: "gaussian"}
         mode_map = {0: "subtraction", 1: "division"}
         return ABEParams(
             grid_size=self._abe_grid_spin.value(),
+            model_type=model_map.get(self._abe_model_combo.currentIndex(), "polynomial"),
+            polynomial_degree=self._abe_degree_spin.value(),
             rbf_kernel=kernel_map.get(self._abe_kernel_combo.currentIndex(), "thin_plate_spline"),
             rbf_smoothing=self._abe_smoothing_spin.value(),
             correction_mode=mode_map.get(self._abe_mode_combo.currentIndex(), "subtraction"),

@@ -10,6 +10,7 @@ from PyQt6.QtCore import QSettings, Qt, QThread, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QAction, QDragEnterEvent, QDropEvent
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QDialog,
     QDialogButtonBox,
     QFileDialog,
     QInputDialog,
@@ -575,7 +576,7 @@ class MainWindow(QMainWindow):
         from cosmica.ui.dialogs.export_dialog import ExportDialog
 
         dialog = ExportDialog(self)
-        if dialog.exec() != QDialogButtonBox.StandardButton.Ok:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         params = dialog.get_export_params()
         try:
@@ -606,7 +607,7 @@ class MainWindow(QMainWindow):
         from cosmica.ui.dialogs.preferences_dialog import PreferencesDialog
 
         dialog = PreferencesDialog(self)
-        if dialog.exec() == QDialogButtonBox.StandardButton.Ok:
+        if dialog.exec() == QDialog.DialogCode.Accepted:
             dialog.save()
             self._log_panel.log("Preferences saved", "success")
             self._apply_preferences(dialog.get_prefs())
@@ -1400,6 +1401,18 @@ class MainWindow(QMainWindow):
         if self._project:
             self._project.add_history("Stacking", {"n_frames": result.n_frames})
             self._save_project()
+            # Auto-save the integrated image to the project output folder.
+            try:
+                out_dir = self._project.output_dir
+                out_dir.mkdir(parents=True, exist_ok=True)
+                import re as _re
+                safe_name = _re.sub(r"[^\w\-]", "_", self._project.name)
+                out_path = out_dir / f"{safe_name}_integrated.fits"
+                save_image(result.image, str(out_path))
+                self._log_panel.log(f"Integrated image saved: {out_path}", "success")
+            except Exception as exc:
+                log.warning("Could not auto-save integrated image: %s", exc)
+                self._log_panel.log(f"Auto-save failed: {exc}", "warning")
 
     # ── Multi-session stacking ────────────────────────────────────────────────
 

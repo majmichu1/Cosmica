@@ -206,8 +206,20 @@ def compute_histogram(
 ) -> dict:
     """Compute histogram data for display.
 
+    Stats are computed on a thumbnail (≤1024px longest side) for speed.
     Returns dict with 'edges' (bin edges) and per-channel counts.
     """
+    # Downsample for speed — histogram shape is identical, counts scale proportionally
+    h, w = data.shape[-2], data.shape[-1]
+    max_side = 1024
+    if max(h, w) > max_side:
+        sr = max(1, h // max_side)
+        sc = max(1, w // max_side)
+        if data.ndim == 2:
+            data = data[::sr, ::sc]
+        else:
+            data = data[:, ::sr, ::sc]
+
     edges = np.linspace(range_min, range_max, bins + 1)
     result = {"edges": edges}
 
@@ -219,7 +231,6 @@ def compute_histogram(
         for ch in range(min(data.shape[0], 3)):
             counts, _ = np.histogram(data[ch].ravel(), bins=edges)
             result[colors[ch]] = counts
-        # Luminance
         if data.shape[0] >= 3:
             lum = 0.2126 * data[0] + 0.7152 * data[1] + 0.0722 * data[2]
             counts, _ = np.histogram(lum.ravel(), bins=edges)

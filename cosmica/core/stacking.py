@@ -901,86 +901,108 @@ def align_from_paths(
     out_paths[ref_idx] = ref_out
     log.info("align_from_paths: reference saved → %s", ref_out.name)
 
-    # ── Align all other frames one at a time ─────────────────────────────────
-    for i, p in enumerate(paths):
-        if i == ref_idx:
-            continue
-        frac = 0.05 + 0.90 * (i / n)
-        progress(frac, f"Aligning frame {i + 1}/{n}...")
+    # ── Align all other frames — prefetch IO hides disk latency ─────────────
+    # While the GPU processes frame i, a background thread loads frame i+1.
+    # This overlaps IO (slow) with GPU compute, typically 1.5-2× faster.
+    from concurrent.futures import ThreadPoolExecutor, Future
 
+    non_ref = [i for i in range(n) if i != ref_idx]
+    gc_interval = 10  # run gc every N frames instead of every frame
+
+    def _load(idx: int):
+        """Load one frame from disk; returns (idx, ImageData|None)."""
         try:
-            frame = load_image(str(p))
+            return idx, load_image(str(paths[idx]))
         except Exception as exc:
-            log.warning("align_from_paths: failed to load %s: %s", p.name, exc)
-            continue
+            log.warning("align_from_paths: failed to load %s: %s", paths[idx].name, exc)
+            return idx, None
 
-        if frame.data.shape != ref_shape:
-            log.warning("align_from_paths: frame %d shape mismatch, copying as-is", i + 1)
-            out_p = output_dir / f"{filename_prefix}_{i + 1:05d}.fits"
-            _write_aligned_fits(frame, out_p)
-            out_paths[i] = out_p
-            del frame
-            gc.collect()
-            continue
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        # Kick off the first prefetch before the loop starts
+        prefetch: Future | None = pool.submit(_load, non_ref[0]) if non_ref else None
 
-        transform = None
-        if gpu_available:
-            t_img = dm.from_numpy(frame.data)
-            tgt_stars = detect_stars_gpu(t_img)
-            matches = match_stars_gpu(ref_stars, tgt_stars, max_dist=100.0)
-            transform = estimate_transform_gpu(matches)
+        for loop_pos, i in enumerate(non_ref):
+            frac = 0.05 + 0.90 * (loop_pos / len(non_ref))
+            progress(frac, f"Aligning frame {i + 1}/{n} ({loop_pos + 1}/{len(non_ref)})...")
 
-            if transform is not None and two_pass:
-                t_inv_coarse = _invert_affine_2x3(transform)
-                warped_c = warp_image_gpu(t_img, t_inv_coarse, mode="bilinear")
-                re_stars = detect_stars_gpu(warped_c)
-                re_matches = match_stars_gpu(ref_stars, re_stars, max_dist=20.0)
-                refine = estimate_transform_gpu(re_matches)
-                if refine is not None:
-                    transform = compose_affine_transforms(transform, refine)
+            # Collect the prefetched frame (blocks only until IO finishes)
+            _, frame = prefetch.result()
 
-            if transform is not None:
-                transform_inv = _invert_affine_2x3(transform)
-                final = warp_image_gpu(t_img, transform_inv, mode="bicubic")
-                res = dm.to_cpu(final).numpy().astype(np.float32)
-                if res.ndim == 3 and res.shape[0] == 1:
-                    res = res[0]
+            # Prefetch the next frame while GPU processes this one
+            next_pos = loop_pos + 1
+            if next_pos < len(non_ref):
+                prefetch = pool.submit(_load, non_ref[next_pos])
             else:
-                # GPU failed — CPU fallback
-                log.warning("Frame %d: GPU transform failed, trying CPU", i + 1)
-                ref_sf2 = _cpu_detect_stars(ref_img.data)
-                tgt_sf2 = _cpu_detect_stars(frame.data)
-                cpu_t = _cpu_find_transform(ref_sf2, tgt_sf2)
-                if cpu_t is None:
-                    log.warning("Frame %d: CPU fallback also failed, copying as-is", i + 1)
-                    res = frame.data
-                else:
-                    res = _cpu_align_image(frame.data, cpu_t, ref_shape).astype(np.float32)
-        else:
-            tgt_sf = _cpu_detect_stars(frame.data)
-            transform = _cpu_find_transform(ref_sf, tgt_sf)
-            if transform is None:
-                log.warning("Frame %d: no transform found, copying as-is", i + 1)
-                res = frame.data
-            else:
-                if two_pass:
-                    warped_c = _cpu_align_image(frame.data, transform, ref_shape)
-                    tgt_sf2 = _cpu_detect_stars(warped_c)
-                    refine = _cpu_find_transform(ref_sf, tgt_sf2)
+                prefetch = None
+
+            if frame is None:
+                continue  # load failed, skip
+
+            if frame.data.shape != ref_shape:
+                log.warning("align_from_paths: frame %d shape mismatch, copying as-is", i + 1)
+                out_p = output_dir / f"{filename_prefix}_{i + 1:05d}.fits"
+                _write_aligned_fits(frame, out_p)
+                out_paths[i] = out_p
+                del frame
+                continue
+
+            t_img = None
+            if gpu_available:
+                t_img = dm.from_numpy(frame.data)
+                tgt_stars = detect_stars_gpu(t_img)
+                matches = match_stars_gpu(ref_stars, tgt_stars, max_dist=100.0)
+                transform = estimate_transform_gpu(matches)
+
+                if transform is not None and two_pass:
+                    t_inv_coarse = _invert_affine_2x3(transform)
+                    warped_c = warp_image_gpu(t_img, t_inv_coarse, mode="bilinear")
+                    re_stars = detect_stars_gpu(warped_c)
+                    re_matches = match_stars_gpu(ref_stars, re_stars, max_dist=20.0)
+                    refine = estimate_transform_gpu(re_matches)
                     if refine is not None:
                         transform = compose_affine_transforms(transform, refine)
-                res = _cpu_align_image(frame.data, transform, ref_shape).astype(np.float32)
 
-        aligned_img = ImageData(data=res, header=frame.header.copy(), frame_type=frame.frame_type)
-        out_p = output_dir / f"{filename_prefix}_{i + 1:05d}.fits"
-        _write_aligned_fits(aligned_img, out_p)
-        out_paths[i] = out_p
+                if transform is not None:
+                    transform_inv = _invert_affine_2x3(transform)
+                    final = warp_image_gpu(t_img, transform_inv, mode="bicubic")
+                    res = dm.to_cpu(final).numpy().astype(np.float32)
+                    if res.ndim == 3 and res.shape[0] == 1:
+                        res = res[0]
+                else:
+                    log.warning("Frame %d: GPU transform failed, trying CPU", i + 1)
+                    ref_sf2 = _cpu_detect_stars(ref_img.data)
+                    tgt_sf2 = _cpu_detect_stars(frame.data)
+                    cpu_t = _cpu_find_transform(ref_sf2, tgt_sf2)
+                    if cpu_t is None:
+                        log.warning("Frame %d: CPU fallback also failed, copying as-is", i + 1)
+                        res = frame.data
+                    else:
+                        res = _cpu_align_image(frame.data, cpu_t, ref_shape).astype(np.float32)
+            else:
+                tgt_sf = _cpu_detect_stars(frame.data)
+                transform = _cpu_find_transform(ref_sf, tgt_sf)
+                if transform is None:
+                    log.warning("Frame %d: no transform found, copying as-is", i + 1)
+                    res = frame.data
+                else:
+                    if two_pass:
+                        warped_c = _cpu_align_image(frame.data, transform, ref_shape)
+                        tgt_sf2 = _cpu_detect_stars(warped_c)
+                        refine = _cpu_find_transform(ref_sf, tgt_sf2)
+                        if refine is not None:
+                            transform = compose_affine_transforms(transform, refine)
+                    res = _cpu_align_image(frame.data, transform, ref_shape).astype(np.float32)
 
-        # *** Free frame and GPU tensor immediately ***
-        del frame, aligned_img, res
-        if gpu_available and 't_img' in dir():
-            del t_img
-        gc.collect()
+            aligned_img = ImageData(data=res, header=frame.header.copy(), frame_type=frame.frame_type)
+            out_p = output_dir / f"{filename_prefix}_{i + 1:05d}.fits"
+            _write_aligned_fits(aligned_img, out_p)
+            out_paths[i] = out_p
+
+            del frame, aligned_img, res
+            if t_img is not None:
+                del t_img
+            if (loop_pos + 1) % gc_interval == 0:
+                gc.collect()
 
     del ref_img
     gc.collect()
@@ -1344,6 +1366,12 @@ def stack_from_paths(
 
     progress(1.0, f"Stacking complete: {n} files, {total_rejected} pixels rejected")
     log.info("Tiled stacking complete: %d frames, %d rejected", n, total_rejected)
+
+    # Release GPU memory back to OS; PyTorch caches it otherwise
+    if use_gpu:
+        import gc as _gc
+        _gc.collect()
+        torch.cuda.empty_cache()
 
     # Load header from first file for metadata
     ref_img = load_image(str(paths[0]))

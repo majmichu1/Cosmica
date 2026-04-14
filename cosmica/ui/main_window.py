@@ -94,6 +94,7 @@ class ProcessingWorker(QThread):
     progress = pyqtSignal(float, str)
     finished = pyqtSignal(object)  # result
     error = pyqtSignal(str)
+    elapsed = pyqtSignal(float)    # seconds
 
     def __init__(self, func, *args, **kwargs):
         super().__init__()
@@ -102,11 +103,15 @@ class ProcessingWorker(QThread):
         self._kwargs = kwargs
 
     def run(self):
+        import time
+        t0 = time.monotonic()
         try:
             self._kwargs["progress"] = self._emit_progress
             result = self._func(*self._args, **self._kwargs)
+            self.elapsed.emit(time.monotonic() - t0)
             self.finished.emit(result)
         except Exception as e:
+            self.elapsed.emit(time.monotonic() - t0)
             log.exception("Processing error")
             self.error.emit(str(e))
 
@@ -743,11 +748,13 @@ class MainWindow(QMainWindow):
         if self._undo_stack.undo():
             self._display_image(self._image_ref[0])
             self._log_panel.log(f"Undid: {self._undo_stack.redo_text()}", "info")
+            self._update_undo_actions()
 
     def _redo(self):
         if self._undo_stack.redo():
             self._display_image(self._image_ref[0])
             self._log_panel.log(f"Redid: {self._undo_stack.undo_text()}", "info")
+            self._update_undo_actions()
 
     def _clear_undo_history(self):
         self._undo_stack.clear()
@@ -825,6 +832,14 @@ class MainWindow(QMainWindow):
         )
         self._worker.error.connect(
             lambda msg: self._log_panel.log(f"Error: {msg}", "error"),
+            _Qt.ConnectionType.QueuedConnection,
+        )
+        self._worker.elapsed.connect(
+            lambda secs: self._log_panel.log(
+                f"Completed in {secs:.1f}s" if secs < 120
+                else f"Completed in {secs / 60:.1f} min",
+                "info",
+            ),
             _Qt.ConnectionType.QueuedConnection,
         )
         if on_done:
@@ -2713,21 +2728,28 @@ class MainWindow(QMainWindow):
         if self._current_image is None:
             return
         if enabled:
-            # Show stretched copy on canvas, keep _current_image untouched
-            from cosmica.core.stretch import auto_stretch
-            params = self._tools_panel.get_stretch_params()
-            stretched = auto_stretch(self._current_image.data, params)
-            preview_img = ImageData(data=stretched, header=self._current_image.header.copy())
-            # to_display(stretch=False) — data already stretched, just convert to uint8 RGB
-            rgb = preview_img.to_display(stretch=False)
+            # Show aggressive auto-stretch for visual assessment.
+            # The data stays linear — only the canvas view changes.
+            rgb = self._current_image.to_display(stretch=True)
             self._canvas.set_image(rgb)
             self._log_panel.log(
-                "Preview stretch ON — canvas shows stretched view, data stays linear", "info"
+                "Preview stretch ON — stretched view (data unchanged)", "info"
             )
         else:
-            # Restore original linear display
-            self._display_image(self._current_image)
-            self._log_panel.log("Preview stretch OFF — showing linear data", "info")
+            # Show linear (min-max normalised) — useful for judging gradients/background.
+            data = self._current_image.data
+            d_min, d_max = float(data.min()), float(data.max())
+            if d_max > d_min:
+                linear = (data - d_min) / (d_max - d_min)
+            else:
+                linear = data.copy()
+            linear_img = ImageData(data=linear.astype("float32"),
+                                   header=self._current_image.header.copy())
+            rgb = linear_img.to_display(stretch=False)
+            self._canvas.set_image(rgb)
+            self._log_panel.log(
+                "Preview stretch OFF — linear view (min-max normalised)", "info"
+            )
 
     @pyqtSlot()
     def _on_run_local_contrast(self):

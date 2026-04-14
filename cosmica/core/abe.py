@@ -73,6 +73,7 @@ def abe_extract(
     data: np.ndarray,
     params: ABEParams | None = None,
     mask: Mask | None = None,
+    progress=None,  # accepts but ignores — keeps ProcessingWorker happy
 ) -> tuple[np.ndarray, np.ndarray]:
     """Extract and remove background using RBF interpolation.
 
@@ -350,5 +351,13 @@ def _build_rbf_model(
     # Upscale to full resolution using bicubic interpolation.
     coarse_f32 = coarse_vals.astype(np.float32)
     bg_full = cv2.resize(coarse_f32, (w, h), interpolation=cv2.INTER_CUBIC)
+
+    # Clamp to the measured sample range + small tolerance.
+    # RBF extrapolation beyond the sample grid (esp. near edges) can
+    # produce wild values that leave bright/dark halos on the image edges.
+    val_min = float(values.min())
+    val_max = float(values.max())
+    margin = max(0.02, (val_max - val_min) * 0.2)
+    bg_full = np.clip(bg_full, val_min - margin, val_max + margin)
 
     return bg_full.astype(np.float32)

@@ -99,19 +99,37 @@ def _extract_single_channel(
 
     log.info("Background samples: %d kept, %d rejected", keep.sum(), (~keep).sum())
 
-    if len(samples_val) < 6:
+    if len(samples_val) < 3:
         log.warning("Too few samples after clipping, returning original")
         return channel.copy(), np.zeros_like(channel)
+
+    # Auto-reduce polynomial degree if there aren't enough samples.
+    # A degree-d surface has (d+1)(d+2)/2 terms; need at least that many samples.
+    n_samples = len(samples_val)
+    poly_degree = params.polynomial_order
+    while poly_degree > 1:
+        min_required = (poly_degree + 1) * (poly_degree + 2) // 2
+        if n_samples >= min_required:
+            break
+        poly_degree -= 1
+    if poly_degree < params.polynomial_order:
+        log.warning(
+            "Background: reduced polynomial degree %d→%d "
+            "(need %d samples for degree %d, have %d)",
+            params.polynomial_order, poly_degree,
+            (params.polynomial_order + 1) * (params.polynomial_order + 2) // 2,
+            params.polynomial_order, n_samples,
+        )
 
     # Normalize coordinates to [-1, 1]
     x_norm = (samples_x / w) * 2 - 1
     y_norm = (samples_y / h) * 2 - 1
 
     # Fit polynomial surface (CPU, tiny matrix — fast)
-    coeffs = _fit_polynomial_surface(x_norm, y_norm, samples_val, params.polynomial_order)
+    coeffs = _fit_polynomial_surface(x_norm, y_norm, samples_val, poly_degree)
 
     # Evaluate model over full image — GPU if available, else CPU
-    bg_model = _evaluate_polynomial_gpu(h, w, coeffs, params.polynomial_order)
+    bg_model = _evaluate_polynomial_gpu(h, w, coeffs, poly_degree)
 
     # Optional smoothing (GPU Gaussian)
     if params.smoothing > 0:

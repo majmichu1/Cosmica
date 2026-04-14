@@ -1606,6 +1606,26 @@ class ToolsPanel(QWidget):
         decon_layout.addWidget(self._decon_spatial_check)
 
         self._add_preview_checkbox(decon_layout, "deconvolution")
+
+        # Auto-update live preview whenever any deconvolution parameter changes
+        for _widget in (
+            self._decon_fwhm_spin,
+            self._decon_iter_spin,
+            self._decon_dering_amount,
+        ):
+            _widget.valueChanged.connect(
+                lambda: self._emit_if_preview_enabled("deconvolution")
+            )
+        self._decon_reg_slider.valueChanged.connect(
+            lambda: self._emit_if_preview_enabled("deconvolution")
+        )
+        self._decon_dering_check.stateChanged.connect(
+            lambda: self._emit_if_preview_enabled("deconvolution")
+        )
+        self._decon_spatial_check.stateChanged.connect(
+            lambda: self._emit_if_preview_enabled("deconvolution")
+        )
+
         self._btn_decon = QPushButton("Run Deconvolution")
         self._btn_decon.setToolTip("GPU-accelerated Richardson-Lucy deconvolution")
         self._btn_decon.clicked.connect(self.run_deconvolution.emit)

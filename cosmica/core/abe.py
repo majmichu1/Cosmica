@@ -288,51 +288,41 @@ def _build_poly_model(
 ) -> np.ndarray:
     """Fit a 2-D polynomial surface to the sample points.
 
-    Coordinates are normalised to [-1, 1] before fitting for numerical
-    stability.  The polynomial is evaluated on the full image grid.
+    The fit is performed on the CPU (tiny matrix), and the full-image
+    evaluation is offloaded to the GPU via ``_evaluate_polynomial_gpu``
+    from ``cosmica.core.background`` (GPU→CPU tensor ops; falls back to
+    CPU numpy automatically if GPU is unavailable).
 
-    For a degree-2 surface the basis is:
-      ``{1, r, c, r², rc, c²}``  (6 terms)
+    Coordinate convention matches ``_evaluate_polynomial_gpu``:
+      x = col (normalised), y = row (normalised).
+    Basis: x^i · y^j for 0 ≤ i, 0 ≤ j, i+j ≤ degree.
 
     Polynomial surfaces extrapolate smoothly by construction — no edge
     artefacts regardless of the sample distribution.
-
-    Parameters
-    ----------
-    points : (M, 2) row/col sample coordinates.
-    values : (M,) background values.
-    h, w : image dimensions.
-    params : ABEParams (uses ``polynomial_degree``).
-
-    Returns
-    -------
-    ndarray, shape (h, w), float32
     """
+    from cosmica.core.background import _evaluate_polynomial_gpu
+
     degree = params.polynomial_degree
 
-    # Normalise sample coordinates to [-1, 1]
-    row_n = points[:, 0] / max(h - 1, 1) * 2.0 - 1.0
-    col_n = points[:, 1] / max(w - 1, 1) * 2.0 - 1.0
+    # Normalise — x=col, y=row to match _evaluate_polynomial_gpu convention
+    x_n = points[:, 1] / max(w - 1, 1) * 2.0 - 1.0   # col → x
+    y_n = points[:, 0] / max(h - 1, 1) * 2.0 - 1.0   # row → y
 
-    # Build the Vandermonde matrix: one column per monomial r^i * c^j
-    def _vander(r_arr: np.ndarray, c_arr: np.ndarray) -> np.ndarray:
+    # Build Vandermonde: basis is x^i * y^j (same ordering as GPU evaluator)
+    def _vander(x_arr: np.ndarray, y_arr: np.ndarray) -> np.ndarray:
         cols = []
         for i in range(degree + 1):
             for j in range(degree + 1 - i):
-                cols.append(r_arr ** i * c_arr ** j)
+                cols.append(x_arr ** i * y_arr ** j)
         return np.column_stack(cols)
 
-    A = _vander(row_n, col_n)
+    A = _vander(x_n, y_n)
 
-    # Least-squares fit
+    # Least-squares fit (CPU, tiny matrix — microseconds)
     coeffs, _, _, _ = np.linalg.lstsq(A, values, rcond=None)
 
-    # Evaluate on the full image grid
-    r_full = np.linspace(-1.0, 1.0, h)
-    c_full = np.linspace(-1.0, 1.0, w)
-    RR, CC = np.meshgrid(r_full, c_full, indexing="ij")
-    A_full = _vander(RR.ravel(), CC.ravel())
-    bg_full = (A_full @ coeffs).reshape(h, w)
+    # Evaluate over full image on GPU (or CPU fallback)
+    bg_full = _evaluate_polynomial_gpu(h, w, coeffs, degree)
 
     # Clamp to measured sample range + small tolerance
     val_min = float(values.min())

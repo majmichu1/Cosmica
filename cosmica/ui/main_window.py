@@ -89,6 +89,68 @@ from cosmica.ui.widgets.log_panel import LogPanel, QtLogHandler
 log = logging.getLogger(__name__)
 
 
+def _align_with_optional_filter(
+    paths,
+    output_dir,
+    qf_params=None,
+    stk_params=None,
+    filename_prefix="aligned",
+    progress=None,
+):
+    """Worker-thread wrapper: optionally quality-filter paths then align.
+
+    Running quality filtering here (not on the main thread) avoids freezing
+    the UI for datasets where score_subframes measures PSF on every frame.
+    """
+    from pathlib import Path
+    from cosmica.core.stacking import align_from_paths
+
+    def _prog(frac, msg):
+        if progress is not None:
+            progress(frac, msg)
+
+    # --- Optional quality filter (runs PSF measurement per frame) ---
+    filtered_paths = list(paths)
+    if qf_params is not None:
+        try:
+            from cosmica.core.subframe_selector import (
+                SubframeSelectorParams,
+                filter_by_metric,
+                score_subframes,
+            )
+            _prog(0.0, f"Quality filter: scoring {len(paths)} frames...")
+            sf_params = SubframeSelectorParams(
+                rejection_sigma=qf_params.get("rejection_sigma", 1.5)
+            )
+            str_paths = [str(p) for p in filtered_paths]
+            scores = score_subframes(str_paths, sf_params)
+            accepted = filter_by_metric(
+                scores,
+                metric=qf_params.get("metric", "quality_score"),
+                mode=qf_params.get("mode", "sigma"),
+                top_n=qf_params.get("top_n"),
+                top_percent=qf_params.get("top_percent", 80.0),
+                sigma=qf_params.get("rejection_sigma", 1.5),
+            )
+            kept = [p for p, sc in zip(filtered_paths, accepted) if sc.accepted]
+            n_rejected = len(filtered_paths) - len(kept)
+            if n_rejected:
+                log.info("Quality filter: rejected %d frames", n_rejected)
+            filtered_paths = kept if kept else filtered_paths
+        except Exception as exc:
+            log.warning("Quality filter skipped in worker: %s", exc)
+
+    # --- Alignment ---
+    _prog(0.02, f"Aligning {len(filtered_paths)} frames...")
+    return align_from_paths(
+        [Path(p) for p in filtered_paths],
+        Path(output_dir),
+        params=stk_params,
+        filename_prefix=filename_prefix,
+        progress=lambda f, m: _prog(0.02 + f * 0.98, m),
+    )
+
+
 class ProcessingWorker(QThread):
     """Runs processing tasks off the main thread."""
 
@@ -1176,9 +1238,8 @@ class MainWindow(QMainWindow):
             paths = self._get_light_paths()
             if not paths:
                 return
-            paths = self._apply_quality_filter_paths(paths)
-            self._tools_panel.set_ref_frame_max(len(paths))
             params_dict = self._tools_panel.get_alignment_params()
+            qf_params = self._tools_panel.get_quality_filter_params()
             stk_params = StackingParams(
                 registration_mode=params_dict["mode"],
                 reference_frame_index=params_dict["reference_frame_index"],
@@ -1198,11 +1259,14 @@ class MainWindow(QMainWindow):
                 f"{len(paths)} raw frames (streaming from disk, low-RAM)...",
                 "info",
             )
+            # NOTE: quality filtering (score_subframes) is deferred into the
+            # worker so it doesn't block the main thread for large datasets.
             self._start_worker(
-                align_from_paths,
+                _align_with_optional_filter,
                 paths,
                 aligned_dir,
-                params=stk_params,
+                qf_params=qf_params,
+                stk_params=stk_params,
                 filename_prefix=file_prefix,
                 on_done=self._on_path_alignment_done,
             )
@@ -1251,6 +1315,13 @@ class MainWindow(QMainWindow):
         if self._project:
             self._project.add_history("Alignment", {"n_frames": len(result_paths)})
             self._save_project()
+        try:
+            import gc as _gc; _gc.collect()
+            import torch as _torch
+            if _torch.cuda.is_available():
+                _torch.cuda.empty_cache()
+        except Exception:
+            pass
 
     def _on_alignment_done(self, aligned_lights: list):
         """Callback when alignment finishes."""
@@ -1284,10 +1355,16 @@ class MainWindow(QMainWindow):
         self._display_image(ref_display)
         n_aligned = len(aligned_lights)
 
-        # *** Free aligned_lights from RAM — stacking reads from disk ***
+        # *** Free aligned_lights from RAM and VRAM — stacking reads from disk ***
         self._aligned_lights = []
         del aligned_lights
-        import gc; gc.collect()
+        import gc as _gc; _gc.collect()
+        try:
+            import torch as _torch
+            if _torch.cuda.is_available():
+                _torch.cuda.empty_cache()
+        except Exception:
+            pass
 
         if project_dir and aligned_paths:
             # Register aligned frames in the project (REGISTERED section)

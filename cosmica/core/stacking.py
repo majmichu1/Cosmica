@@ -21,6 +21,7 @@ from skimage.registration import phase_cross_correlation as _skimage_pcc
 
 from cosmica.core.device_manager import get_device_manager
 from cosmica.core.gpu_stars import (
+    Star,
     compose_affine_transforms,
     detect_stars_gpu,
     estimate_transform_gpu,
@@ -868,25 +869,27 @@ def _fast_variance_at(path) -> float:
     import astropy.io.fits as _fits
 
     try:
-        with _fits.open(str(path), memmap=True, lazy_load_hdus=True) as hdul:
-            hdu = hdul[0]
-            # Shape: (H, W) for mono FITS or (C, H, W) — use last two dims
+        # memmap=False so BZERO/BSCALE are applied correctly (memmap=True refuses
+        # when these keywords are present, which is the case for most camera FITS).
+        # We load only the center 256×256 crop via section slicing — astropy reads
+        # only the required rows from disk, so this is still much faster than a
+        # full load even without memmap.
+        with _fits.open(str(path), memmap=False, lazy_load_hdus=True) as hdul:
+            # Find first HDU with image data
+            hdu = next((h for h in hdul if h.data is not None), hdul[0])
             sh = hdu.shape
             h, w = sh[-2], sh[-1]
             cy, cx = h // 2, w // 2
             half = 128
             r0, r1 = max(0, cy - half), min(h, cy + half)
             c0, c1 = max(0, cx - half), min(w, cx + half)
-            # Slice directly from the memory-mapped array — reads only this region
             if hdu.data.ndim == 2:
                 crop = np.asarray(hdu.data[r0:r1, c0:c1], dtype=np.float32)
             else:
                 crop = np.asarray(hdu.data[0, r0:r1, c0:c1], dtype=np.float32)
             return float(np.var(crop))
     except Exception as _e:
-        # Fall back to full load (handles BZERO/BSCALE, debayering, XISF, etc.)
-        # Log so we know this slow path is being taken — 1.5s vs <50ms for memmap
-        log.warning("_fast_variance_at: memmap failed for %s (%s), falling back to full load", path, _e)
+        log.warning("_fast_variance_at: FITS crop failed for %s (%s), falling back to full load", path, _e)
         img = load_image(str(path))
         arr = img.data
         del img

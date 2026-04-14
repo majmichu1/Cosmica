@@ -758,10 +758,24 @@ class MainWindow(QMainWindow):
 
         self._start_worker(_load_work, path, on_done=_on_loaded)
 
-    def _display_image(self, image: ImageData):
+    def _display_image(self, image: ImageData, display_ref: "np.ndarray | None" = None):
         self._current_image = image
         self._image_ref[0] = image  # sync with undo ref
-        rgb = image.to_display(stretch=True)
+        if display_ref is not None:
+            # Use reference-based stretch — same method as live preview uses.
+            # Computes stretch params from the pre-operation image so brightness
+            # matches what was shown in the split preview.
+            import numpy as _np
+            if image.is_color:
+                hwc = _np.transpose(image.data, (1, 2, 0))
+                ref_hwc = _np.transpose(display_ref, (1, 2, 0)) if display_ref.ndim == 3 else _np.stack([display_ref] * 3, axis=-1)
+            else:
+                hwc = _np.stack([image.data] * 3, axis=-1)
+                ref_hwc = _np.stack([display_ref] * 3, axis=-1) if display_ref.ndim == 2 else _np.transpose(display_ref, (1, 2, 0))
+            stretched = auto_stretch_for_display_ref(hwc, ref_hwc)
+            rgb = _np.clip(stretched * 255, 0, 255).astype(_np.uint8)
+        else:
+            rgb = image.to_display(stretch=True)
         self._canvas.set_image(rgb, image.data)
 
         hist_data = compute_histogram(image.data)
@@ -827,6 +841,9 @@ class MainWindow(QMainWindow):
     def _update_current_image(self, data, message: str, undo_desc: str | None = None):
         """Replace current image data and update display, recording undo."""
         before = self._current_image
+        # Capture pre-operation data as display reference — same as live preview uses.
+        # This ensures the executed result matches the preview brightness exactly.
+        display_ref = before.data if before is not None else None
         image = ImageData(
             data=data,
             header=self._current_image.header.copy() if self._current_image else {},
@@ -835,7 +852,7 @@ class MainWindow(QMainWindow):
         if before is not None:
             desc = undo_desc if undo_desc else message
             self._push_undo(before, image, desc)
-        self._display_image(image)
+        self._display_image(image, display_ref=display_ref)
         self._log_panel.log(message, "success")
 
     @pyqtSlot(int, int, list)
@@ -2297,72 +2314,85 @@ class MainWindow(QMainWindow):
         if self._current_image is None:
             return
         params = self._tools_panel.get_histogram_transform_params()
-        result = histogram_transform(self._current_image.data, params)
-        self._update_current_image(result, "Histogram transform applied")
-        if self._project:
-            self._project.add_history(
-                "Histogram Transform",
-                {
-                    "black_point": params.black_point,
-                    "midtone": params.midtone,
-                    "white_point": params.white_point,
-                },
+        self._log_panel.log("Applying histogram transform...", "info")
+        _p = params
+
+        def _ht_work(data, progress=None):
+            return histogram_transform(data, _p)
+
+        def _ht_done(result):
+            self._update_current_image(result, "Histogram transform applied")
+            if self._project:
+                self._project.add_history(
+                    "Histogram Transform",
+                    {"black_point": _p.black_point, "midtone": _p.midtone, "white_point": _p.white_point},
+                )
+            self._macro_recorder.record_step(
+                "histogram_transform",
+                {"black_point": _p.black_point, "midtone": _p.midtone, "white_point": _p.white_point},
             )
-        self._macro_recorder.record_step(
-            "histogram_transform",
-            {
-                "black_point": params.black_point,
-                "midtone": params.midtone,
-                "white_point": params.white_point,
-            },
-        )
-        self._tools_panel.reset_histogram_transform_params()
+            self._tools_panel.reset_histogram_transform_params()
+
+        self._start_worker(_ht_work, self._current_image.data, on_done=_ht_done)
 
     @pyqtSlot()
     def _on_run_curves(self):
         if self._current_image is None:
             return
         params = CurvesParams()
-        # Get curve from the editor widget
         params.master = self._tools_panel.curve_editor.curve
-        result = curves_transform(self._current_image.data, params)
-        self._update_current_image(result, "Curves applied")
-        if self._project:
-            self._project.add_history("Curves", {})
+        self._log_panel.log("Applying curves...", "info")
+        _p = params
+
+        def _curves_work(data, progress=None):
+            return curves_transform(data, _p)
+
+        def _curves_done(result):
+            self._update_current_image(result, "Curves applied")
+            if self._project:
+                self._project.add_history("Curves", {})
+
+        self._start_worker(_curves_work, self._current_image.data, on_done=_curves_done)
 
     @pyqtSlot()
     def _on_run_scnr(self):
         if self._current_image is None:
             return
         params = self._tools_panel.get_scnr_params()
-        result = scnr(self._current_image.data, params)
-        self._update_current_image(result, "SCNR applied")
-        if self._project:
-            self._project.add_history(
-                "SCNR",
-                {
-                    "method": params.method.name,
-                    "amount": params.amount,
-                },
-            )
-        self._macro_recorder.record_step("scnr", {"amount": params.amount})
+        self._log_panel.log("Applying SCNR...", "info")
+        _p = params
+
+        def _scnr_work(data, progress=None):
+            return scnr(data, _p)
+
+        def _scnr_done(result):
+            self._update_current_image(result, "SCNR applied")
+            if self._project:
+                self._project.add_history("SCNR", {"method": _p.method.name, "amount": _p.amount})
+            self._macro_recorder.record_step("scnr", {"amount": _p.amount})
+
+        self._start_worker(_scnr_work, self._current_image.data, on_done=_scnr_done)
 
     @pyqtSlot()
     def _on_run_color_adjust(self):
         if self._current_image is None:
             return
         params = self._tools_panel.get_color_adjust_params()
-        result = color_adjust(self._current_image.data, params)
-        self._update_current_image(result, "Color adjustment applied")
-        if self._project:
-            self._project.add_history(
-                "Color Adjustment",
-                {
-                    "saturation": params.saturation,
-                    "hue_shift": params.hue_shift,
-                    "vibrance": params.vibrance,
-                },
-            )
+        self._log_panel.log("Applying color adjustment...", "info")
+        _p = params
+
+        def _ca_work(data, progress=None):
+            return color_adjust(data, _p)
+
+        def _ca_done(result):
+            self._update_current_image(result, "Color adjustment applied")
+            if self._project:
+                self._project.add_history(
+                    "Color Adjustment",
+                    {"saturation": _p.saturation, "hue_shift": _p.hue_shift, "vibrance": _p.vibrance},
+                )
+
+        self._start_worker(_ca_work, self._current_image.data, on_done=_ca_done)
 
     @pyqtSlot()
     def _on_run_deconvolution(self):
@@ -2419,11 +2449,18 @@ class MainWindow(QMainWindow):
                 "warning",
             )
         self._log_panel.log(f"Applying GHS (D={params.D})...", "info")
-        result = generalized_hyperbolic_stretch(data, params)
-        self._update_current_image(result, "GHS applied")
-        if self._project:
-            self._project.add_history("GHS", {"D": params.D, "b": params.b, "SP": params.SP})
-        self._tools_panel.reset_ghs_params()
+        _p = params
+
+        def _ghs_work(d, progress=None):
+            return generalized_hyperbolic_stretch(d, _p)
+
+        def _ghs_done(result):
+            self._update_current_image(result, "GHS applied")
+            if self._project:
+                self._project.add_history("GHS", {"D": _p.D, "b": _p.b, "SP": _p.SP})
+            self._tools_panel.reset_ghs_params()
+
+        self._start_worker(_ghs_work, data, on_done=_ghs_done)
 
     @pyqtSlot()
     def _on_run_color_calibration(self):

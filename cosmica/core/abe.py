@@ -301,6 +301,55 @@ def _sample_background(
 _DOWNSAMPLE_STEP = 8  # evaluate RBF every Nth pixel, then upscale
 
 
+def _add_boundary_anchors(
+    points: np.ndarray,
+    values: np.ndarray,
+    h: int,
+    w: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Extend the sample set with anchor points at the image boundary.
+
+    RBF kernels like thin-plate spline extrapolate wildly outside the
+    convex hull of sample points.  The measurement grid has a ``box_size/2``
+    inward margin, so the image edges and corners sit outside that hull —
+    leading to runaway extrapolation and a bright-edge halo artefact.
+
+    Anchors are placed at the 4 corners and along each edge.  Each anchor
+    takes the value of the nearest real sample so the RBF is guided toward
+    measured data at the boundary rather than inventing values.
+    """
+    if len(points) == 0:
+        return points, values
+
+    n_edge = 5  # evenly-spaced points per side (excluding corners)
+
+    anchors: list[tuple[float, float]] = []
+
+    # 4 corners
+    for r in (0.0, float(h - 1)):
+        for c in (0.0, float(w - 1)):
+            anchors.append((r, c))
+
+    # Points along each of the 4 edges (corners already added)
+    for frac in np.linspace(0, 1, n_edge + 2)[1:-1]:
+        anchors.append((0.0,           frac * (w - 1)))   # top edge
+        anchors.append((float(h - 1),  frac * (w - 1)))   # bottom edge
+        anchors.append((frac * (h - 1), 0.0))             # left edge
+        anchors.append((frac * (h - 1), float(w - 1)))    # right edge
+
+    anchors_arr = np.array(anchors, dtype=np.float64)
+
+    # Each anchor gets the value of the nearest real sample.
+    anchor_vals: list[float] = []
+    for ry, cx in anchors_arr:
+        dists = np.sqrt((points[:, 0] - ry) ** 2 + (points[:, 1] - cx) ** 2)
+        anchor_vals.append(float(values[int(np.argmin(dists))]))
+
+    all_points = np.vstack([points, anchors_arr])
+    all_values = np.concatenate([values, np.array(anchor_vals, dtype=np.float64)])
+    return all_points, all_values
+
+
 def _build_rbf_model(
     points: np.ndarray,
     values: np.ndarray,
@@ -313,6 +362,9 @@ def _build_rbf_model(
     For efficiency the RBF is evaluated on a coarse grid (every
     ``_DOWNSAMPLE_STEP`` pixels) and then upscaled to the full resolution
     with bicubic interpolation.
+
+    Boundary anchor points are added before fitting so that the RBF hull
+    covers the full image extent, eliminating edge-extrapolation artefacts.
 
     Parameters
     ----------
@@ -332,10 +384,13 @@ def _build_rbf_model(
     """
     step = _DOWNSAMPLE_STEP
 
-    # Fit the RBF interpolator.
+    # Add boundary anchors to prevent wild RBF extrapolation at image edges.
+    aug_points, aug_values = _add_boundary_anchors(points, values, h, w)
+
+    # Fit the RBF interpolator on the augmented point set.
     rbf = RBFInterpolator(
-        points,
-        values,
+        aug_points,
+        aug_values,
         kernel=params.rbf_kernel,
         smoothing=params.rbf_smoothing,
     )
@@ -352,12 +407,11 @@ def _build_rbf_model(
     coarse_f32 = coarse_vals.astype(np.float32)
     bg_full = cv2.resize(coarse_f32, (w, h), interpolation=cv2.INTER_CUBIC)
 
-    # Clamp to the measured sample range + small tolerance.
-    # RBF extrapolation beyond the sample grid (esp. near edges) can
-    # produce wild values that leave bright/dark halos on the image edges.
+    # Final safety clamp: model must stay within the measured value range.
+    # Lower bound is clamped to 0 so we never subtract a negative background.
     val_min = float(values.min())
     val_max = float(values.max())
-    margin = max(0.02, (val_max - val_min) * 0.2)
-    bg_full = np.clip(bg_full, val_min - margin, val_max + margin)
+    margin = max(0.01, (val_max - val_min) * 0.1)
+    bg_full = np.clip(bg_full, max(0.0, val_min - margin), val_max + margin)
 
     return bg_full.astype(np.float32)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-from PyQt6.QtCore import pyqtSlot
+from PyQt6.QtCore import QObject, Qt, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QProgressBar, QTextEdit, QVBoxLayout, QWidget
 
 
@@ -45,6 +45,7 @@ class LogPanel(QWidget):
         self._progress_bar.setValue(int(fraction * 1000))
         self._progress_label.setText(message)
 
+    @pyqtSlot(str, str)
     def log(self, message: str, level: str = "info"):
         timestamp = datetime.now().strftime("%H:%M:%S")
         colors = {
@@ -70,12 +71,22 @@ class LogPanel(QWidget):
         self._progress_label.setText("Ready")
 
 
+class _LogSignalBridge(QObject):
+    """Thread-safe bridge: emits a Qt signal so log calls from worker threads
+    are always delivered to the GUI thread via the event queue."""
+
+    message = pyqtSignal(str, str)  # (text, level)
+
+
 class QtLogHandler(logging.Handler):
-    """Route Python logging to the LogPanel."""
+    """Route Python logging to the LogPanel — thread-safe via Qt queued signals."""
 
     def __init__(self, log_panel: LogPanel):
         super().__init__()
         self._panel = log_panel
+        self._bridge = _LogSignalBridge()
+        # QueuedConnection: signal emitted from any thread, slot always runs in GUI thread
+        self._bridge.message.connect(self._panel.log, Qt.ConnectionType.QueuedConnection)
 
     def emit(self, record: logging.LogRecord):
         level_map = {
@@ -86,4 +97,5 @@ class QtLogHandler(logging.Handler):
             logging.CRITICAL: "error",
         }
         level = level_map.get(record.levelno, "info")
-        self._panel.log(record.getMessage(), level)
+        # Emit the signal — safe from any thread; Qt queues it for the GUI thread
+        self._bridge.message.emit(record.getMessage(), level)

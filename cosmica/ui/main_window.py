@@ -816,12 +816,22 @@ class MainWindow(QMainWindow):
             self._log_panel.log("A processing task is already running", "warning")
             return
 
+        from PyQt6.QtCore import Qt as _Qt
         self._worker = ProcessingWorker(func, *args, **kwargs)
-        self._worker.progress.connect(self._log_panel.update_progress)
-        self._worker.error.connect(lambda msg: self._log_panel.log(f"Error: {msg}", "error"))
+        # QueuedConnection ensures slots run in the GUI thread even when signals
+        # are emitted from the worker thread (prevents QTextEdit segfaults).
+        self._worker.progress.connect(
+            self._log_panel.update_progress, _Qt.ConnectionType.QueuedConnection
+        )
+        self._worker.error.connect(
+            lambda msg: self._log_panel.log(f"Error: {msg}", "error"),
+            _Qt.ConnectionType.QueuedConnection,
+        )
         if on_done:
-            self._worker.finished.connect(on_done)
-        self._worker.finished.connect(lambda: self._log_panel.reset_progress())
+            self._worker.finished.connect(on_done, _Qt.ConnectionType.QueuedConnection)
+        self._worker.finished.connect(
+            lambda: self._log_panel.reset_progress(), _Qt.ConnectionType.QueuedConnection
+        )
         self._worker.start()
 
     # ---------- Processing operations ----------

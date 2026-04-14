@@ -822,8 +822,6 @@ def align_from_paths(
     import gc
     from pathlib import Path
 
-    from astropy.io import fits as _fits
-
     if params is None:
         params = StackingParams()
 
@@ -847,26 +845,36 @@ def align_from_paths(
         ref_idx = max(0, min(params.reference_frame_index, n - 1))
         log.info("align_from_paths: using user-specified frame #%d", ref_idx + 1)
     else:
-        # Auto: sample center 256×256 crop of each frame to find highest variance
-        log.info("align_from_paths: scanning %d frames for highest variance (auto ref)...", n)
-        best_var, ref_idx = -1.0, 0
-        for i, p in enumerate(paths):
+        # Auto: sample center crop of each frame to find highest variance.
+        # Use load_image() — it handles BZERO/BSCALE/BLANK, Bayer, and all edge cases.
+        # For large datasets (>30 frames), scan every Nth frame to keep startup fast.
+        # We only keep a float scalar per frame, so peak RAM = 1 frame at a time.
+        max_scan = 30
+        if n <= max_scan:
+            scan_indices = list(range(n))
+        else:
+            # Evenly spaced sample across the sequence
+            step = n / max_scan
+            scan_indices = [int(i * step) for i in range(max_scan)]
+        log.info(
+            "align_from_paths: scanning %d/%d frames for highest variance (auto ref)...",
+            len(scan_indices), n,
+        )
+        best_var, ref_idx = -1.0, n // 2  # default to middle frame if all samples fail
+        for i in scan_indices:
+            p = paths[i]
             try:
-                with _fits.open(str(p), memmap=True) as hdul:
-                    raw = hdul[0].data
-                    if raw is None and len(hdul) > 1:
-                        raw = hdul[1].data
-                    if raw is None:
-                        continue
-                    arr = np.array(raw, dtype=np.float32)
-                    # Take center crop
-                    sh = arr.shape[-2], arr.shape[-1]
-                    cy, cx = sh[0] // 2, sh[1] // 2
-                    half = 128
-                    crop = arr[..., max(0, cy - half): cy + half, max(0, cx - half): cx + half]
-                    v = float(np.var(crop))
-                    if v > best_var:
-                        best_var, ref_idx = v, i
+                img = load_image(str(p))
+                arr = img.data
+                del img  # free immediately — only need the variance scalar
+                # Take center crop
+                sh = arr.shape[-2], arr.shape[-1]
+                cy, cx = sh[0] // 2, sh[1] // 2
+                half = 128
+                crop = arr[..., max(0, cy - half): cy + half, max(0, cx - half): cx + half]
+                v = float(np.var(crop))
+                if v > best_var:
+                    best_var, ref_idx = v, i
             except Exception as exc:
                 log.warning("align_from_paths: failed to sample %s: %s", p.name, exc)
         log.info("align_from_paths: auto-selected reference frame #%d", ref_idx + 1)

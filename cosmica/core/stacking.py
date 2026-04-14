@@ -883,8 +883,10 @@ def _fast_variance_at(path) -> float:
             else:
                 crop = np.asarray(hdu.data[0, r0:r1, c0:c1], dtype=np.float32)
             return float(np.var(crop))
-    except Exception:
+    except Exception as _e:
         # Fall back to full load (handles BZERO/BSCALE, debayering, XISF, etc.)
+        # Log so we know this slow path is being taken — 1.5s vs <50ms for memmap
+        log.warning("_fast_variance_at: memmap failed for %s (%s), falling back to full load", path, _e)
         img = load_image(str(path))
         arr = img.data
         del img
@@ -977,10 +979,23 @@ def align_from_paths(
     ref_img = load_image(str(paths[ref_idx]))
     ref_shape = ref_img.data.shape
 
+    # Detection scale: run star detection on 1/4 resolution (same as Siril's approach).
+    # Star positions are scaled back up before matching. 16× less GPU work per frame.
+    _DETECT_SCALE = 4
+
     t_ref = None
     if gpu_available:
         t_ref = dm.from_numpy(ref_img.data)
-        ref_stars = detect_stars_gpu(_highpass_for_detection(t_ref))
+        t_ref_small = functional.interpolate(
+            t_ref.unsqueeze(0), scale_factor=1.0 / _DETECT_SCALE, mode="bilinear", align_corners=False
+        ).squeeze(0)
+        ref_stars_small = detect_stars_gpu(_highpass_for_detection(t_ref_small))
+        del t_ref_small
+        # Scale detected positions back to full-resolution coordinates
+        ref_stars = [
+            Star(x=s.x * _DETECT_SCALE, y=s.y * _DETECT_SCALE, flux=s.flux, fwhm=s.fwhm * _DETECT_SCALE)
+            for s in ref_stars_small
+        ]
         del t_ref  # free GPU reference frame tensor immediately — not needed after star detection
         t_ref = None
     else:
@@ -1044,14 +1059,33 @@ def align_from_paths(
             t_img = None
             if gpu_available:
                 t_img = dm.from_numpy(frame.data)
-                tgt_stars = detect_stars_gpu(_highpass_for_detection(t_img))
+
+                # Detect stars at 1/4 resolution — same as reference frame above.
+                # Warp still applies to full-res t_img.
+                t_small = functional.interpolate(
+                    t_img.unsqueeze(0), scale_factor=1.0 / _DETECT_SCALE, mode="bilinear", align_corners=False
+                ).squeeze(0)
+                tgt_stars_small = detect_stars_gpu(_highpass_for_detection(t_small))
+                del t_small
+                tgt_stars = [
+                    Star(x=s.x * _DETECT_SCALE, y=s.y * _DETECT_SCALE, flux=s.flux, fwhm=s.fwhm * _DETECT_SCALE)
+                    for s in tgt_stars_small
+                ]
                 matches = match_stars_gpu(ref_stars, tgt_stars, max_dist=100.0)
                 transform = estimate_transform_gpu(matches)
 
                 if transform is not None and two_pass:
                     t_inv_coarse = _invert_affine_2x3(transform)
                     warped_c = warp_image_gpu(t_img, t_inv_coarse, mode="bilinear")
-                    re_stars = detect_stars_gpu(_highpass_for_detection(warped_c))
+                    wc_small = functional.interpolate(
+                        warped_c.unsqueeze(0), scale_factor=1.0 / _DETECT_SCALE, mode="bilinear", align_corners=False
+                    ).squeeze(0)
+                    re_stars_small = detect_stars_gpu(_highpass_for_detection(wc_small))
+                    del wc_small
+                    re_stars = [
+                        Star(x=s.x * _DETECT_SCALE, y=s.y * _DETECT_SCALE, flux=s.flux, fwhm=s.fwhm * _DETECT_SCALE)
+                        for s in re_stars_small
+                    ]
                     re_matches = match_stars_gpu(ref_stars, re_stars, max_dist=20.0)
                     refine = estimate_transform_gpu(re_matches)
                     if refine is not None:

@@ -28,6 +28,9 @@ class ImageCanvas(QWidget):
         self._pixmap: QPixmap | None = None
         self._pixmap_after: QPixmap | None = None
         self._image_data: np.ndarray | None = None
+        # Scale from displayed pixmap pixels → full-res image pixels.
+        # When _display_image passes a downscaled thumbnail, this is <1.0.
+        self._display_scale: float = 1.0
 
         self._zoom = 1.0
         self._pan_offset = QPointF(0, 0)
@@ -58,13 +61,14 @@ class ImageCanvas(QWidget):
 
     # ── Public API ───────────────────────────────────────────────────────────
 
-    def set_image(self, rgb_array: np.ndarray, image_data: np.ndarray | None = None):
+    def set_image(self, rgb_array: np.ndarray, image_data: np.ndarray | None = None, display_scale: float = 1.0):
         rgb_array = np.ascontiguousarray(rgb_array)
         h, w, ch = rgb_array.shape
         bytes_per_line = w * ch
         qimg = QImage(rgb_array.tobytes(), w, h, bytes_per_line, QImage.Format.Format_RGB888)
         self._pixmap = QPixmap.fromImage(qimg)
         self._image_data = image_data
+        self._display_scale = display_scale  # pixmap-px → full-res-px multiplier
         if self._fit_to_window:
             self._fit_zoom()
         self.update()
@@ -292,11 +296,12 @@ class ImageCanvas(QWidget):
             return
 
         if self._sample_mode and img_pos is not None:
+            s = self._display_scale
             if event.button() == Qt.MouseButton.LeftButton:
-                self.sample_placed.emit(img_pos.x(), img_pos.y())
+                self.sample_placed.emit(img_pos.x() / s, img_pos.y() / s)
                 return
             if event.button() == Qt.MouseButton.RightButton:
-                self.sample_removed.emit(img_pos.x(), img_pos.y())
+                self.sample_removed.emit(img_pos.x() / s, img_pos.y() / s)
                 return
 
         if event.button() == Qt.MouseButton.MiddleButton or (
@@ -323,7 +328,10 @@ class ImageCanvas(QWidget):
 
         img_pos = self._widget_to_image(event.position())
         if img_pos is not None and self._image_data is not None:
-            ix, iy = int(img_pos.x()), int(img_pos.y())
+            # Scale from thumbnail-space to full-res-space
+            s = self._display_scale
+            ix = int(img_pos.x() / s)
+            iy = int(img_pos.y() / s)
             data = self._image_data
             if data.ndim == 2:
                 if 0 <= iy < data.shape[0] and 0 <= ix < data.shape[1]:
@@ -342,10 +350,11 @@ class ImageCanvas(QWidget):
                 tl = self._widget_to_image(QPointF(rect.left(), rect.top()))
                 br = self._widget_to_image(QPointF(rect.right(), rect.bottom()))
                 if tl is not None and br is not None:
-                    x = max(0, int(tl.x()))
-                    y = max(0, int(tl.y()))
-                    w = max(1, int(br.x()) - x)
-                    h = max(1, int(br.y()) - y)
+                    s = self._display_scale
+                    x = max(0, round(tl.x() / s))
+                    y = max(0, round(tl.y() / s))
+                    w = max(1, round(br.x() / s) - x)
+                    h = max(1, round(br.y() / s) - y)
                     self.crop_rect_selected.emit(x, y, w, h)
                 # Exit crop mode automatically after selection
                 self.set_crop_mode(False)

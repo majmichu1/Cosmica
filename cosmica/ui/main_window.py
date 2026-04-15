@@ -787,7 +787,7 @@ class MainWindow(QMainWindow):
             small_img = ImageData(data=small, header={})
             rgb = small_img.to_display(stretch=True)
 
-        self._canvas.set_image(rgb, image.data)  # full-res data kept for pixel readout
+        self._canvas.set_image(rgb, image.data, display_scale=_scale)  # full-res data + scale for coord mapping
 
         hist_data = compute_histogram(image.data)
         self._histogram.set_histogram_data(hist_data)
@@ -1813,7 +1813,10 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(int, int, int, int)
     def _on_crop_rect_selected(self, x: int, y: int, w: int, h: int):
-        """Called when user finishes drawing a crop rectangle on the canvas."""
+        """Called when user finishes drawing a crop rectangle on the canvas.
+
+        Coordinates are already in full-res space (the canvas applies _display_scale).
+        """
         self._tools_panel.set_crop_from_rect(x, y, w, h)
         self._log_panel.log(f"Crop region set: x={x}, y={y}, w={w}, h={h}", "info")
 

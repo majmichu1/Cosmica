@@ -209,9 +209,6 @@ class ToolsPanel(QWidget):
     # Channel combine
     open_channel_combine_dialog = pyqtSignal()
 
-    # Non-destructive preview stretch (for linear workflow)
-    preview_stretch_toggled = pyqtSignal(bool)  # True = show stretched, False = show linear
-
     # Debayer
     run_debayer = pyqtSignal()
 
@@ -1083,27 +1080,6 @@ class ToolsPanel(QWidget):
         layout = QVBoxLayout()
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
-
-        # --- Preview Stretch (non-destructive, for working on linear data) ---
-        preview_group = QGroupBox("Linear Preview")
-        preview_layout = QVBoxLayout(preview_group)
-        preview_layout.addWidget(
-            _info_label(
-                "Temporarily stretch the image for easier visual inspection. "
-                "Does NOT modify the data — the image stays linear for processing."
-            )
-        )
-        btn_preview_stretch = QPushButton("⚡ Auto-Stretch Preview")
-        btn_preview_stretch.setToolTip(
-            "Apply auto-stretch for display only (like Siril's AutoStretch button).\n"
-            "The underlying data stays linear. Click again to return to linear view."
-        )
-        btn_preview_stretch.setCheckable(True)
-        btn_preview_stretch.setStyleSheet("font-weight: bold; padding: 5px;")
-        btn_preview_stretch.toggled.connect(self._on_preview_stretch_toggled)
-        self._preview_stretch_btn = btn_preview_stretch
-        preview_layout.addWidget(btn_preview_stretch)
-        layout.addWidget(preview_group)
 
         # --- Background Extraction ---
         bg_group = QGroupBox("Background Extraction")
@@ -2451,20 +2427,6 @@ class ToolsPanel(QWidget):
             "top_percent": self._quality_percent_spin.value(),
             "rejection_sigma": self._quality_sigma_spin.value(),
         }
-
-    def _on_preview_stretch_toggled(self, checked: bool):
-        self._preview_stretch_btn.setText(
-            "⚡ Auto-Stretch Preview (ON — data unchanged)" if checked
-            else "⚡ Auto-Stretch Preview"
-        )
-        self.preview_stretch_toggled.emit(checked)
-
-    def reset_preview_stretch_button(self):
-        """Called by main window to reset button state without re-emitting signal."""
-        self._preview_stretch_btn.blockSignals(True)
-        self._preview_stretch_btn.setChecked(False)
-        self._preview_stretch_btn.setText("⚡ Auto-Stretch Preview")
-        self._preview_stretch_btn.blockSignals(False)
 
     def _on_reg_mode_changed(self, index: int):
         """Show comet nucleus radius spin only when Comet mode is selected."""

@@ -542,7 +542,6 @@ class MainWindow(QMainWindow):
         tp.run_lrgb_combine.connect(self._on_run_lrgb_combine)
         tp.run_spcc.connect(self._on_run_spcc)
         tp.open_channel_combine_dialog.connect(self._on_open_channel_combine)
-        tp.preview_stretch_toggled.connect(self._on_preview_stretch_toggled)
         tp.run_debayer.connect(self._on_run_debayer)
 
         # Multi-session stacking
@@ -761,31 +760,34 @@ class MainWindow(QMainWindow):
     def _display_image(self, image: ImageData, display_ref: "np.ndarray | None" = None):
         self._current_image = image
         self._image_ref[0] = image  # sync with undo ref
+
+        # Downsample to at most 1024px before any stretch computation.
+        # The canvas scales to fit the viewport anyway; applying MTF on 12M
+        # pixels is 10-50× slower than on a 1024px thumbnail with no
+        # visible quality difference.
+        small, _ = self._downscale_for_preview(image.data)
+
+        import numpy as _np
         if display_ref is not None:
-            # Use reference-based stretch — same method as live preview uses.
-            # Computes stretch params from the pre-operation image so brightness
-            # matches what was shown in the split preview.
-            import numpy as _np
-            if image.is_color:
-                hwc = _np.transpose(image.data, (1, 2, 0))
-                ref_hwc = _np.transpose(display_ref, (1, 2, 0)) if display_ref.ndim == 3 else _np.stack([display_ref] * 3, axis=-1)
+            small_ref, _ = self._downscale_for_preview(display_ref)
+            if small.ndim == 2:
+                hwc = _np.stack([small] * 3, axis=-1)
+                ref_hwc = _np.stack([small_ref] * 3, axis=-1) if small_ref.ndim == 2 else _np.transpose(small_ref, (1, 2, 0))
             else:
-                hwc = _np.stack([image.data] * 3, axis=-1)
-                ref_hwc = _np.stack([display_ref] * 3, axis=-1) if display_ref.ndim == 2 else _np.transpose(display_ref, (1, 2, 0))
+                hwc = _np.transpose(small, (1, 2, 0))
+                ref_hwc = _np.transpose(small_ref, (1, 2, 0)) if small_ref.ndim == 3 else _np.stack([small_ref] * 3, axis=-1)
             stretched = auto_stretch_for_display_ref(hwc, ref_hwc)
             rgb = _np.clip(stretched * 255, 0, 255).astype(_np.uint8)
         else:
-            rgb = image.to_display(stretch=True)
-        self._canvas.set_image(rgb, image.data)
+            small_img = ImageData(data=small, header={})
+            rgb = small_img.to_display(stretch=True)
+
+        self._canvas.set_image(rgb, image.data)  # full-res data kept for pixel readout
 
         hist_data = compute_histogram(image.data)
         self._histogram.set_histogram_data(hist_data)
         self._update_curves_histogram(hist_data)
         self._sync_console_image()
-
-        # Reset preview-stretch button whenever a new image is displayed
-        if hasattr(self, "_tools_panel"):
-            self._tools_panel.reset_preview_stretch_button()
 
     def _update_curves_histogram(self, hist_data: dict | None = None):
         """Push histogram data into the curve editor if the show-histogram checkbox is on."""
@@ -2848,35 +2850,6 @@ class MainWindow(QMainWindow):
             )
 
         self._start_worker(_work, data, pattern, method, on_done=_done)
-
-    @pyqtSlot(bool)
-    def _on_preview_stretch_toggled(self, enabled: bool):
-        """Non-destructive auto-stretch preview — data stays linear."""
-        if self._current_image is None:
-            return
-        if enabled:
-            # Show aggressive auto-stretch for visual assessment.
-            # The data stays linear — only the canvas view changes.
-            rgb = self._current_image.to_display(stretch=True)
-            self._canvas.set_image(rgb)
-            self._log_panel.log(
-                "Preview stretch ON — stretched view (data unchanged)", "info"
-            )
-        else:
-            # Show linear (min-max normalised) — useful for judging gradients/background.
-            data = self._current_image.data
-            d_min, d_max = float(data.min()), float(data.max())
-            if d_max > d_min:
-                linear = (data - d_min) / (d_max - d_min)
-            else:
-                linear = data.copy()
-            linear_img = ImageData(data=linear.astype("float32"),
-                                   header=self._current_image.header.copy())
-            rgb = linear_img.to_display(stretch=False)
-            self._canvas.set_image(rgb)
-            self._log_panel.log(
-                "Preview stretch OFF — linear view (min-max normalised)", "info"
-            )
 
     @pyqtSlot()
     def _on_run_local_contrast(self):

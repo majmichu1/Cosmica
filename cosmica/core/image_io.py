@@ -147,10 +147,22 @@ def auto_stretch_for_display_ref(img: np.ndarray, ref: np.ndarray) -> np.ndarray
     Use this for live preview: compute stretch params from the unprocessed
     downscaled image (ref) and apply the same params to the tool result (img).
     This ensures before/after brightness matches.
+
+    Stats are computed on a thumbnail of ref (≤1024px) for speed.
     """
+    # Downsample ref for fast stat computation only
+    rh, rw = ref.shape[0], ref.shape[1]
+    max_side = 1024
+    if max(rh, rw) > max_side:
+        sr = max(1, rh // max_side)
+        sc = max(1, rw // max_side)
+        ref_thumb = ref[::sr, ::sc, :]
+    else:
+        ref_thumb = ref
+
     result = np.empty_like(img)
     for ch in range(img.shape[-1]):
-        ref_ch = ref[..., ch]
+        ref_ch = ref_thumb[..., ch]
         src_ch = img[..., ch]
         med = np.median(ref_ch)
         mad = np.median(np.abs(ref_ch - med))
@@ -194,7 +206,7 @@ def _normalize_fits_data(data: np.ndarray) -> np.ndarray:
         return data
 
 
-def load_fits(path: Path) -> ImageData:
+def load_fits(path: Path, debayer: bool = True) -> ImageData:
     """Load a FITS file and return normalized ImageData."""
     path = Path(path)
     with fits.open(str(path), memmap=False) as hdul:
@@ -227,7 +239,8 @@ def load_fits(path: Path) -> ImageData:
 
     # Auto-debayer raw OSC frames when loaded individually
     # (stacking pipeline keeps Bayer for best SNR and debayers the final stack)
-    if data.ndim == 2 and frame_type == FrameType.LIGHT:
+    # Pass debayer=False to skip (e.g. during alignment where mono is faster)
+    if debayer and data.ndim == 2 and frame_type == FrameType.LIGHT:
         from cosmica.core.debayer import detect_bayer_pattern, debayer as _debayer
         bayer = detect_bayer_pattern(header)
         if bayer:
@@ -471,12 +484,12 @@ def save_xisf(image: ImageData, path: Path) -> None:
     log.info("Saved XISF: %s", path)
 
 
-def load_image(path: str | Path) -> ImageData:
+def load_image(path: str | Path, debayer: bool = True) -> ImageData:
     """Auto-detect format and load an image."""
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix in (".fit", ".fits", ".fts"):
-        return load_fits(path)
+        return load_fits(path, debayer=debayer)
     elif suffix in (".xisf",):
         return load_xisf(path)
     elif suffix in (".tif", ".tiff", ".png", ".jpg", ".jpeg"):

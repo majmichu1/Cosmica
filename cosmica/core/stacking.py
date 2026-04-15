@@ -979,12 +979,15 @@ def align_from_paths(
     progress(0.05, f"Reference: frame #{ref_idx + 1}")
 
     # ── Load reference frame fully ────────────────────────────────────────────
-    ref_img = load_image(str(paths[ref_idx]))
+    # debayer=False: keep raw Bayer mono for alignment (3× less GPU memory,
+    # avoids expensive VNG debayer per frame; stacking debayers the final result)
+    ref_img = load_image(str(paths[ref_idx]), debayer=False)
     ref_shape = ref_img.data.shape
 
-    # Detection scale: run star detection on 1/4 resolution (same as Siril's approach).
-    # Star positions are scaled back up before matching. 16× less GPU work per frame.
-    _DETECT_SCALE = 4
+    # Detection scale: run star detection on 1/2 resolution.
+    # 1/4 makes stars 1-2px (killed by min_distance pooling); 1/2 keeps them 2-4px.
+    # Star positions scaled back to full-res before matching; warp on full frame.
+    _DETECT_SCALE = 2
 
     t_ref = None
     if gpu_available:
@@ -1023,9 +1026,15 @@ def align_from_paths(
     gc_interval = 10  # run gc every N frames instead of every frame
 
     def _load(idx: int):
-        """Load one frame from disk; returns (idx, ImageData|None)."""
+        """Load one frame from disk; returns (idx, ImageData|None).
+
+        debayer=False: skip VNG debayering during alignment — saves 1-2s/frame
+        on OSC cameras.  Bayer pattern header is preserved so the aligned files
+        are still recognisable by the stacking pipeline, which debayers the
+        final stacked result instead (better SNR).
+        """
         try:
-            return idx, load_image(str(paths[idx]))
+            return idx, load_image(str(paths[idx]), debayer=False)
         except Exception as exc:
             log.warning("align_from_paths: failed to load %s: %s", paths[idx].name, exc)
             return idx, None

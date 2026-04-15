@@ -197,12 +197,35 @@ def _generate_grid_points(
     grid_size: int,
     box_size: int,
 ) -> np.ndarray:
-    """Return an (N, 2) array of (row, col) sample-point coordinates."""
+    """Return an (N, 2) array of (row, col) sample-point coordinates.
+
+    Includes a ring of edge samples (just inside the image boundary) so
+    the model is constrained by real data near the borders and does not
+    extrapolate freely there.
+    """
     margin = box_size // 2
     ys = np.linspace(margin, h - margin - 1, grid_size).astype(int)
     xs = np.linspace(margin, w - margin - 1, grid_size).astype(int)
     yy, xx = np.meshgrid(ys, xs, indexing="ij")
-    return np.column_stack([yy.ravel(), xx.ravel()])
+    interior = np.column_stack([yy.ravel(), xx.ravel()])
+
+    # Edge ring: sample close to all four borders using a smaller box.
+    # These constrain the polynomial/RBF at the image boundary so it
+    # doesn't extrapolate to wrong values and leave bright residuals.
+    edge_m = max(2, box_size // 4)
+    n_edge = max(4, grid_size)
+    edge_ys = np.linspace(edge_m, h - edge_m - 1, n_edge).astype(int)
+    edge_xs = np.linspace(edge_m, w - edge_m - 1, n_edge).astype(int)
+    edge_pts = []
+    for ey in edge_ys:
+        edge_pts.append((ey, edge_m))            # left border
+        edge_pts.append((ey, w - edge_m - 1))   # right border
+    for ex in edge_xs:
+        edge_pts.append((edge_m, ex))            # top border
+        edge_pts.append((h - edge_m - 1, ex))   # bottom border
+
+    edge_arr = np.array(edge_pts, dtype=int)
+    return np.vstack([interior, edge_arr])
 
 
 def _measure_background_at(
@@ -324,11 +347,12 @@ def _build_poly_model(
     # Evaluate over full image on GPU (or CPU fallback)
     bg_full = _evaluate_polynomial_gpu(h, w, coeffs, degree)
 
-    # Clamp to measured sample range + small tolerance
-    val_min = float(values.min())
-    val_max = float(values.max())
-    margin = max(0.01, (val_max - val_min) * 0.1)
-    bg_full = np.clip(bg_full, max(0.0, val_min - margin), val_max + margin)
+    # Only clamp from below: a negative model would *add* to the image when
+    # subtracted, creating bright halos.  Do NOT clamp from above — a tight
+    # upper bound clips the polynomial at image corners where the true
+    # background can be higher than anywhere in the sample interior, leaving
+    # a bright residual (the halo the user sees).
+    bg_full = np.maximum(bg_full, 0.0)
 
     log.info(
         "ABE poly model: degree=%d, bg range [%.5f, %.5f]",
@@ -422,9 +446,7 @@ def _build_rbf_model(
     coarse_f32 = coarse_vals.astype(np.float32)
     bg_full = cv2.resize(coarse_f32, (w, h), interpolation=cv2.INTER_CUBIC)
 
-    val_min = float(values.min())
-    val_max = float(values.max())
-    margin = max(0.01, (val_max - val_min) * 0.1)
-    bg_full = np.clip(bg_full, max(0.0, val_min - margin), val_max + margin)
+    # Same rationale as _build_poly_model: no upper clamp.
+    bg_full = np.maximum(bg_full, 0.0)
 
     return bg_full.astype(np.float32)

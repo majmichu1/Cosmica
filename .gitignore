@@ -73,3 +73,10 @@ training_data/
 /*.tiff
 training_log.txt
 quick_compare_v2.py
+
+# Dev/handoff notes — not part of the project
+HANDOFF.md
+training_log_extract.txt
+
+# Superpowers plugin plans/specs (local planning, not source code)
+docs/superpowers/

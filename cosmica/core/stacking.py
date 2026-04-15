@@ -824,6 +824,7 @@ def align_frames(
             res = dm.to_cpu(final).numpy().astype(np.float32)
             if res.ndim == 3 and res.shape[0] == 1:
                 res = res[0]
+            del t_img, final  # free GPU tensors immediately after warp
 
         else:
             # Pure CPU path using star_detection + OpenCV
@@ -846,6 +847,12 @@ def align_frames(
         aligned[i] = ImageData(
             data=res, header=frame.header.copy(), frame_type=frame.frame_type
         )
+
+    # Free GPU reference tensor and flush allocator cache
+    if gpu_available:
+        del t_ref
+        import gc as _gc; _gc.collect()
+        torch.cuda.empty_cache()
 
     progress(1.0, f"Alignment complete: {n} frames")
     return [img for img in aligned if img is not None]

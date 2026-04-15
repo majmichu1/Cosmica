@@ -215,6 +215,9 @@ class MainWindow(QMainWindow):
         self._image_ref: list[ImageData | None] = [None]
         self._undo_stack.set_target(self._image_ref)
 
+        # Cached downscaled image for live preview (recomputed in _display_image)
+        self._preview_small_cache: tuple | None = None  # (small_array, scale)
+
         # Preview debounce timers
         self._stretch_preview_timer = QTimer()
         self._stretch_preview_timer.setSingleShot(True)
@@ -765,7 +768,9 @@ class MainWindow(QMainWindow):
         # The canvas scales to fit the viewport anyway; applying MTF on 12M
         # pixels is 10-50× slower than on a 1024px thumbnail with no
         # visible quality difference.
-        small, _ = self._downscale_for_preview(image.data)
+        # Also cache the small image so live preview can reuse it without re-downscaling.
+        small, _scale = self._downscale_for_preview(image.data)
+        self._preview_small_cache = (small, _scale)
 
         import numpy as _np
         if display_ref is not None:
@@ -1490,6 +1495,14 @@ class MainWindow(QMainWindow):
     @pyqtSlot(object)
     def _on_stacking_done(self, result):
         self._display_image(result.image)
+        # Flush GPU allocator — alignment tensors accumulate during stack+align
+        try:
+            import gc as _gc; _gc.collect()
+            import torch as _torch
+            if _torch.cuda.is_available():
+                _torch.cuda.empty_cache()
+        except Exception:
+            pass
         self._log_panel.log(
             f"Stacking complete: {result.n_frames} frames, {result.total_rejected} pixels rejected",
             "success",
@@ -1719,7 +1732,11 @@ class MainWindow(QMainWindow):
         if tool_name is None or self._current_image is None:
             return
 
-        small, _scale = self._downscale_for_preview(self._current_image.data)
+        # Use cached downscaled image — avoids re-downscaling 144MB on every slider drag.
+        if self._preview_small_cache is not None:
+            small, _scale = self._preview_small_cache
+        else:
+            small, _scale = self._downscale_for_preview(self._current_image.data)
 
         try:
             result = self._run_tool_preview(tool_name, small)

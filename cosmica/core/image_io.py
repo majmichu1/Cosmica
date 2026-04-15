@@ -499,7 +499,32 @@ def load_image(path: str | Path, debayer: bool = True) -> ImageData:
 
 
 def _load_common_image(path: Path) -> ImageData:
-    """Load common image formats via Pillow."""
+    """Load common image formats via Pillow, with tifffile fallback for 32-bit TIFFs."""
+    suffix = path.suffix.lower()
+
+    # tifffile handles 32-bit float TIFFs (e.g. Siril stacks) that Pillow rejects
+    if suffix in (".tif", ".tiff"):
+        try:
+            import tifffile
+            raw = tifffile.imread(str(path))
+            data = raw.astype(np.float32)
+            if data.ndim == 2:
+                # Mono — normalize to [0, 1]
+                dmin, dmax = data.min(), data.max()
+                if dmax > dmin:
+                    data = (data - dmin) / (dmax - dmin)
+            elif data.ndim == 3:
+                if data.shape[2] in (3, 4):
+                    # HWC → CHW, drop alpha
+                    data = np.transpose(data[:, :, :3], (2, 0, 1))
+                # else already CHW — leave as-is
+                dmin, dmax = data.min(), data.max()
+                if dmax > dmin:
+                    data = (data - dmin) / (dmax - dmin)
+            return ImageData(data=data, file_path=path, frame_type=FrameType.UNKNOWN)
+        except Exception:
+            pass  # fall through to Pillow
+
     from PIL import Image
 
     img = Image.open(path)

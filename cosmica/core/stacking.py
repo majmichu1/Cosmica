@@ -900,6 +900,22 @@ def _fast_variance_at(path) -> float:
         return float(np.var(crop))
 
 
+def _interp_for_detection(t: torch.Tensor, scale: float) -> torch.Tensor:
+    """Bilinear downscale a (H,W) or (C,H,W) tensor for star detection.
+
+    F.interpolate needs 4-D input (N,C,H,W), so we handle both mono and
+    colour by adding/removing the necessary batch+channel dims.
+    """
+    if t.dim() == 2:                         # (H, W)  — mono Bayer frame
+        inp = t.unsqueeze(0).unsqueeze(0)    # → (1, 1, H, W)
+        out = functional.interpolate(inp, scale_factor=scale, mode="bilinear", align_corners=False)
+        return out.squeeze(0).squeeze(0)     # → (H', W')
+    else:                                    # (C, H, W)  — colour frame
+        inp = t.unsqueeze(0)                 # → (1, C, H, W)
+        out = functional.interpolate(inp, scale_factor=scale, mode="bilinear", align_corners=False)
+        return out.squeeze(0)               # → (C, H', W')
+
+
 def align_from_paths(
     paths: list,
     output_dir,
@@ -992,9 +1008,7 @@ def align_from_paths(
     t_ref = None
     if gpu_available:
         t_ref = dm.from_numpy(ref_img.data)
-        t_ref_small = functional.interpolate(
-            t_ref.unsqueeze(0), scale_factor=1.0 / _DETECT_SCALE, mode="bilinear", align_corners=False
-        ).squeeze(0)
+        t_ref_small = _interp_for_detection(t_ref, 1.0 / _DETECT_SCALE)
         ref_stars_small = detect_stars_gpu(_highpass_for_detection(t_ref_small))
         del t_ref_small
         # Scale detected positions back to full-resolution coordinates
@@ -1074,9 +1088,7 @@ def align_from_paths(
 
                 # Detect stars at 1/4 resolution — same as reference frame above.
                 # Warp still applies to full-res t_img.
-                t_small = functional.interpolate(
-                    t_img.unsqueeze(0), scale_factor=1.0 / _DETECT_SCALE, mode="bilinear", align_corners=False
-                ).squeeze(0)
+                t_small = _interp_for_detection(t_img, 1.0 / _DETECT_SCALE)
                 tgt_stars_small = detect_stars_gpu(_highpass_for_detection(t_small))
                 del t_small
                 tgt_stars = [
@@ -1089,9 +1101,7 @@ def align_from_paths(
                 if transform is not None and two_pass:
                     t_inv_coarse = _invert_affine_2x3(transform)
                     warped_c = warp_image_gpu(t_img, t_inv_coarse, mode="bilinear")
-                    wc_small = functional.interpolate(
-                        warped_c.unsqueeze(0), scale_factor=1.0 / _DETECT_SCALE, mode="bilinear", align_corners=False
-                    ).squeeze(0)
+                    wc_small = _interp_for_detection(warped_c, 1.0 / _DETECT_SCALE)
                     re_stars_small = detect_stars_gpu(_highpass_for_detection(wc_small))
                     del wc_small
                     re_stars = [

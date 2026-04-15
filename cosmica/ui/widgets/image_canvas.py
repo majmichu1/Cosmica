@@ -194,17 +194,23 @@ class ImageCanvas(QWidget):
         else:
             painter.drawPixmap(dst, self._pixmap, src)
 
+        # Overlay positions are stored in full-res coordinates.
+        # Divide by full-res dims (not pixmap/thumbnail dims) for correct mapping.
+        s = self._display_scale
+        full_w = pw / s if s > 0 else pw
+        full_h = ph / s if s > 0 else ph
+
         # Draw WCS overlay
         if self._show_wcs_overlay and self._overlay_stars:
-            self._draw_wcs_overlay(painter, dst, pw, ph)
+            self._draw_wcs_overlay(painter, dst, full_w, full_h)
 
         # Draw DSO annotation overlay
         if self._show_dso_overlay and self._dso_annotations:
-            self._draw_dso_annotations(painter, dst, pw, ph)
+            self._draw_dso_annotations(painter, dst, full_w, full_h)
 
         # Draw background sample points
         if self._sample_points or self._sample_mode:
-            self._draw_sample_points(painter, dst, pw, ph)
+            self._draw_sample_points(painter, dst, full_w, full_h)
 
         painter.end()
 

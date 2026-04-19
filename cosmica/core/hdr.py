@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from enum import Enum, auto
+from typing import Callable
 
 import cv2
 import numpy as np
@@ -16,6 +17,12 @@ import numpy as np
 from cosmica.core.masks import Mask, apply_mask
 
 log = logging.getLogger(__name__)
+
+ProgressCallback = Callable[[float, str], None]
+
+
+def _noop_progress(f: float, m: str) -> None:
+    pass
 
 
 class HDRMethod(Enum):
@@ -39,6 +46,7 @@ class HDRParams:
 def hdr_compose(
     images: list[np.ndarray],
     params: HDRParams | None = None,
+    progress: ProgressCallback = _noop_progress,
 ) -> np.ndarray:
     """Merge multiple exposures into a single HDR image.
 
@@ -65,10 +73,13 @@ def hdr_compose(
     if params is None:
         params = HDRParams()
 
+    progress(0.0, f"HDR: merging {len(images)} exposures…")
     if params.method == HDRMethod.MERTENS:
-        return _mertens_fusion(images, params)
+        result = _mertens_fusion(images, params)
     else:
-        return _weighted_average(images, params)
+        result = _weighted_average(images, params)
+    progress(1.0, "HDR complete")
+    return result
 
 
 def _mertens_fusion(images: list[np.ndarray], params: HDRParams) -> np.ndarray:

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+import torch
 
 from cosmica.core.star_detection import detect_stars, find_transform
 
@@ -118,6 +119,7 @@ def _drizzle_frame_numpy(
         weight_map[y0:y1, x0:x1] += 1.0
 
 
+@torch.no_grad()
 def _drizzle_frame_gpu(
     image: np.ndarray,
     output_t: Any,

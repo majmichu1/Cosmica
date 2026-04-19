@@ -1,5 +1,6 @@
 """Tests for color tools (SCNR and color adjustment)."""
 
+import pytest
 import numpy as np
 
 from cosmica.core.color_tools import (
@@ -57,11 +58,11 @@ class TestSCNR:
         diff_half = abs(r_half[1].mean() - image[1].mean())
         assert diff_half < diff_full
 
-    def test_mono_image_unchanged(self):
-        """Mono images should pass through unchanged."""
+    def test_mono_image_raises(self):
+        """Mono images should raise ValueError — SCNR is color-only."""
         image = np.ones((100, 100), dtype=np.float32) * 0.5
-        result = scnr(image)
-        np.testing.assert_array_equal(result, image)
+        with pytest.raises(ValueError, match="color image"):
+            scnr(image)
 
     def test_mask_support(self):
         """Mask should restrict SCNR to masked area."""

@@ -132,6 +132,7 @@ def curves_transform(
         return _curves_cpu(image, params, mask)
 
 
+@torch.no_grad()
 def _apply_curve_lut_gpu(t: torch.Tensor, lut: torch.Tensor) -> torch.Tensor:
     """Apply LUT to tensor using manual GPU interp (torch has no built-in interp)."""
     # LUT lookup via torch indexing: scale to LUT indices
@@ -139,6 +140,7 @@ def _apply_curve_lut_gpu(t: torch.Tensor, lut: torch.Tensor) -> torch.Tensor:
     return lut[indices]
 
 
+@torch.no_grad()
 def _curves_gpu(
     image: np.ndarray,
     params: CurvesParams,

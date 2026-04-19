@@ -56,6 +56,7 @@ def correct_vignette(
         return _vignette_cpu(image, params, mask, h, w)
 
 
+@torch.no_grad()
 def _vignette_gpu(
     image: np.ndarray,
     params: VignetteParams,

@@ -40,41 +40,42 @@ class ABEParams:
         Sigma-clipping threshold for rejecting star-contaminated samples.
         Samples whose measured value exceeds ``median + sigma_clip * MAD``
         are discarded.
+    sample_percentile : float
+        Within each measurement box, use this percentile of pixel values
+        (rather than the median of the darkest half).  Lower values (5–15)
+        are more resistant to nebulosity contamination.  Default 10 ≈ using
+        the ~10th-brightest pixel in each box.
+    darkest_fraction : float
+        After measuring all grid samples, keep only the darkest
+        ``darkest_fraction`` of them for the polynomial/RBF fit.  Set to
+        1.0 to use all surviving samples.  0.5 means only the 50% darkest
+        samples drive the fit, protecting the model against nebula-
+        contaminated points that passed sigma-clipping.
     model_type : str
         Background model type: ``"polynomial"`` (default) or ``"rbf"``.
-        Polynomial fitting is numerically stable everywhere and recommended
-        for most images.  RBF can model more complex gradients but is prone
-        to edge extrapolation artefacts.
     polynomial_degree : int
         Degree of the 2-D polynomial surface (1=plane, 2=quadratic,
-        3=cubic).  Only used when ``model_type="polynomial"``.
+        3=cubic).
     rbf_kernel : str
-        Kernel function passed to ``RBFInterpolator``.  Valid choices
-        include ``"thin_plate_spline"``, ``"multiquadric"``,
-        ``"inverse_multiquadric"``, ``"gaussian"``, ``"linear"``,
-        ``"cubic"``, and ``"quintic"``.
+        Kernel function for ``RBFInterpolator``.
     rbf_smoothing : float
-        Smoothing parameter for the RBF interpolator.  Higher values
-        produce a smoother background model at the cost of less fidelity
-        to the sample points.
+        Smoothing parameter for the RBF interpolator.
     correction_mode : str
-        How the background model is removed from the image.
         ``"subtraction"`` subtracts the model; ``"division"`` divides.
     iterations : int
-        Number of refinement iterations.  Each iteration re-samples on
-        the corrected image, builds a new model, and applies it to the
-        *original* accumulated model so that the total correction is the
-        sum (or product) of all per-iteration models.
+        Number of refinement iterations.
     """
 
     grid_size: int = 10
     box_size: int = 48
     sigma_clip: float = 2.0
-    model_type: str = "polynomial"   # "polynomial" | "rbf"
-    polynomial_degree: int = 2
+    sample_percentile: float = 10.0   # percentile within each box
+    darkest_fraction: float = 0.6     # keep darkest 60% of samples; rejects nebula-contaminated center boxes
+    model_type: str = "polynomial"
+    polynomial_degree: int = 4        # degree 4 captures cos⁴ vignette falloff at edges
     rbf_kernel: str = "thin_plate_spline"
     rbf_smoothing: float = 0.5
-    correction_mode: str = "subtraction"
+    correction_mode: str = "subtraction"  # subtraction for gradients/light-pollution; division for multiplicative optical vignetting
     iterations: int = 2
 
 
@@ -87,7 +88,7 @@ def abe_extract(
     data: np.ndarray,
     params: ABEParams | None = None,
     mask: Mask | None = None,
-    progress=None,  # accepts but ignores — keeps ProcessingWorker happy
+    progress=None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Extract and remove background using polynomial or RBF interpolation.
 
@@ -113,6 +114,7 @@ def abe_extract(
     """
     if params is None:
         params = ABEParams()
+    _prog = progress if callable(progress) else (lambda f, m: None)
 
     log.info(
         "ABE: model=%s, grid=%d, box=%d, mode=%s, iters=%d",
@@ -128,10 +130,14 @@ def abe_extract(
         corrected = np.empty_like(data)
         bg_model = np.empty_like(data)
         for ch in range(n_channels):
+            _prog(ch / n_channels, f"ABE channel {ch + 1}/{n_channels}…")
             log.info("ABE: processing channel %d/%d", ch + 1, n_channels)
             corrected[ch], bg_model[ch] = _extract_channel(data[ch], params)
+        _prog(1.0, "ABE complete")
     else:
+        _prog(0.0, "ABE processing…")
         corrected, bg_model = _extract_channel(data, params)
+        _prog(1.0, "ABE complete")
 
     corrected = apply_mask(data, corrected, mask)
     return corrected, bg_model
@@ -176,9 +182,19 @@ def _extract_channel(
             iter_bg = _build_poly_model(points, values, h, w, params)
 
         if params.correction_mode == "division":
-            safe_bg = np.maximum(iter_bg, 1e-7)
-            working = np.clip(working / safe_bg, 0.0, 1.0).astype(np.float32)
-            total_bg *= iter_bg
+            # Normalize the model to its mean so division flattens spatial
+            # variation without changing overall image brightness.
+            # Raw background values (0.2–0.5) would amplify by 2–5×; normalised
+            # values (~1.0 at the bright point, <1 at dark corners) only correct
+            # the relative illumination falloff, keeping the mean level constant.
+            model_mean = float(np.mean(iter_bg))
+            if model_mean > 1e-7:
+                norm_bg = iter_bg / model_mean
+            else:
+                norm_bg = np.ones_like(iter_bg)
+            safe_norm = np.maximum(norm_bg, 1e-4)
+            working = np.clip(working / safe_norm, 0.0, 1.0).astype(np.float32)
+            total_bg *= safe_norm
         else:
             working = np.clip(working - iter_bg, 0.0, 1.0).astype(np.float32)
             total_bg += iter_bg
@@ -233,8 +249,16 @@ def _measure_background_at(
     row: int,
     col: int,
     box_size: int,
+    percentile: float = 10.0,
 ) -> float | None:
-    """Measure background level in a box centred at (*row*, *col*)."""
+    """Measure background level in a box centred at (*row*, *col*).
+
+    Uses a low percentile (default 10th) rather than the median so that
+    sample boxes partially occupied by nebulosity still yield a sky-level
+    estimate.  A high sigma-clip and ``darkest_fraction`` in the caller
+    then discard any boxes where even the 10th percentile is lifted by
+    diffuse emission.
+    """
     h, w = channel.shape
     half = box_size // 2
     r0 = max(0, row - half)
@@ -246,19 +270,24 @@ def _measure_background_at(
     if box.size == 0:
         return None
 
-    sorted_vals = np.sort(box.ravel())
-    dark_half = sorted_vals[: len(sorted_vals) // 2]
-    if dark_half.size == 0:
-        return None
-
-    return float(np.median(dark_half))
+    return float(np.percentile(box.ravel(), percentile))
 
 
 def _sample_background(
     channel: np.ndarray,
     params: ABEParams,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Generate grid samples and sigma-clip to reject star contamination."""
+    """Generate grid samples, sigma-clip to reject stars, then keep only
+    the darkest fraction to prevent nebulosity from biasing the model.
+
+    Two-pass rejection:
+    1. Sigma-clip: drops boxes where even the low-percentile value is lifted
+       by bright stars or compact emission.
+    2. Darkest-fraction filter: among remaining samples, keep only the
+       ``darkest_fraction`` darkest ones.  On a nebula field the brightest
+       samples are nebula-contaminated; discarding them makes the polynomial
+       fit to actual sky rather than to diffuse emission.
+    """
     h, w = channel.shape
     grid_pts = _generate_grid_points(h, w, params.grid_size, params.box_size)
 
@@ -267,7 +296,10 @@ def _sample_background(
     vals: list[float] = []
 
     for row, col in grid_pts:
-        val = _measure_background_at(channel, int(row), int(col), params.box_size)
+        val = _measure_background_at(
+            channel, int(row), int(col), params.box_size,
+            percentile=params.sample_percentile,
+        )
         if val is not None:
             rows.append(int(row))
             cols.append(int(col))
@@ -280,21 +312,27 @@ def _sample_background(
     points = np.column_stack([rows, cols]).astype(np.float64)
     values = np.asarray(vals, dtype=np.float64)
 
+    # Pass 1: sigma-clip (reject star-bright boxes)
     median_val = np.median(values)
     mad = np.median(np.abs(values - median_val))
     threshold = median_val + params.sigma_clip * mad
     keep = values <= threshold
+    points, values = points[keep], values[keep]
 
-    n_rejected = int((~keep).sum())
+    # Pass 2: darkest-fraction filter (protect nebula signal)
+    if params.darkest_fraction < 1.0 and len(values) > 4:
+        n_keep = max(4, int(len(values) * params.darkest_fraction))
+        order = np.argsort(values)
+        keep2 = order[:n_keep]
+        points, values = points[keep2], values[keep2]
+
     log.info(
-        "ABE sampling: %d measured, %d kept, %d rejected (threshold=%.6f)",
+        "ABE sampling: %d measured → %d after sigma-clip+darkest-fraction",
+        len(vals),
         len(values),
-        int(keep.sum()),
-        n_rejected,
-        threshold,
     )
 
-    return points[keep], values[keep]
+    return points, values
 
 
 # ---------------------------------------------------------------------------

@@ -36,6 +36,8 @@ def _flat_mono(h: int = 200, w: int = 200, value: float = 0.3) -> np.ndarray:
 
 
 # Use small grid and single iteration for speed in tests.
+# darkest_fraction=1.0: test images are pure gradients with no nebula, so every
+# sample is valid and the full dataset should drive the polynomial fit.
 _FAST_PARAMS = ABEParams(
     grid_size=8,
     box_size=16,
@@ -43,6 +45,7 @@ _FAST_PARAMS = ABEParams(
     rbf_kernel="thin_plate_spline",
     rbf_smoothing=1.0,
     correction_mode="subtraction",
+    darkest_fraction=1.0,
     iterations=1,
 )
 

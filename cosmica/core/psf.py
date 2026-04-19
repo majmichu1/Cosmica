@@ -12,8 +12,11 @@ import logging
 from dataclasses import dataclass
 
 import numpy as np
+import torch
 from scipy.optimize import curve_fit
 
+from cosmica.core.device_manager import get_device_manager
+from cosmica.core.gpu_stars import detect_stars_gpu
 from cosmica.core.star_detection import Star, detect_stars
 
 log = logging.getLogger(__name__)
@@ -115,6 +118,7 @@ def measure_psf(
     min_flux: float = 0.3,
     max_flux: float = 0.95,
     cutout_radius: int = 12,
+    force_cpu: bool = False,
 ) -> PSFMeasurement:
     """Measure the PSF from stars in an image.
 
@@ -133,6 +137,12 @@ def measure_psf(
         Maximum peak flux for star selection (rejects saturated stars).
     cutout_radius : int
         Half-size of the cutout around each star for fitting.
+    force_cpu : bool
+        Skip GPU star detection entirely.  Pass True when calling from
+        parallel worker threads — multiple threads dispatching CUDA kernels
+        via Python all hold the GIL during dispatch, serializing the pool.
+        CPU detection (pure numpy) releases the GIL, enabling true
+        multi-core parallelism.
 
     Returns
     -------
@@ -145,19 +155,34 @@ def measure_psf(
     else:
         gray = image.astype(np.float32)
 
-    # Detect stars
-    star_field = detect_stars(gray, max_stars=max_stars * 3, sigma_threshold=5.0)
+    # Star detection: GPU when available (max-pool local maxima, fast for 20–50 MP images),
+    # CPU fallback otherwise.  2D Gaussian fitting per-star happens on CPU regardless —
+    # scipy.optimize.curve_fit uses Fortran MINPACK (iterative, complex control flow,
+    # tiny ~25×25 px patches) which is already near-optimal on CPU and can't be
+    # efficiently batched on GPU.
+    if not force_cpu:
+        dm = get_device_manager()
+        try:
+            with torch.no_grad():
+                t_gray = torch.from_numpy(gray).to(dm.device)
+                stars_list = detect_stars_gpu(t_gray, max_stars=max_stars * 3, threshold_sigma=5.0)
+        except Exception:
+            sf = detect_stars(gray, max_stars=max_stars * 3, sigma_threshold=5.0)
+            stars_list = sf.stars
+    else:
+        sf = detect_stars(gray, max_stars=max_stars * 3, sigma_threshold=5.0)
+        stars_list = sf.stars
 
     # Filter to bright but unsaturated stars
     candidates = [
-        s for s in star_field.stars
+        s for s in stars_list
         if min_flux <= s.flux <= max_flux and s.roundness < 0.4
     ]
 
     if not candidates:
-        # Relax constraints
+        # Relax constraints (GPU stars have roundness=0.0, so always pass the roundness filter)
         candidates = [
-            s for s in star_field.stars
+            s for s in stars_list
             if s.flux >= min_flux * 0.5 and s.flux <= max_flux + 0.03
         ]
 

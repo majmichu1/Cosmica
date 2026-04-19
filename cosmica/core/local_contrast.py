@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Callable
 
 import cv2
 import numpy as np
@@ -15,6 +16,12 @@ import numpy as np
 from cosmica.core.masks import Mask, apply_mask
 
 log = logging.getLogger(__name__)
+
+ProgressCallback = Callable[[float, str], None]
+
+
+def _noop_progress(f: float, m: str) -> None:
+    pass
 
 
 @dataclass
@@ -30,6 +37,7 @@ def local_contrast_enhance(
     data: np.ndarray,
     params: LocalContrastParams | None = None,
     mask: Mask | None = None,
+    progress: ProgressCallback = _noop_progress,
 ) -> np.ndarray:
     """Enhance local contrast using CLAHE on the luminance channel.
 
@@ -54,18 +62,23 @@ def local_contrast_enhance(
         params = LocalContrastParams()
 
     original = data.copy()
+    progress(0.1, "Building CLAHE…")
 
     clahe = cv2.createCLAHE(
         clipLimit=params.clip_limit,
         tileGridSize=(params.tile_size, params.tile_size),
     )
 
+    progress(0.3, "Applying local contrast…")
     if data.ndim == 2:
         result = _apply_clahe_mono(data, clahe, params.amount)
     else:
         result = _apply_clahe_color(data, clahe, params.amount)
 
-    return apply_mask(original, result, mask)
+    progress(0.9, "Blending…")
+    result = apply_mask(original, result, mask)
+    progress(1.0, "Local contrast complete")
+    return result
 
 
 def _apply_clahe_mono(

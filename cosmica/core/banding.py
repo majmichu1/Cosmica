@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
+from scipy.ndimage import median_filter
 
 from cosmica.core.masks import Mask, apply_mask
 
@@ -41,8 +42,8 @@ def _compute_line_offsets(
 ) -> np.ndarray:
     """Compute per-line (row or column) offset from neighbors.
 
-    Uses sigma clipping along each line to reject bright objects (stars, etc.),
-    then computes the median offset of each line relative to a smoothed version.
+    Uses batched median + MAD sigma clipping to reject bright objects, then
+    computes the offset of each line relative to a scipy median-filtered version.
 
     Parameters
     ----------
@@ -59,69 +60,36 @@ def _compute_line_offsets(
     ndarray
         Per-line offsets to subtract.
     """
-    if axis == 0:
-        n_lines = data_2d.shape[0]
-    else:
-        n_lines = data_2d.shape[1]
+    # Orient so lines run along axis=1 for vectorised ops
+    work = data_2d if axis == 0 else data_2d.T  # (n_lines, n_pixels)
 
-    line_medians = np.zeros(n_lines, dtype=np.float32)
+    # Batched iterative sigma clip — 3 passes, all lines at once
+    valid = work.copy()
+    mask = np.ones_like(valid, dtype=bool)
+    for _ in range(3):
+        meds = np.median(np.where(mask, valid, np.nan), axis=1)        # (n_lines,)
+        abs_dev = np.abs(valid - meds[:, np.newaxis])
+        mads = np.median(np.where(mask, abs_dev, np.nan), axis=1)      # (n_lines,)
+        sigma = np.maximum(mads * 1.4826, 1e-10)                       # (n_lines,)
+        new_mask = abs_dev < protection_sigma * sigma[:, np.newaxis]
+        if new_mask.sum() < 3 * work.shape[0]:
+            break
+        mask = new_mask
 
-    for i in range(n_lines):
-        if axis == 0:
-            line = data_2d[i, :]
-        else:
-            line = data_2d[:, i]
+    # Final median per line using only surviving pixels
+    line_medians = np.array(
+        [np.median(row[m]) if m.any() else np.median(row) for row, m in zip(work, mask)],
+        dtype=np.float32,
+    )
 
-        # Iterative sigma clip
-        valid = line.copy()
-        for _ in range(3):
-            med = np.median(valid)
-            mad = np.median(np.abs(valid - med))
-            sigma = max(mad * 1.4826, 1e-10)
-            keep = np.abs(valid - med) < protection_sigma * sigma
-            if keep.sum() < 3:
-                break
-            valid = valid[keep]
-
-        line_medians[i] = np.median(valid)
-
-    # Compute offsets: deviation from smoothed version
-    # Use a windowed running median for the smooth reference
+    # Smooth reference via scipy median_filter (replaces per-element Python loop)
+    n_lines = len(line_medians)
     window = max(5, n_lines // 20)
     if window % 2 == 0:
         window += 1
+    smooth = median_filter(line_medians, size=window, mode="nearest").astype(np.float32)
 
-    smooth = _running_median(line_medians, window)
-    offsets = line_medians - smooth
-
-    return offsets
-
-
-def _running_median(data: np.ndarray, window: int) -> np.ndarray:
-    """Compute a running median filter.
-
-    Parameters
-    ----------
-    data : ndarray
-        1D input array.
-    window : int
-        Window size (must be odd).
-
-    Returns
-    -------
-    ndarray
-        Smoothed array.
-    """
-    n = len(data)
-    half = window // 2
-    result = np.zeros_like(data)
-
-    for i in range(n):
-        lo = max(0, i - half)
-        hi = min(n, i + half + 1)
-        result[i] = np.median(data[lo:hi])
-
-    return result
+    return line_medians - smooth
 
 
 def banding_reduction(

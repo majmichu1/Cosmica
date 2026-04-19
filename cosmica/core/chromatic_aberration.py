@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Callable
 
 import cv2
 import numpy as np
@@ -19,6 +20,12 @@ from scipy import ndimage
 from cosmica.core.masks import Mask, apply_mask
 
 log = logging.getLogger(__name__)
+
+ProgressCallback = Callable[[float, str], None]
+
+
+def _noop_progress(f: float, m: str) -> None:
+    pass
 
 
 @dataclass
@@ -221,6 +228,7 @@ def correct_chromatic_aberration(
     image: np.ndarray,
     params: CAParams | None = None,
     mask: Mask | None = None,
+    progress: ProgressCallback = _noop_progress,
 ) -> np.ndarray:
     """Detect and correct lateral chromatic aberration.
 
@@ -265,6 +273,7 @@ def correct_chromatic_aberration(
         )
 
     original = image.copy()
+    progress(0.0, "Detecting chromatic aberration…" if params.auto_detect else "Preparing CA correction…")
 
     red = image[0]
     green = image[1]
@@ -323,11 +332,13 @@ def correct_chromatic_aberration(
         return image.copy()
 
     # Apply sub-pixel shifts to R and B channels
+    progress(0.6, "Shifting R channel…")
     result = image.copy()
     result[0] = _shift_channel(red, red_dx, red_dy)
+    progress(0.8, "Shifting B channel…")
     result[2] = _shift_channel(blue, blue_dx, blue_dy)
 
     result = np.clip(result, 0.0, 1.0).astype(np.float32)
     result = apply_mask(original, result, mask)
-
+    progress(1.0, "CA correction complete")
     return result

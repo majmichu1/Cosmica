@@ -189,43 +189,42 @@ def _rl_channel(
     # Flipped PSF for correlation step
     t_psf_flip = torch.flip(t_psf, [0, 1])
 
-    # RL iterations
-    estimate = t_img.clone()
-    for i in range(params.iterations):
-        frac = ch_offset + ch_scale * (i / params.iterations)
-        progress(frac, f"Deconvolution ch{ch_idx + 1} iter {i + 1}/{params.iterations}")
+    # RL iterations — no_grad prevents 2-4 GB autograd graph accumulation on 4K images
+    estimate = t_img.detach().clone()
+    with torch.no_grad():
+        for i in range(params.iterations):
+            frac = ch_offset + ch_scale * (i / params.iterations)
+            progress(frac, f"Deconvolution ch{ch_idx + 1} iter {i + 1}/{params.iterations}")
 
-        # Convolution of estimate with PSF
-        blurred = _fft_convolve_2d(estimate, t_psf)
-        blurred = torch.clamp(blurred, min=1e-10)
+            # Convolution of estimate with PSF
+            blurred = _fft_convolve_2d(estimate, t_psf)
+            blurred = torch.clamp(blurred, min=1e-10)
 
-        # Ratio
-        ratio = t_img / blurred
+            # Ratio
+            ratio = t_img / blurred
 
-        # Correlation with flipped PSF
-        correction = _fft_convolve_2d(ratio, t_psf_flip)
+            # Correlation with flipped PSF
+            correction = _fft_convolve_2d(ratio, t_psf_flip)
 
-        # TV regularization
-        if params.regularization > 0:
-            tv_factor = _tv_regularization(estimate, params.regularization)
-            correction = correction * tv_factor
+            # TV regularization
+            if params.regularization > 0:
+                tv_factor = _tv_regularization(estimate, params.regularization)
+                correction = correction * tv_factor
 
-        # Update
-        estimate = estimate * correction
-        estimate = torch.clamp(estimate, 0, 1)
+            # Update
+            estimate = estimate * correction
+            estimate = torch.clamp(estimate, 0, 1)
 
     # Deringing: blend edges with original to reduce ringing artifacts
-    if params.deringing:
-        # Compute gradient magnitude of the difference
-        diff = estimate - t_img
-        dy = torch.diff(diff, dim=0, prepend=diff[:1, :])
-        dx = torch.diff(diff, dim=1, prepend=diff[:, :1])
-        edge_strength = torch.sqrt(dx**2 + dy**2)
-        edge_strength = edge_strength / (edge_strength.max() + 1e-10)
-
-        # Where edges are strong, blend back toward original
-        blend = torch.clamp(edge_strength * params.deringing_amount * 3, 0, 1)
-        estimate = estimate * (1 - blend) + t_img * blend
+    with torch.no_grad():
+        if params.deringing:
+            diff = estimate - t_img
+            dy = torch.diff(diff, dim=0, prepend=diff[:1, :])
+            dx = torch.diff(diff, dim=1, prepend=diff[:, :1])
+            edge_strength = torch.sqrt(dx**2 + dy**2)
+            edge_strength = edge_strength / (edge_strength.max() + 1e-10)
+            blend = torch.clamp(edge_strength * params.deringing_amount * 3, 0, 1)
+            estimate = estimate * (1 - blend) + t_img * blend
 
     result = estimate.cpu().numpy() if estimate.device.type != "cpu" else estimate.numpy()
     return result.astype(np.float32)

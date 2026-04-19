@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from typing import Callable
 
 import numpy as np
 import torch
@@ -17,6 +18,12 @@ from cosmica.core.device_manager import get_device_manager
 from cosmica.core.masks import Mask, apply_mask
 
 log = logging.getLogger(__name__)
+
+ProgressCallback = Callable[[float, str], None]
+
+
+def _noop_progress(f: float, m: str) -> None:
+    pass
 
 # B3 spline 1D kernel for a trous wavelet transform
 _B3_KERNEL_1D = np.array([1, 4, 6, 4, 1], dtype=np.float32) / 16.0
@@ -84,16 +91,20 @@ def wavelet_decompose(
     current = torch.from_numpy(data.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)
     scales = []
 
-    for s in range(n_scales):
-        kernel_np = _atrous_kernel_2d(s)
-        kernel_t = torch.from_numpy(kernel_np).unsqueeze(0).unsqueeze(0).to(device)
-        smoothed = _smooth_gpu(current, kernel_t)
-        detail = current - smoothed
-        scales.append(detail.squeeze().cpu().numpy())
-        current = smoothed
+    with torch.no_grad():
+        for s in range(n_scales):
+            kernel_np = _atrous_kernel_2d(s)
+            kernel_t = torch.from_numpy(kernel_np).unsqueeze(0).unsqueeze(0).to(device)
+            smoothed = _smooth_gpu(current, kernel_t)
+            detail = current - smoothed
+            scales.append(detail.squeeze().cpu().numpy())
+            current = smoothed
+            del kernel_t, detail, smoothed  # free VRAM each scale
 
-    # Residual (low-frequency content)
-    scales.append(current.squeeze().cpu().numpy())
+        # Residual (low-frequency content)
+        scales.append(current.squeeze().cpu().numpy())
+        del current
+
     return scales
 
 
@@ -120,6 +131,7 @@ def wavelet_sharpen(
     data: np.ndarray,
     params: WaveletParams | None = None,
     mask: Mask | None = None,
+    progress: ProgressCallback = _noop_progress,
 ) -> np.ndarray:
     """Sharpen or smooth image using per-scale wavelet weights.
 
@@ -169,10 +181,15 @@ def wavelet_sharpen(
         return np.clip(wavelet_reconstruct(scales), 0, 1).astype(np.float32)
 
     if data.ndim == 2:
+        progress(0.0, "Wavelet processing…")
         result = _process_channel(data)
+        progress(1.0, "Wavelet complete")
     else:
+        n_ch = data.shape[0]
         result = np.empty_like(data)
-        for ch in range(data.shape[0]):
+        for ch in range(n_ch):
+            progress(ch / n_ch, f"Wavelet ch {ch + 1}/{n_ch}…")
             result[ch] = _process_channel(data[ch])
+        progress(1.0, "Wavelet complete")
 
     return apply_mask(original, result, mask)

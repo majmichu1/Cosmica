@@ -73,6 +73,7 @@ class Project:
     frames: list[FrameEntry] = field(default_factory=list)
     history: list[ProcessingStep] = field(default_factory=list)
     settings: dict[str, Any] = field(default_factory=dict)
+    frame_scores: dict = field(default_factory=dict)
     created: str = ""
     modified: str = ""
 
@@ -140,6 +141,11 @@ class Project:
     def touch(self):
         self.modified = datetime.now().isoformat()
 
+    def cache_frame_scores(self, scores_dict: dict) -> None:
+        """Store per-frame quality scores keyed by absolute file path (str)."""
+        self.frame_scores.update({str(k): v for k, v in scores_dict.items()})
+        self.touch()
+
     def save(self):
         data = {
             "version": PROJECT_VERSION,
@@ -149,6 +155,7 @@ class Project:
             "settings": self.settings,
             "frames": [f.to_dict() for f in self.frames],
             "history": [h.to_dict() for h in self.history],
+            "frame_scores": self.frame_scores,
         }
         self.directory.mkdir(parents=True, exist_ok=True)
         with open(self.project_file, "w") as f:
@@ -172,8 +179,29 @@ class Project:
         )
         proj.frames = [FrameEntry.from_dict(d) for d in data.get("frames", [])]
         proj.history = [ProcessingStep.from_dict(d) for d in data.get("history", [])]
+        proj.frame_scores = data.get("frame_scores", {})
         log.info("Project loaded: %s (%d frames)", proj.name, len(proj.frames))
+        proj._prune_missing_derived()
         return proj
+
+    def _prune_missing_derived(self) -> None:
+        """Remove derived frames (ALIGNED) whose files no longer exist on disk.
+
+        Raw source frames (LIGHT/DARK/FLAT/BIAS) are kept even if missing — they
+        may be on removable media. Derived frames are re-generated and safe to prune.
+        """
+        derived_types = {FrameType.ALIGNED}
+        before = len(self.frames)
+        self.frames = [
+            f for f in self.frames
+            if f.frame_type not in derived_types or f.path.exists()
+        ]
+        removed = before - len(self.frames)
+        if removed:
+            log.warning(
+                "Pruned %d missing derived frame(s) from project (files not found on disk)",
+                removed,
+            )
 
     @classmethod
     def create(cls, name: str, directory: Path) -> Project:

@@ -8,12 +8,19 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Callable
 
 import cv2
 import numpy as np
 
 from cosmica.core.masks import Mask, MaskType, apply_mask
 from cosmica.core.star_detection import detect_stars
+
+ProgressCallback = Callable[[float, str], None]
+
+
+def _noop_progress(f: float, m: str) -> None:
+    pass
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +96,7 @@ def reduce_stars(
     star_mask: Mask | None = None,
     params: StarReductionParams | None = None,
     mask: Mask | None = None,
+    progress: ProgressCallback = _noop_progress,
 ) -> np.ndarray:
     """Reduce star sizes by morphological erosion within the star mask.
 
@@ -112,8 +120,10 @@ def reduce_stars(
         params = StarReductionParams()
 
     if star_mask is None:
+        progress(0.0, "Detecting stars for reduction…")
         star_mask = create_star_mask(image)
 
+    progress(0.4, "Applying morphological reduction…")
     original = image.copy()
     kernel = cv2.getStructuringElement(
         cv2.MORPH_ELLIPSE, (params.kernel_size, params.kernel_size)
@@ -132,6 +142,7 @@ def reduce_stars(
             result[ch] = image[ch] * (1 - sm * params.amount) + eroded * (sm * params.amount)
 
     result = np.clip(result, 0, 1)
+    progress(1.0, "Star reduction complete")
     return apply_mask(original, result, mask)
 
 

@@ -12,6 +12,7 @@ import logging
 from dataclasses import dataclass, field
 
 import numpy as np
+import torch
 
 log = logging.getLogger(__name__)
 
@@ -244,6 +245,7 @@ def _fit_polynomial_surface(
     return result
 
 
+@torch.no_grad()
 def _evaluate_polynomial_gpu(h: int, w: int, coeffs: np.ndarray, order: int) -> np.ndarray:
     """Evaluate 2D polynomial over a full (H, W) grid, using GPU when available.
 
@@ -302,6 +304,7 @@ def _evaluate_polynomial_gpu(h: int, w: int, coeffs: np.ndarray, order: int) -> 
         return result
 
 
+@torch.no_grad()
 def _subtract_and_floor_gpu(channel: np.ndarray, bg_model: np.ndarray) -> np.ndarray:
     """Subtract background model, shift floor to ~0, clip to [0,1] — GPU if available."""
     try:
@@ -326,6 +329,7 @@ def _subtract_and_floor_gpu(channel: np.ndarray, bg_model: np.ndarray) -> np.nda
         return np.clip(corrected, 0, 1).astype(np.float32)
 
 
+@torch.no_grad()
 def _gaussian_smooth_gpu(model: np.ndarray, sigma: float) -> np.ndarray:
     """Apply Gaussian smoothing to a 2D model array, using GPU when available."""
     if sigma < 0.5:

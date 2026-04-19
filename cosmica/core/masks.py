@@ -93,6 +93,10 @@ def apply_mask(
     if mask is None:
         return processed
 
+    # All-zero mask: every pixel is fully protected — skip the blending entirely
+    if not mask.data.any():
+        return original
+
     m = mask.data
     if original.ndim == 3:
         # Broadcast (H, W) mask to (C, H, W)

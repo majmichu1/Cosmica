@@ -45,6 +45,7 @@ def histogram_transform(
         return _ht_cpu(image, params, mask)
 
 
+@torch.no_grad()
 def _ht_gpu(
     image: np.ndarray,
     params: HistogramTransformParams,

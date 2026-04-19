@@ -56,6 +56,7 @@ def _make_gaussian_kernel_1d(sigma: float, device: torch.device) -> torch.Tensor
     return kernel
 
 
+@torch.no_grad()
 def _gaussian_blur_gpu(
     channel: np.ndarray,
     sigma: float,

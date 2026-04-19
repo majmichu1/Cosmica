@@ -29,6 +29,7 @@ __all__ = [
 log = logging.getLogger(__name__)
 
 
+@torch.no_grad()
 def detect_stars_gpu(
     data: torch.Tensor,
     threshold_sigma: float = 5.0,
@@ -54,7 +55,7 @@ def detect_stars_gpu(
     med = torch.median(image)
     mad = torch.median(torch.abs(image - med))
     noise_est = max(mad.item() * 1.4826, 0.01)  # floor prevents near-zero threshold
-    thresh = med.item() + threshold_sigma * noise_est
+    thresh = min(med.item() + threshold_sigma * noise_est, 0.95)  # cap matches CPU path
 
     masked_image = torch.where(image > thresh, image, torch.zeros_like(image))
 
@@ -102,6 +103,7 @@ def detect_stars_gpu(
     return stars
 
 
+@torch.no_grad()
 def match_stars_gpu(
     ref_stars: list[Star],
     target_stars: list[Star],
@@ -140,6 +142,7 @@ def match_stars_gpu(
     return matches
 
 
+@torch.no_grad()
 def estimate_transform_gpu(
     matches: list[tuple[Star, Star]],
     ransac_threshold: float = 3.0,
@@ -182,6 +185,7 @@ def estimate_transform_gpu(
     return transform.astype(np.float32)
 
 
+@torch.no_grad()
 def warp_image_gpu(
     image: torch.Tensor,
     matrix: np.ndarray,

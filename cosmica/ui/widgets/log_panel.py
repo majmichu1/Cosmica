@@ -6,11 +6,15 @@ import logging
 from datetime import datetime
 
 from PyQt6.QtCore import QObject, Qt, pyqtSignal, pyqtSlot
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QProgressBar, QTextEdit, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QHBoxLayout, QLabel, QProgressBar, QPushButton, QTextEdit, QVBoxLayout, QWidget,
+)
 
 
 class LogPanel(QWidget):
     """Bottom panel showing processing log and progress bar."""
+
+    cancel_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -27,8 +31,19 @@ class LogPanel(QWidget):
         self._progress_bar.setValue(0)
         self._progress_bar.setTextVisible(False)
         self._progress_bar.setMaximumHeight(16)
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.setMaximumWidth(70)
+        self._cancel_btn.setMaximumHeight(18)
+        self._cancel_btn.setStyleSheet(
+            "QPushButton { color: #e06c75; font-size: 11px; border: 1px solid #e06c75;"
+            " border-radius: 3px; padding: 0 4px; }"
+            " QPushButton:hover { background: #3a1a1a; }"
+        )
+        self._cancel_btn.clicked.connect(self.cancel_requested)
+        self._cancel_btn.setVisible(False)
         progress_row.addWidget(self._progress_label, 1)
         progress_row.addWidget(self._progress_bar, 2)
+        progress_row.addWidget(self._cancel_btn)
         layout.addLayout(progress_row)
 
         # Log text
@@ -69,6 +84,10 @@ class LogPanel(QWidget):
     def reset_progress(self):
         self._progress_bar.setValue(0)
         self._progress_label.setText("Ready")
+        self._cancel_btn.setVisible(False)
+
+    def set_cancel_visible(self, visible: bool):
+        self._cancel_btn.setVisible(visible)
 
 
 class _LogSignalBridge(QObject):

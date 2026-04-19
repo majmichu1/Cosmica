@@ -11,6 +11,9 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 
 import numpy as np
+import torch
+
+from cosmica.core.device_manager import get_device_manager
 
 log = logging.getLogger(__name__)
 
@@ -99,18 +102,19 @@ def combine_narrowband(
     else:
         matrix = PALETTE_MATRICES[params.palette]
 
-    # Apply: output[ch] = sum(matrix[ch, :] * input[:])
-    result = np.zeros((3, h, w), dtype=np.float32)
-    for ch in range(3):
-        for inp in range(3):
-            result[ch] += matrix[ch, inp] * stack[inp]
+    # Apply: result[c,H,W] = einsum("ci,ihw->chw", matrix, stack) on GPU
+    dm = get_device_manager()
+    with torch.no_grad():
+        matrix_t = torch.from_numpy(matrix).to(dm.device)  # (3, 3)
+        stack_t = torch.from_numpy(stack).to(dm.device)    # (3, H, W)
+        result_t = torch.einsum("ci,ihw->chw", matrix_t, stack_t)
+        if params.normalize:
+            max_val = result_t.max()
+            if max_val > 1e-10:
+                result_t = result_t / max_val
+        result = result_t.clamp(0, 1).cpu().numpy().astype(np.float32)
 
-    if params.normalize:
-        max_val = result.max()
-        if max_val > 0:
-            result /= max_val
-
-    return np.clip(result, 0, 1).astype(np.float32)
+    return result
 
 
 def continuum_subtraction(

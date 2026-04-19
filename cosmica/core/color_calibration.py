@@ -9,10 +9,17 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 
 from cosmica.core.masks import Mask, apply_mask
+
+ProgressCallback = Callable[[float, str], None]
+
+
+def _noop_progress(f: float, m: str) -> None:
+    pass
 from cosmica.core.star_detection import detect_stars
 
 log = logging.getLogger(__name__)
@@ -41,6 +48,7 @@ def color_calibrate(
     image: np.ndarray,
     params: ColorCalibrationParams | None = None,
     mask: Mask | None = None,
+    progress: ProgressCallback = _noop_progress,
 ) -> ColorCalibrationResult:
     """Calibrate color balance using star photometry.
 
@@ -76,14 +84,18 @@ def color_calibrate(
 
     # Step 1: Background neutralization
     if params.neutralize_background:
+        progress(0.1, "Neutralizing background…")
         bg_offset = _neutralize_background(result, params.background_percentile)
 
     # Step 2: White balance using star photometry
+    progress(0.4, "Computing white balance…")
     correction = _compute_white_balance(result, params)
+    progress(0.8, "Applying correction…")
     for ch in range(3):
         result[ch] = np.clip(result[ch] * correction[ch], 0, 1)
 
     result = apply_mask(original, result, mask)
+    progress(1.0, "Color calibration complete")
 
     return ColorCalibrationResult(
         data=result,

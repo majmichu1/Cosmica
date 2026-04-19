@@ -189,6 +189,7 @@ def calibrate_light(
         return _calibrate_light_cpu(light, master_bias, master_dark, master_flat)
 
 
+@torch.no_grad()
 def _calibrate_light_gpu(
     light: ImageData,
     master_bias: ImageData | None,

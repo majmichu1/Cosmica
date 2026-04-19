@@ -46,8 +46,7 @@ def scnr(
         params = SCNRParams()
 
     if image.ndim != 3 or image.shape[0] < 3:
-        log.warning("SCNR requires a color image with >= 3 channels")
-        return image
+        raise ValueError("SCNR requires a color image with >= 3 channels; got mono or single-channel input")
 
     dm = get_device_manager()
     if dm.is_gpu:
@@ -56,6 +55,7 @@ def scnr(
         return _scnr_cpu(image, params, mask)
 
 
+@torch.no_grad()
 def _scnr_gpu(
     image: np.ndarray,
     params: SCNRParams,
@@ -198,6 +198,7 @@ def _hsv_to_rgb(hsv: np.ndarray) -> np.ndarray:
     return np.clip(np.stack([r, g, b], axis=0), 0, 1).astype(np.float32)
 
 
+@torch.no_grad()
 def _rgb_to_hsv_gpu(image: np.ndarray, dm) -> torch.Tensor:
     """GPU-accelerated RGB to HSV conversion."""
     t = dm.from_numpy(image)
@@ -225,6 +226,7 @@ def _rgb_to_hsv_gpu(image: np.ndarray, dm) -> torch.Tensor:
     return torch.stack([h, s, v], dim=0)
 
 
+@torch.no_grad()
 def _hsv_to_rgb_gpu(hsv: torch.Tensor) -> torch.Tensor:
     """GPU-accelerated HSV to RGB conversion."""
     h, s, v = hsv[0], hsv[1], hsv[2]
@@ -274,6 +276,7 @@ def color_adjust(
         return _color_adjust_cpu(image, params, mask)
 
 
+@torch.no_grad()
 def _color_adjust_gpu(
     image: np.ndarray,
     params: ColorAdjustParams,

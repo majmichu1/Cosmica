@@ -165,7 +165,12 @@ class ProjectPanel(QWidget):
                 if not frames:
                     continue
                 type_label = FRAME_TYPE_LABELS.get(ft, ft.name)
-                group = QTreeWidgetItem(section_item, [f"{type_label} ({len(frames)})", ""])
+                present = [e for e in frames if e.path.exists()]
+                missing_count = len(frames) - len(present)
+                count_label = str(len(present))
+                if missing_count:
+                    count_label += f", {missing_count} missing"
+                group = QTreeWidgetItem(section_item, [f"{type_label} ({count_label})", ""])
                 group.setExpanded(True)
                 for entry in frames:
                     name = entry.path.name
@@ -175,6 +180,11 @@ class ProjectPanel(QWidget):
                     item = QTreeWidgetItem(group, [name, info])
                     item.setData(0, Qt.ItemDataRole.UserRole, str(entry.path))
                     item.setToolTip(0, str(entry.path))
+                    if not entry.path.exists():
+                        item.setForeground(0, item.foreground(0))
+                        from PyQt6.QtGui import QColor
+                        item.setForeground(0, QColor("#ff6666"))
+                        item.setToolTip(0, f"MISSING: {entry.path}")
 
         # Build history
         for step in self._project.history:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 from pathlib import Path
 
 from PyQt6.QtCore import QSettings, Qt, QThread, QTimer, pyqtSignal, pyqtSlot
@@ -11,7 +13,6 @@ from PyQt6.QtGui import QAction, QDragEnterEvent, QDropEvent
 from PyQt6.QtWidgets import (
     QCheckBox,
     QDialog,
-    QDialogButtonBox,
     QFileDialog,
     QInputDialog,
     QMainWindow,
@@ -24,6 +25,7 @@ from PyQt6.QtWidgets import (
 import cosmica
 from cosmica.core.abe import abe_extract
 from cosmica.core.background import extract_background
+from cosmica.core.background_neutralization import background_neutralization
 from cosmica.core.banding import banding_reduction
 from cosmica.core.calibration import (
     calibrate_lights_batch,
@@ -60,10 +62,18 @@ from cosmica.core.morphology import morphology_transform
 from cosmica.core.presets import load_default_presets
 from cosmica.core.project import Project
 from cosmica.core.scripting import MacroRecorder, load_macro, play_macro, save_macro
-from cosmica.core.stacking import StackingParams, align_frames, align_from_paths, stack_from_paths, stack_images
+from cosmica.core.stacking import (
+    IntegrationMethod,
+    StackingParams,
+    align_frames,
+    align_from_paths,
+    stack_from_paths,
+    stack_images,
+)
 from cosmica.core.star_reduction import reduce_stars
 from cosmica.core.statistics import compute_image_statistics
 from cosmica.core.stretch import (
+    arcsinh_stretch,
     auto_stretch,
     compute_histogram,
     generalized_hyperbolic_stretch,
@@ -92,63 +102,89 @@ log = logging.getLogger(__name__)
 def _align_with_optional_filter(
     paths,
     output_dir,
-    qf_params=None,
     stk_params=None,
     filename_prefix="aligned",
     progress=None,
 ):
-    """Worker-thread wrapper: optionally quality-filter paths then align.
-
-    Running quality filtering here (not on the main thread) avoids freezing
-    the UI for datasets where score_subframes measures PSF on every frame.
-    """
+    """Worker-thread wrapper: align frames from disk paths."""
     from pathlib import Path
-    from cosmica.core.stacking import align_from_paths
+
 
     def _prog(frac, msg):
         if progress is not None:
             progress(frac, msg)
 
-    # --- Optional quality filter (runs PSF measurement per frame) ---
-    filtered_paths = list(paths)
-    if qf_params is not None:
-        try:
-            from cosmica.core.subframe_selector import (
-                SubframeSelectorParams,
-                filter_by_metric,
-                score_subframes,
-            )
-            _prog(0.0, f"Quality filter: scoring {len(paths)} frames...")
-            sf_params = SubframeSelectorParams(
-                rejection_sigma=qf_params.get("rejection_sigma", 1.5)
-            )
-            str_paths = [str(p) for p in filtered_paths]
-            scores = score_subframes(str_paths, sf_params)
-            accepted = filter_by_metric(
-                scores,
-                metric=qf_params.get("metric", "quality_score"),
-                mode=qf_params.get("mode", "sigma"),
-                top_n=qf_params.get("top_n"),
-                top_percent=qf_params.get("top_percent", 80.0),
-                sigma=qf_params.get("rejection_sigma", 1.5),
-            )
-            kept = [p for p, sc in zip(filtered_paths, accepted) if sc.accepted]
-            n_rejected = len(filtered_paths) - len(kept)
-            if n_rejected:
-                log.info("Quality filter: rejected %d frames", n_rejected)
-            filtered_paths = kept if kept else filtered_paths
-        except Exception as exc:
-            log.warning("Quality filter skipped in worker: %s", exc)
-
-    # --- Alignment ---
-    _prog(0.02, f"Aligning {len(filtered_paths)} frames...")
+    _prog(0.0, f"Aligning {len(paths)} frames...")
     return align_from_paths(
-        [Path(p) for p in filtered_paths],
+        [Path(p) for p in paths],
         Path(output_dir),
         params=stk_params,
         filename_prefix=filename_prefix,
-        progress=lambda f, m: _prog(0.02 + f * 0.98, m),
+        progress=lambda f, m: _prog(f, m),
     )
+
+
+def _score_and_stack_worker(
+    aligned_paths,
+    params,
+    cached_scores=None,
+    progress=None,
+):
+    """Worker-thread wrapper: score for Weighted Average weights + stack.
+
+    If integration mode is WEIGHTED_AVERAGE, frames are scored and weights
+    are assigned proportional to quality score.  Otherwise stacking runs
+    directly — frame selection is done up-front via the Subframe Selector.
+
+    cached_scores: optional dict mapping str path → score dict (from project JSON).
+    When all frames have cached scores the scoring step is skipped entirely.
+    """
+    from cosmica.core.stacking import IntegrationMethod
+    from cosmica.core.subframe_selector import SubframeSelectorParams, score_subframes
+
+    def _prog(frac, msg):
+        if progress:
+            progress(frac, msg)
+
+    final_paths = list(aligned_paths)
+    needs_scoring = (
+        hasattr(params, "integration") and params.integration == IntegrationMethod.WEIGHTED_AVERAGE
+    )
+
+    if needs_scoring:
+        str_paths = [str(p) for p in final_paths]
+        if cached_scores and all(p in cached_scores for p in str_paths):
+            log.info(
+                "Using cached frame scores for weighted stacking (%d frames)", len(str_paths)
+            )
+            weights = [
+                max(float(cached_scores[p].get("quality_score", 0.5)), 1e-6)
+                for p in str_paths
+            ]
+            _prog(0.45, "Using cached scores…")
+        else:
+            scores = score_subframes(
+                str_paths,
+                SubframeSelectorParams(),
+                progress=lambda f, m: _prog(f * 0.45, m),
+            )
+            weights = [max(float(sc.quality_score), 1e-6) for sc in scores]
+        log.info(
+            "Frame weights: min=%.3f  max=%.3f  (%d frames)",
+            min(weights), max(weights), len(weights),
+        )
+        params.frame_weights = weights
+
+    stack_progress_start = 0.45 if needs_scoring else 0.0
+
+    def _stack_prog(frac, msg):
+        _prog(stack_progress_start + frac * (1.0 - stack_progress_start), msg)
+
+    return stack_from_paths(final_paths, params=params, progress=_stack_prog)
+
+
+class _ProcessingCancelled(BaseException):
+    """Raised inside the worker thread when the user cancels an operation."""
 
 
 class ProcessingWorker(QThread):
@@ -158,28 +194,48 @@ class ProcessingWorker(QThread):
     finished = pyqtSignal(object)  # result
     error = pyqtSignal(str)
     elapsed = pyqtSignal(float)    # seconds
+    cancelled = pyqtSignal()
 
     def __init__(self, func, *args, **kwargs):
         super().__init__()
         self._func = func
         self._args = args
         self._kwargs = kwargs
+        self._cancel_event = threading.Event()
+        self._t0: float = 0.0
+
+    def cancel(self):
+        self._cancel_event.set()
 
     def run(self):
-        import time
-        t0 = time.monotonic()
+        self._t0 = time.monotonic()
         try:
             self._kwargs["progress"] = self._emit_progress
             result = self._func(*self._args, **self._kwargs)
-            self.elapsed.emit(time.monotonic() - t0)
+            self.elapsed.emit(time.monotonic() - self._t0)
             self.finished.emit(result)
+        except _ProcessingCancelled:
+            self.elapsed.emit(time.monotonic() - self._t0)
+            self.cancelled.emit()
         except Exception as e:
-            self.elapsed.emit(time.monotonic() - t0)
+            self.elapsed.emit(time.monotonic() - self._t0)
             log.exception("Processing error")
             self.error.emit(str(e))
 
     def _emit_progress(self, fraction: float, message: str):
-        self.progress.emit(fraction, message)
+        if self._cancel_event.is_set():
+            raise _ProcessingCancelled()
+        eta_str = ""
+        if fraction > 0.02:
+            elapsed = time.monotonic() - self._t0
+            remaining = elapsed / fraction * (1.0 - fraction)
+            if remaining >= 2:
+                eta_str = (
+                    f"  — ETA {remaining:.0f}s"
+                    if remaining < 120
+                    else f"  — ETA {remaining / 60:.1f}min"
+                )
+        self.progress.emit(fraction, message + eta_str)
 
 
 class MainWindow(QMainWindow):
@@ -244,6 +300,8 @@ class MainWindow(QMainWindow):
 
         # Paths to saved aligned frames for memory-efficient stacking
         self._aligned_paths: list = []
+        # Paths overridden by Subframe Selector dialog (subset of aligned frames)
+        self._subframe_selected_paths: list[str] = []
 
         # Blink comparator
         self._blink_images: list = [None, None]  # [A, B] — display RGB uint8 arrays (H,W,3)
@@ -251,6 +309,12 @@ class MainWindow(QMainWindow):
         self._blink_index = 0
         self._blink_timer = QTimer()
         self._blink_timer.timeout.connect(self._blink_tick)
+
+        # Autosave every 5 minutes when a project is open
+        self._autosave_timer = QTimer()
+        self._autosave_timer.setInterval(5 * 60 * 1000)
+        self._autosave_timer.timeout.connect(self._autosave_project)
+        self._autosave_timer.start()
 
         # Register tools for preset system
         load_default_presets()
@@ -490,6 +554,7 @@ class MainWindow(QMainWindow):
 
         # Phase B signals
         tp.run_ghs.connect(self._on_run_ghs)
+        tp.run_arcsinh_stretch.connect(self._on_run_arcsinh_stretch)
         tp.run_color_calibration.connect(self._on_run_color_calibration)
         tp.run_pcc.connect(self._on_run_pcc)
         tp.run_denoise.connect(self._on_run_denoise)
@@ -530,6 +595,7 @@ class MainWindow(QMainWindow):
         tp.run_median_filter.connect(self._on_run_median_filter)
         tp.run_abe.connect(self._on_run_abe)
         tp.run_vignette_correction.connect(self._on_run_vignette)
+        tp.run_background_neutralization.connect(self._on_run_bg_neutralization)
         tp.run_chromatic_aberration.connect(self._on_run_ca)
         tp.show_image_statistics.connect(self._on_show_statistics)
         tp.open_star_mask_dialog.connect(self._on_open_star_mask)
@@ -538,6 +604,7 @@ class MainWindow(QMainWindow):
         tp.run_continuum_subtraction.connect(self._on_run_continuum_subtraction)
         tp.toggle_sample_mode.connect(self._on_toggle_sample_mode)
         tp.clear_bg_samples.connect(self._on_clear_bg_samples)
+        tp.add_bg_grid.connect(self._on_add_bg_grid)
         tp.toggle_wcs_overlay.connect(self._on_toggle_wcs_overlay)
         tp.toggle_dso_overlay.connect(self._on_toggle_dso_overlay)
         tp.open_python_console.connect(self._on_open_python_console)
@@ -569,6 +636,7 @@ class MainWindow(QMainWindow):
         tp.preview_requested.connect(self._on_preview_requested)
         tp.preview_cancelled.connect(self._on_preview_cancelled)
         tp.curves_histogram_changed.connect(self._update_curves_histogram)
+        tp.clip_points_changed.connect(self._histogram.set_clip_points)
 
         # Smart Processor signals
         tp.open_smart_processor.connect(self._show_smart_processor_dialog)
@@ -591,8 +659,32 @@ class MainWindow(QMainWindow):
         self._preview_indicator.setStyleSheet(
             "color: #00cc44; font-weight: bold; padding: 0 8px;"
         )
+        self._vram_label = _QLabel("")
+        self._vram_label.setStyleSheet("color: #969696; font-size: 11px; padding: 0 8px;")
+        self.statusBar().addPermanentWidget(self._vram_label)
         self.statusBar().addPermanentWidget(self._preview_indicator)
         self.statusBar().showMessage("Ready")
+
+        self._vram_timer = QTimer(self)
+        self._vram_timer.timeout.connect(self._update_vram_label)
+        self._vram_timer.start(3000)
+        self._update_vram_label()
+
+    def _update_vram_label(self):
+        try:
+            from cosmica.core.device_manager import get_device_manager
+            dm = get_device_manager()
+            if dm.device.type == "cuda":
+                import torch as _torch
+                alloc = _torch.cuda.memory_allocated(dm.device) / 1024**3
+                total = _torch.cuda.get_device_properties(dm.device).total_memory / 1024**3
+                self._vram_label.setText(f"VRAM {alloc:.1f}/{total:.1f} GB")
+            elif dm.device.type == "mps":
+                self._vram_label.setText("GPU: MPS")
+            else:
+                self._vram_label.setText("CPU mode")
+        except Exception:
+            self._vram_label.setText("")
 
     # ---------- File operations ----------
 
@@ -623,6 +715,14 @@ class MainWindow(QMainWindow):
                 self._project.save()
             except Exception as e:
                 log.debug("Failed to save project: %s", e)
+
+    def _autosave_project(self):
+        if self._project:
+            try:
+                self._project.save()
+                log.debug("Project autosaved")
+            except Exception as e:
+                log.debug("Autosave failed: %s", e)
 
     def _open_image(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -749,6 +849,11 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(str)
     def _load_frame(self, path: str):
+        if not Path(path).exists():
+            self._log_panel.log(
+                f"File not found (was it moved or deleted?): {Path(path).name}", "error"
+            )
+            return
         self._log_panel.log(f"Loading {Path(path).name}...", "info")
 
         def _load_work(path, progress=None):
@@ -845,12 +950,24 @@ class MainWindow(QMainWindow):
         self._update_undo_actions()
         self._log_panel.log("Undo history cleared", "info")
 
-    def _update_current_image(self, data, message: str, undo_desc: str | None = None):
-        """Replace current image data and update display, recording undo."""
+    def _update_current_image(
+        self,
+        data,
+        message: str,
+        undo_desc: str | None = None,
+        geometric: bool = False,
+    ):
+        """Replace current image data and update display, recording undo.
+
+        geometric=True for ops that only change image extent (crop/rotate/flip/resize):
+        those should re-stretch from the result's own statistics, not the pre-op reference.
+        """
         before = self._current_image
-        # Capture pre-operation data as display reference — same as live preview uses.
-        # This ensures the executed result matches the preview brightness exactly.
-        display_ref = before.data if before is not None else None
+        # For pixel-value operations, anchor the display stretch to the pre-op image so
+        # the executed result matches the live-preview brightness exactly.
+        # For geometric operations the pixel distribution of the result may differ
+        # (different crop region, flipped vignette, etc.) so re-stretch independently.
+        display_ref = None if geometric or before is None else before.data
         image = ImageData(
             data=data,
             header=self._current_image.header.copy() if self._current_image else {},
@@ -921,6 +1038,9 @@ class MainWindow(QMainWindow):
             lambda msg: self._log_panel.log(f"Error: {msg}", "error"),
             _Qt.ConnectionType.QueuedConnection,
         )
+        self._worker.error.connect(
+            lambda: self._log_panel.set_cancel_visible(False), _Qt.ConnectionType.QueuedConnection
+        )
         self._worker.elapsed.connect(
             lambda secs: self._log_panel.log(
                 f"Completed in {secs:.1f}s" if secs < 120
@@ -929,11 +1049,26 @@ class MainWindow(QMainWindow):
             ),
             _Qt.ConnectionType.QueuedConnection,
         )
+        self._worker.cancelled.connect(
+            lambda: self._log_panel.log("Operation cancelled", "warning"),
+            _Qt.ConnectionType.QueuedConnection,
+        )
+        self._worker.cancelled.connect(
+            lambda: self._log_panel.reset_progress(), _Qt.ConnectionType.QueuedConnection
+        )
+        self._worker.cancelled.connect(
+            lambda: self._log_panel.set_cancel_visible(False), _Qt.ConnectionType.QueuedConnection
+        )
         if on_done:
             self._worker.finished.connect(on_done, _Qt.ConnectionType.QueuedConnection)
         self._worker.finished.connect(
             lambda: self._log_panel.reset_progress(), _Qt.ConnectionType.QueuedConnection
         )
+        self._worker.finished.connect(
+            lambda: self._log_panel.set_cancel_visible(False), _Qt.ConnectionType.QueuedConnection
+        )
+        self._log_panel.set_cancel_visible(True)
+        self._log_panel.cancel_requested.connect(self._worker.cancel, _Qt.ConnectionType.UniqueConnection)
         self._worker.start()
 
     # ---------- Processing operations ----------
@@ -1114,44 +1249,6 @@ class MainWindow(QMainWindow):
         self._log_panel.log(f"Loaded {len(lights)} raw light frames (uncalibrated)", "warning")
         return lights
 
-    def _apply_quality_filter(self, lights: list) -> list:
-        """Filter frames by quality score if quality filter is enabled. Returns filtered list."""
-        from cosmica.core.subframe_selector import filter_by_metric, score_subframes
-
-        qf = self._tools_panel.get_quality_filter_params()
-        if qf is None:
-            return lights
-
-        paths = [str(img.file_path) for img in lights if img.file_path is not None]
-        if len(paths) != len(lights):
-            self._log_panel.log("Quality filter skipped: some frames have no file path", "warning")
-            return lights
-
-        self._log_panel.log(f"Running quality filter on {len(paths)} frames...", "info")
-        sf_params = SubframeSelectorParams(rejection_sigma=qf.get("rejection_sigma", 1.5))
-        scores = score_subframes(paths, sf_params)
-
-        filtered_scores = filter_by_metric(
-            scores,
-            metric=qf.get("metric", "quality_score"),
-            mode=qf.get("mode", "sigma"),
-            top_n=qf.get("top_n"),
-            top_percent=qf.get("top_percent", 80.0),
-            sigma=qf.get("rejection_sigma", 1.5),
-        )
-
-        accepted = [img for img, sc in zip(lights, filtered_scores, strict=True) if sc.accepted]
-        n_rejected = len(lights) - len(accepted)
-        if n_rejected > 0:
-            self._log_panel.log(
-                f"Quality filter: rejected {n_rejected} frame(s) "
-                f"(metric={qf.get('metric')}, mode={qf.get('mode')})",
-                "warning",
-            )
-        else:
-            self._log_panel.log("Quality filter: all frames accepted", "info")
-        return accepted if accepted else lights  # never drop everything
-
     def _get_light_paths(self) -> list | None:
         """Return raw light frame paths from project without loading them into RAM.
 
@@ -1186,46 +1283,6 @@ class MainWindow(QMainWindow):
 
         return [f.path for f in light_frames]
 
-    def _apply_quality_filter_paths(self, paths: list) -> list:
-        """Quality filter operating on file paths — no full frames loaded.
-
-        Returns filtered path list (falls back to full list on any error).
-        """
-        from cosmica.core.subframe_selector import SubframeSelectorParams, filter_by_metric, score_subframes
-
-        qf = self._tools_panel.get_quality_filter_params()
-        if qf is None:
-            return paths
-
-        str_paths = [str(p) for p in paths]
-        self._log_panel.log(f"Running quality filter on {len(str_paths)} frames...", "info")
-        try:
-            sf_params = SubframeSelectorParams(rejection_sigma=qf.get("rejection_sigma", 1.5))
-            scores = score_subframes(str_paths, sf_params)
-            filtered = filter_by_metric(
-                scores,
-                metric=qf.get("metric", "quality_score"),
-                mode=qf.get("mode", "sigma"),
-                top_n=qf.get("top_n"),
-                top_percent=qf.get("top_percent", 80.0),
-                sigma=qf.get("rejection_sigma", 1.5),
-            )
-            accepted = [p for p, sc in zip(paths, filtered) if sc.accepted]
-            n_rejected = len(paths) - len(accepted)
-            if n_rejected:
-                self._log_panel.log(
-                    f"Quality filter: rejected {n_rejected} frame(s) "
-                    f"(metric={qf.get('metric')}, mode={qf.get('mode')})",
-                    "warning",
-                )
-            else:
-                self._log_panel.log("Quality filter: all frames accepted", "info")
-            return accepted if accepted else paths
-        except Exception as exc:
-            log.warning("Quality filter failed: %s", exc)
-            self._log_panel.log(f"Quality filter skipped: {exc}", "warning")
-            return paths
-
     @pyqtSlot()
     def _on_run_alignment(self):
         """Start alignment.
@@ -1238,7 +1295,6 @@ class MainWindow(QMainWindow):
         if self._calibrated_lights:
             # Calibrated lights already in RAM — use in-memory path
             lights = self._calibrated_lights
-            lights = self._apply_quality_filter(lights)
             self._tools_panel.set_ref_frame_max(len(lights))
             params_dict = self._tools_panel.get_alignment_params()
             stk_params = StackingParams(
@@ -1263,7 +1319,6 @@ class MainWindow(QMainWindow):
             if not paths:
                 return
             params_dict = self._tools_panel.get_alignment_params()
-            qf_params = self._tools_panel.get_quality_filter_params()
             stk_params = StackingParams(
                 registration_mode=params_dict["mode"],
                 reference_frame_index=params_dict["reference_frame_index"],
@@ -1271,8 +1326,20 @@ class MainWindow(QMainWindow):
             )
 
             if not self._project:
-                self._log_panel.log("No project — cannot determine output directory", "error")
-                return
+                # Offer to create a project so the output directory can be determined
+                from PyQt6.QtWidgets import QInputDialog
+                name, ok = QInputDialog.getText(
+                    self, "Create Project",
+                    "No project is loaded. Enter a project name to create one now:",
+                )
+                if not ok or not name.strip():
+                    return
+                directory = QFileDialog.getExistingDirectory(self, "Choose Project Location")
+                if not directory:
+                    return
+                self._project = Project.create(name.strip(), Path(directory))
+                self._project_panel.set_project(self._project)
+                self._log_panel.log(f"Created project: {name}", "success")
             aligned_dir = os.path.join(self._project.directory, "aligned")
             import re as _re
             raw_name = getattr(self._project, "name", None) or "frame"
@@ -1283,13 +1350,10 @@ class MainWindow(QMainWindow):
                 f"{len(paths)} raw frames (streaming from disk, low-RAM)...",
                 "info",
             )
-            # NOTE: quality filtering (score_subframes) is deferred into the
-            # worker so it doesn't block the main thread for large datasets.
             self._start_worker(
                 _align_with_optional_filter,
                 paths,
                 aligned_dir,
-                qf_params=qf_params,
                 stk_params=stk_params,
                 filename_prefix=file_prefix,
                 on_done=self._on_path_alignment_done,
@@ -1414,10 +1478,16 @@ class MainWindow(QMainWindow):
             self._save_project()
 
     def _on_run_stacking(self):
-        from cosmica.core.stacking import stack_from_paths
 
-        # Prefer aligned paths on disk (memory-efficient tiled stacking)
-        aligned_paths = getattr(self, "_aligned_paths", [])
+        # Subframe Selector can override the aligned path list with a quality-filtered subset.
+        if self._subframe_selected_paths:
+            aligned_paths = [Path(p) for p in self._subframe_selected_paths]
+            self._log_panel.log(
+                f"Using {len(aligned_paths)} subframe-selected frames for stacking", "info"
+            )
+        else:
+            aligned_paths = getattr(self, "_aligned_paths", [])
+
         if not aligned_paths and self._project:
             aligned_paths = [
                 e.path for e in self._project.frames_by_type(FrameType.ALIGNED)
@@ -1427,25 +1497,53 @@ class MainWindow(QMainWindow):
         if aligned_paths:
             params = self._tools_panel.get_stacking_params()
             n = len(aligned_paths)
-            self._log_panel.log(
-                f"Stacking {n} aligned frames from disk (tiled, low-RAM)…", "info"
-            )
+            self._log_panel.log(f"Stacking {n} aligned frames…", "info")
+            cached = getattr(self._project, "frame_scores", {}) if self._project else {}
             self._start_worker(
-                stack_from_paths,
+                _score_and_stack_worker,
                 aligned_paths,
-                params=params,
+                params,
+                cached,
                 on_done=self._on_stacking_done,
             )
             return
 
-        # No aligned frames on disk — align + stack in one pass
+        # No aligned frames on disk — prefer path-based align+stack to avoid loading
+        # all frames into RAM on the main thread. Fall back to in-memory only when
+        # calibrated lights are already loaded (small dataset path).
+        light_paths = self._get_light_paths() if not self._calibrated_lights else None
+
+        if light_paths is not None:
+            # Disk-based align + stack (memory-safe for large datasets)
+            params = self._tools_panel.get_stacking_params()
+            drizzle_enabled, drizzle_params = self._tools_panel.get_drizzle_params()
+            if drizzle_enabled:
+                self._log_panel.log("Drizzle requires in-memory path; loading frames…", "info")
+                # Fall through to load lights below
+            else:
+                output_dir = str(self._project.directory / "aligned") if self._project else None
+                if output_dir is None:
+                    self._log_panel.log("No project directory for alignment output", "error")
+                    return
+                self._log_panel.log(
+                    f"Aligning + stacking {len(light_paths)} frames (disk path)…", "info"
+                )
+                self._start_worker(
+                    _align_with_optional_filter,
+                    light_paths,
+                    output_dir,
+                    stk_params=params,
+                    on_done=lambda result: self._on_alignment_done(result),
+                )
+                return
+
         lights = self._get_lights_for_stacking()
         if not lights:
             return
-        lights = self._apply_quality_filter(lights)
-        self._log_panel.log("Aligning and stacking frames...", "info")
 
+        params = self._tools_panel.get_stacking_params()
         drizzle_enabled, drizzle_params = self._tools_panel.get_drizzle_params()
+        self._log_panel.log("Aligning and stacking frames...", "info")
 
         if drizzle_enabled:
             self._log_panel.log(
@@ -1465,6 +1563,7 @@ class MainWindow(QMainWindow):
 
             def _on_drizzle_done(result):
                 import numpy as _np
+
                 from cosmica.core.image_io import ImageData
                 img = ImageData(data=result.data.astype(_np.float32), header={})
                 self._display_image(img)
@@ -1483,12 +1582,35 @@ class MainWindow(QMainWindow):
             self._start_worker(_drizzle_work, lights, drizzle_params, on_done=_on_drizzle_done)
             return
 
-        params = self._tools_panel.get_stacking_params()
+        def _in_memory_stack_work(light_frames, stk_params, progress=None):
+            from cosmica.core.subframe_selector import score_subframes
+
+            def _prog(f, m):
+                if progress:
+                    progress(f, m)
+
+            if (
+                hasattr(stk_params, "integration")
+                and stk_params.integration == IntegrationMethod.WEIGHTED_AVERAGE
+            ):
+                paths = [str(img.file_path) for img in light_frames if img.file_path is not None]
+                if len(paths) == len(light_frames):
+                    scores = score_subframes(
+                        paths, SubframeSelectorParams(),
+                        progress=lambda f, m: _prog(f * 0.4, m),
+                    )
+                    stk_params.frame_weights = [
+                        max(float(sc.quality_score), 1e-6) for sc in scores
+                    ]
+
+            _prog(0.4, f"Stacking {len(light_frames)} frames…")
+            return stack_images(
+                light_frames, stk_params, align=True,
+                progress=lambda f, m: _prog(0.4 + f * 0.6, m),
+            )
+
         self._start_worker(
-            stack_images,
-            lights,
-            params=params,
-            align=True,
+            _in_memory_stack_work, lights, params,
             on_done=self._on_stacking_done,
         )
 
@@ -1532,8 +1654,8 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "Select Session Folder", "")
         if not folder:
             return
-        from pathlib import Path
         import glob as _glob
+        from pathlib import Path
         extensions = ("*.fits", "*.fit", "*.fts", "*.xisf", "*.FITS", "*.FIT", "*.FTS")
         files = []
         for ext in extensions:
@@ -1601,8 +1723,7 @@ class MainWindow(QMainWindow):
         ms_params_dict = self._tools_panel.get_multi_session_params()
         stacking_params = self._tools_panel.get_stacking_params()
 
-        from cosmica.core.multi_session import MultiSessionParams, stack_multi_session
-        from cosmica.core.stacking import RejectionMethod, IntegrationMethod
+        from cosmica.core.multi_session import MultiSessionParams
 
         ms_params = MultiSessionParams(
             per_session_params=stacking_params,
@@ -1792,6 +1913,8 @@ class MainWindow(QMainWindow):
             return histogram_transform(data, tp.get_histogram_transform_params())
         elif tool_name == "ghs":
             return generalized_hyperbolic_stretch(data, tp.get_ghs_params())
+        elif tool_name == "arcsinh_stretch":
+            return arcsinh_stretch(data, tp.get_arcsinh_params())
         elif tool_name == "curves":
             return curves_transform(data, tp.get_curves_params())
         return None
@@ -1825,7 +1948,7 @@ class MainWindow(QMainWindow):
             return
         params = self._tools_panel.get_crop_params()
         result = crop(self._current_image.data, params)
-        self._update_current_image(result, f"Cropped to {result.shape[-1]}x{result.shape[-2]}")
+        self._update_current_image(result, f"Cropped to {result.shape[-1]}x{result.shape[-2]}", geometric=True)
         if self._project:
             self._project.add_history(
                 "Crop",
@@ -1841,7 +1964,7 @@ class MainWindow(QMainWindow):
             return
         params = self._tools_panel.get_rotate_params()
         result = rotate(self._current_image.data, params)
-        self._update_current_image(result, f"Rotated ({params.angle.name})")
+        self._update_current_image(result, f"Rotated ({params.angle.name})", geometric=True)
         if self._project:
             self._project.add_history("Rotate", {"angle": params.angle.name})
         self._macro_recorder.record_step("rotate", {"angle": params.angle.name})
@@ -1852,7 +1975,7 @@ class MainWindow(QMainWindow):
             return
         params = self._tools_panel.get_flip_params()
         result = flip(self._current_image.data, params)
-        self._update_current_image(result, f"Flipped ({params.axis.name})")
+        self._update_current_image(result, f"Flipped ({params.axis.name})", geometric=True)
         if self._project:
             self._project.add_history("Flip", {"axis": params.axis.name})
         self._macro_recorder.record_step("flip", {"axis": params.axis.name})
@@ -1863,7 +1986,7 @@ class MainWindow(QMainWindow):
             return
         params = self._tools_panel.get_resize_params()
         result = resize(self._current_image.data, params)
-        self._update_current_image(result, f"Resized to {result.shape[-1]}x{result.shape[-2]}")
+        self._update_current_image(result, f"Resized to {result.shape[-1]}x{result.shape[-2]}", geometric=True)
         if self._project:
             self._project.add_history("Resize", {"scale": params.scale})
         self._macro_recorder.record_step("resize", {"scale": params.scale})
@@ -2025,7 +2148,7 @@ class MainWindow(QMainWindow):
 
         from PyQt6.QtWidgets import QFileDialog
 
-        from cosmica.core.image_io import ImageData, load_image
+        from cosmica.core.image_io import load_image
         from cosmica.core.narrowband import continuum_subtraction
 
         bb_path, _ = QFileDialog.getOpenFileName(
@@ -2060,8 +2183,7 @@ class MainWindow(QMainWindow):
             return result_ch
 
         def _on_cont_done(result_ch):
-            import numpy as _np
-            from cosmica.core.image_io import ImageData
+
             self._update_current_image(result_ch, "Continuum subtraction applied")
 
         self._start_worker(
@@ -2105,6 +2227,34 @@ class MainWindow(QMainWindow):
         self._canvas.clear_sample_points()
         self._tools_panel.set_bg_sample_count(0)
 
+    @pyqtSlot(int, int, int)
+    def _on_add_bg_grid(self, rows: int, cols: int, box_size: int):
+        """Auto-place background sample points in an evenly-spaced grid."""
+        if self._current_image is None:
+            return
+        data = self._current_image.data
+        h = data.shape[-2]
+        w = data.shape[-1]
+        margin = box_size // 2 + 2
+
+        import numpy as _np
+        ys = _np.linspace(margin, h - margin - 1, rows).astype(int)
+        xs = _np.linspace(margin, w - margin - 1, cols).astype(int)
+        added = 0
+        for y in ys:
+            for x in xs:
+                pt = (float(x), float(y))
+                if pt not in self._bg_samples:
+                    self._bg_samples.append(pt)
+                    added += 1
+
+        self._canvas.set_sample_points(self._bg_samples)
+        self._tools_panel.set_bg_sample_count(len(self._bg_samples))
+        self._log_panel.log(
+            f"Added {added} grid sample{'s' if added != 1 else ''} "
+            f"({rows}×{cols}, {len(self._bg_samples)} total)", "info"
+        )
+
     # ── WCS overlay ──────────────────────────────────────────────────────────
 
     @pyqtSlot(bool)
@@ -2125,6 +2275,7 @@ class MainWindow(QMainWindow):
             return
 
         import numpy as _np
+
         from cosmica.core.color_calibration import _make_pixel_to_sky
 
         h = self._current_image.data.shape[-2] if self._current_image.data.ndim == 3 else self._current_image.data.shape[0]
@@ -2159,8 +2310,9 @@ class MainWindow(QMainWindow):
         """Project DSO catalog entries to image pixel coordinates and push to canvas."""
         if not wcs or self._current_image is None:
             return
-        from cosmica.core.dso_catalog import query_dso_in_field
         import numpy as _np
+
+        from cosmica.core.dso_catalog import query_dso_in_field
 
         h = self._current_image.data.shape[-2] if self._current_image.data.ndim == 3 else self._current_image.data.shape[0]
         w = self._current_image.data.shape[-1] if self._current_image.data.ndim == 3 else self._current_image.data.shape[1]
@@ -2194,6 +2346,7 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def _on_open_python_console(self):
         from PyQt6.QtWidgets import QDockWidget
+
         from cosmica.ui.widgets.python_console import PythonConsoleWidget
 
         if self._python_console_dock is None:
@@ -2256,8 +2409,58 @@ class MainWindow(QMainWindow):
     def _on_open_subframe_selector(self):
         from cosmica.ui.dialogs.subframe_dialog import SubframeDialog
 
-        dialog = SubframeDialog(self)
+        # Pre-populate with aligned frames from the project, or light frame paths.
+        preloaded: list[str] = []
+        if self._subframe_selected_paths:
+            preloaded = list(self._subframe_selected_paths)
+        elif self._aligned_paths:
+            preloaded = [str(p) for p in self._aligned_paths]
+        elif self._project:
+            aligned = [e.path for e in self._project.frames_by_type(FrameType.ALIGNED) if e.path.exists()]
+            if aligned:
+                preloaded = [str(p) for p in aligned]
+            else:
+                lights = [e.path for e in self._project.frames_by_type(FrameType.LIGHT) if e.path.exists()]
+                preloaded = [str(p) for p in lights]
+
+        dialog = SubframeDialog(self, preloaded_paths=preloaded or None)
+        dialog.accepted_frames.connect(self._on_subframe_selection_done)
+        dialog.scores_ready.connect(self._on_subframe_scores_ready)
         dialog.exec()
+
+    @pyqtSlot(list)
+    def _on_subframe_selection_done(self, accepted_paths: list[str]):
+        """Receive accepted frame paths from SubframeDialog and feed them into stacking."""
+        if not accepted_paths:
+            return
+        self._log_panel.log(
+            f"Subframe selector: {len(accepted_paths)} frames accepted — ready to stack",
+            "success",
+        )
+        # Store as the active aligned-frame list so Run Stack picks them up.
+        self._subframe_selected_paths = accepted_paths
+        # Update the tools panel stacking tab to reflect the new count.
+        self._tools_panel.set_subframe_count(len(accepted_paths))
+
+    @pyqtSlot(list)
+    def _on_subframe_scores_ready(self, scores) -> None:
+        """Cache scored frame metrics in the project JSON."""
+        if not self._project:
+            return
+        scores_dict = {
+            s.file_path: {
+                "fwhm": s.fwhm,
+                "eccentricity": s.eccentricity,
+                "snr": s.snr,
+                "background": s.background,
+                "n_stars": s.n_stars,
+                "quality_score": s.quality_score,
+            }
+            for s in scores
+        }
+        self._project.cache_frame_scores(scores_dict)
+        self._save_project()
+        self._log_panel.log(f"Cached scores for {len(scores_dict)} frames in project", "info")
 
     @pyqtSlot()
     def _on_run_background(self):
@@ -2290,6 +2493,32 @@ class MainWindow(QMainWindow):
             )
         self._macro_recorder.record_step("background_extraction")
 
+    def _on_run_bg_neutralization(self):
+        if self._current_image is None:
+            return
+        params = self._tools_panel.get_background_neutralization_params()
+        self._log_panel.log(
+            f"Running background neutralization (percentile={params.percentile:.1f}%)…", "info"
+        )
+
+        def _work(data, progress=None):
+            from cosmica.core.background_neutralization import _noop_progress
+            return background_neutralization(data, params, progress=progress or _noop_progress)
+
+        self._start_worker(_work, self._current_image.data, on_done=self._on_bg_neutralization_done)
+
+    @pyqtSlot(object)
+    def _on_bg_neutralization_done(self, result):
+        self._update_current_image(result, "Background neutralization complete")
+        if self._project:
+            params = self._tools_panel.get_background_neutralization_params()
+            self._project.add_history(
+                "Background Neutralization",
+                {"percentile": params.percentile, "amount": params.amount},
+            )
+        self._macro_recorder.record_step("background_neutralization")
+
+
     # ---------- Phase A processing operations ----------
 
     @pyqtSlot()
@@ -2298,21 +2527,23 @@ class MainWindow(QMainWindow):
             return
         params = self._tools_panel.get_cosmetic_params()
         self._log_panel.log("Running cosmetic correction...", "info")
-        result = cosmetic_correction(self._current_image.data, params)
-        self._update_current_image(
-            result.data,
-            f"Cosmetic correction: {result.total_corrected} pixels fixed "
-            f"({result.hot_pixels} hot, {result.cold_pixels} cold, {result.dead_pixels} dead)",
-        )
-        if self._project:
-            self._project.add_history(
-                "Cosmetic Correction",
-                {
-                    "hot": result.hot_pixels,
-                    "cold": result.cold_pixels,
-                    "dead": result.dead_pixels,
-                },
+
+        def _work(data, progress=None):
+            return cosmetic_correction(data, params)
+
+        def _done(result):
+            self._update_current_image(
+                result.data,
+                f"Cosmetic correction: {result.total_corrected} pixels fixed "
+                f"({result.hot_pixels} hot, {result.cold_pixels} cold, {result.dead_pixels} dead)",
             )
+            if self._project:
+                self._project.add_history(
+                    "Cosmetic Correction",
+                    {"hot": result.hot_pixels, "cold": result.cold_pixels, "dead": result.dead_pixels},
+                )
+
+        self._start_worker(_work, self._current_image.data, on_done=_done)
 
     @pyqtSlot()
     def _on_run_banding(self):
@@ -2320,16 +2551,19 @@ class MainWindow(QMainWindow):
             return
         params = self._tools_panel.get_banding_params()
         self._log_panel.log("Running banding reduction...", "info")
-        result = banding_reduction(self._current_image.data, params)
-        self._update_current_image(result, "Banding reduction complete")
-        if self._project:
-            self._project.add_history(
-                "Banding Reduction",
-                {
-                    "horizontal": params.horizontal,
-                    "vertical": params.vertical,
-                },
-            )
+        _p = params
+
+        def _work(data, progress=None):
+            return banding_reduction(data, _p)
+
+        def _done(result):
+            self._update_current_image(result, "Banding reduction complete")
+            if self._project:
+                self._project.add_history(
+                    "Banding Reduction", {"horizontal": _p.horizontal, "vertical": _p.vertical}
+                )
+
+        self._start_worker(_work, self._current_image.data, on_done=_done)
 
     @pyqtSlot()
     def _on_run_histogram_transform(self):
@@ -2485,6 +2719,27 @@ class MainWindow(QMainWindow):
         self._start_worker(_ghs_work, data, on_done=_ghs_done)
 
     @pyqtSlot()
+    def _on_run_arcsinh_stretch(self):
+        if self._current_image is None:
+            return
+        params = self._tools_panel.get_arcsinh_params()
+        self._log_panel.log(f"Applying Arcsinh Stretch (β={params.stretch_factor})...", "info")
+        _p = params
+
+        def _work(d, progress=None):
+            return arcsinh_stretch(d, _p)
+
+        def _done(result):
+            self._update_current_image(result, "Arcsinh Stretch applied")
+            if self._project:
+                self._project.add_history(
+                    "Arcsinh Stretch",
+                    {"stretch_factor": _p.stretch_factor, "black_point": _p.black_point},
+                )
+
+        self._start_worker(_work, self._current_image.data, on_done=_done)
+
+    @pyqtSlot()
     def _on_run_color_calibration(self):
         if self._current_image is None:
             return
@@ -2530,8 +2785,17 @@ class MainWindow(QMainWindow):
         def _pcc_work(data, progress=None):
             import tempfile
             from pathlib import Path as _Path
-            from cosmica.core.color_calibration import photometric_color_calibrate, ColorCalibrationParams
-            from cosmica.core.star_catalog import plate_solve_auto, plate_solve_astap, plate_solve_astrometry_net, query_gaia_dr3
+
+            from cosmica.core.color_calibration import (
+                ColorCalibrationParams,
+                photometric_color_calibrate,
+            )
+            from cosmica.core.star_catalog import (
+                plate_solve_astap,
+                plate_solve_astrometry_net,
+                plate_solve_auto,
+                query_gaia_dr3,
+            )
 
             # Determine the FITS path to give to the plate solver.
             # If the image has no saved file, write a temp FITS.
@@ -2539,7 +2803,7 @@ class MainWindow(QMainWindow):
             tmp_fits = None
             if solve_path is None or not _Path(str(solve_path)).exists():
                 try:
-                    from cosmica.core.image_io import save_image, ImageData, FrameType
+                    from cosmica.core.image_io import ImageData, save_image
                     tmp_file = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
                     tmp_fits = _Path(tmp_file.name)
                     tmp_file.close()
@@ -2686,16 +2950,19 @@ class MainWindow(QMainWindow):
             return
         params = self._tools_panel.get_star_reduction_params()
         self._log_panel.log("Running star reduction...", "info")
-        result = reduce_stars(self._current_image.data, params=params)
-        self._update_current_image(result, "Star reduction complete")
-        if self._project:
-            self._project.add_history(
-                "Star Reduction",
-                {
-                    "amount": params.amount,
-                    "iterations": params.iterations,
-                },
-            )
+        _p = params
+
+        def _work(data, progress=None):
+            return reduce_stars(data, params=_p)
+
+        def _done(result):
+            self._update_current_image(result, "Star reduction complete")
+            if self._project:
+                self._project.add_history(
+                    "Star Reduction", {"amount": _p.amount, "iterations": _p.iterations}
+                )
+
+        self._start_worker(_work, self._current_image.data, on_done=_done)
 
     @pyqtSlot()
     def _on_run_split_channels(self):
@@ -2730,23 +2997,22 @@ class MainWindow(QMainWindow):
             return
         params = self._tools_panel.get_wavelet_params()
         self._log_panel.log(f"Running wavelet sharpening ({params.n_scales} scales)...", "info")
-        result = wavelet_sharpen(self._current_image.data, params)
-        self._update_current_image(result, "Wavelet sharpening complete")
-        if self._project:
-            self._project.add_history(
-                "Wavelet Sharpen",
-                {
-                    "n_scales": params.n_scales,
-                    "scale_weights": params.scale_weights,
-                },
+        _p = params
+
+        def _work(data, progress=None):
+            return wavelet_sharpen(data, _p)
+
+        def _done(result):
+            self._update_current_image(result, "Wavelet sharpening complete")
+            if self._project:
+                self._project.add_history(
+                    "Wavelet Sharpen", {"n_scales": _p.n_scales, "scale_weights": _p.scale_weights}
+                )
+            self._macro_recorder.record_step(
+                "wavelet_sharpen", {"n_scales": _p.n_scales, "scale_weights": _p.scale_weights}
             )
-        self._macro_recorder.record_step(
-            "wavelet_sharpen",
-            {
-                "n_scales": params.n_scales,
-                "scale_weights": params.scale_weights,
-            },
-        )
+
+        self._start_worker(_work, self._current_image.data, on_done=_done)
 
     @pyqtSlot()
     def _on_run_mlt(self):
@@ -2757,18 +3023,26 @@ class MainWindow(QMainWindow):
         self._log_panel.log(
             f"Running MLT ({params.n_scales} scales, {n_thresh} denoise bands)…", "info"
         )
-        result = wavelet_sharpen(self._current_image.data, params)
-        self._update_current_image(result, "MLT complete")
-        if self._project:
-            self._project.add_history("MLT", {"n_scales": params.n_scales})
+        _p = params
+
+        def _work(data, progress=None):
+            return wavelet_sharpen(data, _p)
+
+        def _done(result):
+            self._update_current_image(result, "MLT complete")
+            if self._project:
+                self._project.add_history("MLT", {"n_scales": _p.n_scales})
+
+        self._start_worker(_work, self._current_image.data, on_done=_done)
 
     @pyqtSlot()
     def _on_run_lrgb_combine(self):
         if self._current_image is None:
             return
         from PyQt6.QtWidgets import QFileDialog
-        from cosmica.core.lrgb import lrgb_combine
+
         from cosmica.core.image_io import load_image
+        from cosmica.core.lrgb import lrgb_combine
 
         # Validate current image is mono (luminance)
         data = self._current_image.data
@@ -2833,7 +3107,8 @@ class MainWindow(QMainWindow):
     def _on_run_debayer(self):
         if self._current_image is None:
             return
-        from cosmica.core.debayer import debayer as _debayer, detect_bayer_pattern
+        from cosmica.core.debayer import debayer as _debayer
+        from cosmica.core.debayer import detect_bayer_pattern
 
         data = self._current_image.data
         if data.ndim == 3:
@@ -2877,24 +3152,23 @@ class MainWindow(QMainWindow):
             return
         params = self._tools_panel.get_local_contrast_params()
         self._log_panel.log("Running local contrast enhancement...", "info")
-        result = local_contrast_enhance(self._current_image.data, params)
-        self._update_current_image(result, "Local contrast enhancement complete")
-        if self._project:
-            self._project.add_history(
-                "Local Contrast",
-                {
-                    "clip_limit": params.clip_limit,
-                    "amount": params.amount,
-                },
+        _p = params
+
+        def _work(data, progress=None):
+            return local_contrast_enhance(data, _p)
+
+        def _done(result):
+            self._update_current_image(result, "Local contrast enhancement complete")
+            if self._project:
+                self._project.add_history(
+                    "Local Contrast", {"clip_limit": _p.clip_limit, "amount": _p.amount}
+                )
+            self._macro_recorder.record_step(
+                "local_contrast",
+                {"clip_limit": _p.clip_limit, "tile_size": _p.tile_size, "amount": _p.amount},
             )
-        self._macro_recorder.record_step(
-            "local_contrast",
-            {
-                "clip_limit": params.clip_limit,
-                "tile_size": params.tile_size,
-                "amount": params.amount,
-            },
-        )
+
+        self._start_worker(_work, self._current_image.data, on_done=_done)
 
     @pyqtSlot()
     def _on_run_morphology(self):
@@ -3043,14 +3317,21 @@ class MainWindow(QMainWindow):
         if self._current_macro is None or len(self._current_macro.steps) == 0:
             self._log_panel.log("No macro recorded or loaded", "warning")
             return
+        macro = self._current_macro
         self._log_panel.log(
-            f"Playing macro: {self._current_macro.name} ({len(self._current_macro.steps)} steps)...",
+            f"Playing macro: {macro.name} ({len(macro.steps)} steps)...",
             "info",
         )
-        result = play_macro(self._current_image.data, self._current_macro)
-        self._update_current_image(result, "Macro playback complete")
-        if self._project:
-            self._project.add_history("Play Macro", {"name": self._current_macro.name})
+
+        def _play_work(data, progress=None):
+            return play_macro(data, macro, progress=progress)
+
+        def _play_done(result):
+            self._update_current_image(result, "Macro playback complete")
+            if self._project:
+                self._project.add_history("Play Macro", {"name": macro.name})
+
+        self._start_worker(_play_work, self._current_image.data, on_done=_play_done)
 
     @pyqtSlot()
     def _on_save_macro(self):
@@ -3132,7 +3413,6 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
-        import numpy as _np
         img = load_image(path)
         self._blink_images[slot] = self._make_display_rgb(img.data)
         name = Path(path).name
@@ -3154,7 +3434,8 @@ class MainWindow(QMainWindow):
     def _make_display_rgb(self, data) -> "np.ndarray":
         """Convert image data to display-ready uint8 RGB (H,W,3) array."""
         import numpy as _np
-        from cosmica.core.stretch import auto_stretch, StretchParams
+
+        from cosmica.core.stretch import StretchParams, auto_stretch
         stretched = auto_stretch(data, StretchParams())
         if stretched.ndim == 2:
             rgb = _np.stack([stretched] * 3, axis=-1)

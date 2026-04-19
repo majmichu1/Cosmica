@@ -110,7 +110,7 @@ def play_macro(
     progress(0.0, f"Playing macro: {macro.name} ({n_steps} steps)")
     log.info("Playing macro: %s (%d steps)", macro.name, n_steps)
 
-    result = apply_pipeline_to_image(data, macro)
+    result = apply_pipeline_to_image(data, macro, progress=progress)
 
     progress(1.0, "Macro playback complete")
     return result

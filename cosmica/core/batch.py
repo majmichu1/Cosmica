@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from cosmica.core.image_io import ImageData, load_image, save_fits
+from cosmica.core.image_io import ImageData, load_image, save_image
 
 log = logging.getLogger(__name__)
 
@@ -92,30 +92,85 @@ def get_registered_tools() -> dict[str, Callable]:
 
 def _register_default_tools():
     """Register all built-in processing tools."""
-    from cosmica.core.stretch import auto_stretch, generalized_hyperbolic_stretch
-    from cosmica.core.background import extract_background
-    from cosmica.core.cosmetic import cosmetic_correction
-    from cosmica.core.banding import banding_reduction
-    from cosmica.core.histogram_transform import histogram_transform
-    from cosmica.core.color_tools import scnr, color_adjust
-    from cosmica.core.denoise import denoise
-    from cosmica.core.local_contrast import local_contrast_enhance
+    import dataclasses as _dc
 
-    register_tool("auto_stretch", lambda data, **kw: auto_stretch(data))
-    register_tool("ghs", lambda data, **kw: generalized_hyperbolic_stretch(data))
+    def _p(cls, kw):
+        """Build a Params dataclass from a flat dict, ignoring unknown keys."""
+        known = {f.name for f in _dc.fields(cls)}
+        filtered = {k: v for k, v in kw.items() if k in known}
+        return cls(**filtered) if filtered else None
+
+    from cosmica.core.background import extract_background
+    from cosmica.core.banding import BandingParams, banding_reduction
+    from cosmica.core.color_tools import ColorAdjustParams, SCNRParams, color_adjust, scnr
+    from cosmica.core.cosmetic import cosmetic_correction
+    from cosmica.core.denoise import DenoiseParams, denoise
+    from cosmica.core.filters import UnsharpMaskParams, unsharp_mask
+    from cosmica.core.histogram_transform import HistogramTransformParams, histogram_transform
+    from cosmica.core.local_contrast import LocalContrastParams, local_contrast_enhance
+    from cosmica.core.morphology import (
+        MorphologyParams,
+        MorphOp,
+        StructuringElement,
+        morphology_transform,
+    )
+    from cosmica.core.stretch import (
+        GHSParams,
+        StretchParams,
+        auto_stretch,
+        generalized_hyperbolic_stretch,
+    )
+    from cosmica.core.transforms import invert
+    from cosmica.core.wavelets import WaveletParams, wavelet_sharpen
+
+    register_tool("auto_stretch", lambda data, **kw: auto_stretch(data, _p(StretchParams, kw)))
+    register_tool("ghs", lambda data, **kw: generalized_hyperbolic_stretch(
+        data, _p(GHSParams, kw) if kw else None
+    ))
     register_tool("background_extraction", lambda data, **kw: extract_background(data)[0])
     register_tool("cosmetic_correction", lambda data, **kw: cosmetic_correction(data).data)
-    register_tool("banding_reduction", banding_reduction)
-    register_tool("histogram_transform", histogram_transform)
-    register_tool("scnr", scnr)
-    register_tool("color_adjust", color_adjust)
-    register_tool("denoise", denoise)
-    register_tool("local_contrast", local_contrast_enhance)
+    register_tool(
+        "banding_reduction", lambda data, **kw: banding_reduction(data, _p(BandingParams, kw))
+    )
+    register_tool(
+        "histogram_transform",
+        lambda data, **kw: histogram_transform(data, _p(HistogramTransformParams, kw)),
+    )
+    register_tool("scnr", lambda data, **kw: scnr(data, _p(SCNRParams, kw)))
+    register_tool(
+        "color_adjust", lambda data, **kw: color_adjust(data, _p(ColorAdjustParams, kw))
+    )
+    register_tool("denoise", lambda data, **kw: denoise(data, _p(DenoiseParams, kw)))
+    register_tool(
+        "local_contrast",
+        lambda data, **kw: local_contrast_enhance(data, _p(LocalContrastParams, kw)),
+    )
+    register_tool(
+        "wavelet_sharpen", lambda data, **kw: wavelet_sharpen(data, _p(WaveletParams, kw))
+    )
+    register_tool(
+        "unsharp_mask", lambda data, **kw: unsharp_mask(data, _p(UnsharpMaskParams, kw))
+    )
+    register_tool("invert", lambda data, **kw: invert(data))
+
+    def _morphology_tool(
+        data, operation="ERODE", kernel_size=3, iterations=1, element="DISK", **kw
+    ):
+        params = MorphologyParams(
+            operation=MorphOp[operation] if isinstance(operation, str) else operation,
+            element=StructuringElement[element] if isinstance(element, str) else element,
+            kernel_size=kernel_size,
+            iterations=iterations,
+        )
+        return morphology_transform(data, params)
+
+    register_tool("morphology", _morphology_tool)
 
 
 def apply_pipeline_to_image(
     data: np.ndarray,
     pipeline: Pipeline,
+    progress: ProgressCallback | None = None,
 ) -> np.ndarray:
     """Apply a pipeline to a single image.
 
@@ -125,6 +180,8 @@ def apply_pipeline_to_image(
         Image data, float32 in [0, 1].
     pipeline : Pipeline
         Processing pipeline to apply.
+    progress : callable, optional
+        Progress callback ``(fraction, message)``.
 
     Returns
     -------
@@ -134,10 +191,14 @@ def apply_pipeline_to_image(
     if not _TOOL_REGISTRY:
         _register_default_tools()
 
+    if progress is None:
+        progress = _noop_progress
+
+    enabled = [s for s in pipeline.steps if s.enabled]
+    n = len(enabled)
     result = data.copy()
-    for step in pipeline.steps:
-        if not step.enabled:
-            continue
+    for i, step in enumerate(enabled):
+        progress(i / max(n, 1), f"Step {i + 1}/{n}: {step.tool_name}")
         func = _TOOL_REGISTRY.get(step.tool_name)
         if func is None:
             log.warning("Unknown tool: %s, skipping", step.tool_name)
@@ -145,6 +206,7 @@ def apply_pipeline_to_image(
         log.info("Applying: %s", step.tool_name)
         result = func(result, **step.params)
 
+    progress(1.0, "Pipeline complete")
     return result
 
 
@@ -203,7 +265,7 @@ def batch_process(
 
             out_name = f"{path.stem}_processed.{output_format}"
             out_path = output_dir / out_name
-            save_fits(ImageData(data=processed, header=img.header), out_path)
+            save_image(ImageData(data=processed, header=img.header), out_path)
 
             output_paths.append(out_path)
             n_processed += 1

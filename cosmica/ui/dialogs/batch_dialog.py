@@ -119,7 +119,7 @@ class BatchDialog(QDialog):
         fmt_row = QHBoxLayout()
         fmt_row.addWidget(QLabel("Format:"))
         self._format_combo = QComboBox()
-        self._format_combo.addItems(["fits", "xisf"])
+        self._format_combo.addItems(["fits", "xisf", "tif", "png"])
         fmt_row.addWidget(self._format_combo)
         layout.addLayout(fmt_row)
 

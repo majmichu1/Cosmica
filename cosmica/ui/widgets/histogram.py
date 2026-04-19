@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import QWidget
 
 
 class HistogramWidget(QWidget):
-    """Renders R/G/B/Luminance histograms with log scale."""
+    """Renders R/G/B/Luminance histograms with log scale and clip indicators."""
 
     CHANNEL_COLORS = {
         "red": QColor(220, 50, 50, 180),
@@ -25,6 +25,9 @@ class HistogramWidget(QWidget):
         self.setMaximumHeight(160)
         self._data: dict | None = None
         self._log_scale = True
+        # Clip point markers: {"shadow": 0.0, "highlight": 1.0} — normalized [0,1]
+        self._clip_shadow: float | None = None
+        self._clip_highlight: float | None = None
 
     def set_histogram_data(self, data: dict):
         """Set histogram data from core.stretch.compute_histogram()."""
@@ -37,6 +40,12 @@ class HistogramWidget(QWidget):
 
     def set_log_scale(self, enabled: bool):
         self._log_scale = enabled
+        self.update()
+
+    def set_clip_points(self, shadow: float | None, highlight: float | None):
+        """Set shadow/highlight clip indicator positions in normalized [0, 1] space."""
+        self._clip_shadow = shadow
+        self._clip_highlight = highlight
         self.update()
 
     def paintEvent(self, event):
@@ -91,6 +100,20 @@ class HistogramWidget(QWidget):
 
             painter.setPen(QPen(color, 1.0))
             painter.drawPath(path)
+
+        # Draw clip indicator lines
+        if self._clip_shadow is not None and 0.0 < self._clip_shadow < 1.0:
+            sx = margin + self._clip_shadow * w
+            pen = QPen(QColor(80, 160, 255, 220), 1.5)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            painter.drawLine(int(sx), margin, int(sx), margin + h)
+        if self._clip_highlight is not None and 0.0 < self._clip_highlight < 1.0:
+            hx = margin + self._clip_highlight * w
+            pen = QPen(QColor(255, 200, 80, 220), 1.5)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            painter.drawLine(int(hx), margin, int(hx), margin + h)
 
         # Draw border
         painter.setPen(QPen(QColor(60, 60, 60)))

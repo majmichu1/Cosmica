@@ -208,6 +208,153 @@ def find_transform(
     return transform
 
 
+def find_transform_triangle(
+    ref_stars: "StarField | np.ndarray",
+    target_stars: "StarField | np.ndarray",
+    n_stars: int = 60,
+    n_triangles: int = 300,
+    feature_tol: float = 0.025,
+    min_vote_matches: int = 4,
+) -> np.ndarray | None:
+    """Find affine transform using triangle-similarity matching.
+
+    More robust than nearest-neighbor matching for large rotations, scale
+    changes, and low star counts (as few as 3–6 stars).  Falls back to
+    ``find_transform`` when too few candidate pairs are found.
+
+    Algorithm (scale/rotation-invariant, identical to astroalign's approach):
+    1. Select N brightest stars from each field.
+    2. Enumerate triangles (3-star subsets); compute normalised side-ratio
+       feature vector (s1/s3, s2/s3) where s1 ≤ s2 ≤ s3 — invariant to
+       rotation, scale, translation.
+    3. Match triangles by feature distance using a KD-tree.
+    4. Each matched triangle pair votes for a correspondence between its
+       constituent stars.
+    5. The strongest vote cluster gives the inlier set for RANSAC.
+
+    Parameters
+    ----------
+    ref_stars, target_stars
+        Star positions — ``StarField`` or ``(N, 2)`` float32 xy-array.
+    n_stars : int
+        Maximum number of brightest stars to use per image.
+    n_triangles : int
+        Maximum triangles to sample per image.
+    feature_tol : float
+        Feature-space distance threshold for triangle matching.
+    min_vote_matches : int
+        Minimum star-pair votes required before calling RANSAC.
+
+    Returns
+    -------
+    ndarray or None
+        2×3 affine transform matrix (target→ref), or *None* on failure.
+    """
+    from itertools import combinations
+    from scipy.spatial import KDTree
+
+    ref_pts = ref_stars.positions if hasattr(ref_stars, "positions") else np.asarray(ref_stars)
+    tgt_pts = (
+        target_stars.positions
+        if hasattr(target_stars, "positions")
+        else np.asarray(target_stars)
+    )
+
+    if len(ref_pts) < 3 or len(tgt_pts) < 3:
+        return None
+
+    ref_pts = ref_pts[:n_stars].astype(np.float32)
+    tgt_pts = tgt_pts[:n_stars].astype(np.float32)
+
+    def _triangle_features(pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Return (features (M,2), indices (M,3)) for all sampled triangles."""
+        n = len(pts)
+        all_combos = list(combinations(range(n), 3))
+        if len(all_combos) > n_triangles:
+            rng = np.random.default_rng(42)
+            chosen = rng.choice(len(all_combos), n_triangles, replace=False)
+            all_combos = [all_combos[i] for i in chosen]
+
+        feats = []
+        idxs = []
+        for i, j, k in all_combos:
+            a, b, c = pts[i], pts[j], pts[k]
+            s1 = float(np.linalg.norm(b - a))
+            s2 = float(np.linalg.norm(c - b))
+            s3 = float(np.linalg.norm(c - a))
+            sides = sorted([s1, s2, s3])
+            if sides[2] < 1e-6:
+                continue
+            feats.append([sides[0] / sides[2], sides[1] / sides[2]])
+            idxs.append((i, j, k))
+        return np.array(feats, dtype=np.float32), np.array(idxs, dtype=np.int32)
+
+    ref_feats, ref_idxs = _triangle_features(ref_pts)
+    tgt_feats, tgt_idxs = _triangle_features(tgt_pts)
+
+    if len(ref_feats) == 0 or len(tgt_feats) == 0:
+        return find_transform(ref_stars, target_stars)
+
+    # Match triangles via KD-tree on reference side
+    tree = KDTree(ref_feats)
+    dists, nn_idxs = tree.query(tgt_feats, k=1, workers=-1)
+
+    # Accumulate star-pair votes from matched triangles
+    vote: dict[tuple[int, int], int] = {}
+    for tgt_t, (dist, ref_t) in enumerate(zip(dists, nn_idxs)):
+        if dist > feature_tol:
+            continue
+        for tp, rp in zip(tgt_idxs[tgt_t], ref_idxs[ref_t]):
+            pair = (int(tp), int(rp))
+            vote[pair] = vote.get(pair, 0) + 1
+
+    if not vote:
+        log.debug("Triangle matching: no votes, falling back to NN matching")
+        return find_transform(ref_stars, target_stars)
+
+    # Sort by vote count; take top candidates
+    sorted_pairs = sorted(vote.items(), key=lambda kv: kv[1], reverse=True)
+
+    # Build inlier correspondence: take top-voted unique star pairs
+    used_tgt: set[int] = set()
+    used_ref: set[int] = set()
+    matched_tgt = []
+    matched_ref = []
+    for (ti, ri), v in sorted_pairs:
+        if v < 2:
+            break
+        if ti in used_tgt or ri in used_ref:
+            continue
+        matched_tgt.append(tgt_pts[ti])
+        matched_ref.append(ref_pts[ri])
+        used_tgt.add(ti)
+        used_ref.add(ri)
+
+    if len(matched_tgt) < min_vote_matches:
+        log.debug(
+            "Triangle matching: only %d vote pairs (need %d), falling back",
+            len(matched_tgt), min_vote_matches,
+        )
+        return find_transform(ref_stars, target_stars)
+
+    ref_arr = np.array(matched_ref, dtype=np.float32)
+    tgt_arr = np.array(matched_tgt, dtype=np.float32)
+
+    transform, inliers = cv2.estimateAffinePartial2D(
+        tgt_arr, ref_arr, method=cv2.RANSAC, ransacReprojThreshold=3.0
+    )
+    if transform is None:
+        log.debug("Triangle matching: RANSAC failed, falling back to NN matching")
+        return find_transform(ref_stars, target_stars)
+
+    n_inliers = int(inliers.sum()) if inliers is not None else len(matched_tgt)
+    log.info(
+        "Triangle matching: %d vote pairs → %d RANSAC inliers",
+        len(matched_tgt), n_inliers,
+    )
+    return transform
+
+
 def align_image(
     image: np.ndarray,
     transform: np.ndarray,

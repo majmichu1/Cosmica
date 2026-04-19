@@ -36,6 +36,7 @@ from cosmica.ai.inference.denoise import AIDenoiseParams
 from cosmica.ai.inference.sharpen import AISharpenParams
 from cosmica.core.abe import ABEParams
 from cosmica.core.background import BackgroundParams
+from cosmica.core.background_neutralization import BackgroundNeutralizationParams
 from cosmica.core.banding import BandingParams
 from cosmica.core.chromatic_aberration import CAParams
 from cosmica.core.color_calibration import ColorCalibrationParams
@@ -55,7 +56,7 @@ from cosmica.core.stacking import (
     StackingParams,
 )
 from cosmica.core.star_reduction import StarReductionParams
-from cosmica.core.stretch import GHSParams, StretchParams
+from cosmica.core.stretch import ArcsinhStretchParams, GHSParams, StretchParams
 from cosmica.core.transforms import (
     BinMode,
     BinParams,
@@ -171,7 +172,9 @@ class ToolsPanel(QWidget):
     run_continuum_subtraction = pyqtSignal()
     toggle_sample_mode = pyqtSignal(bool)
     clear_bg_samples = pyqtSignal()
+    add_bg_grid = pyqtSignal(int, int, int)  # rows, cols, box_size
     toggle_wcs_overlay = pyqtSignal(bool)
+    run_background_neutralization = pyqtSignal()
     open_python_console = pyqtSignal()
     run_mlt = pyqtSignal()
     run_lrgb_combine = pyqtSignal()
@@ -211,6 +214,11 @@ class ToolsPanel(QWidget):
 
     # Debayer
     run_debayer = pyqtSignal()
+
+    # Phase E signals
+    run_arcsinh_stretch = pyqtSignal()
+    # Emitted when HT black/white point change so histogram can show clip markers
+    clip_points_changed = pyqtSignal(float, float)  # shadow, highlight
 
     # Smart Processor signals
     open_smart_processor = pyqtSignal()
@@ -262,6 +270,12 @@ class ToolsPanel(QWidget):
         cb = self._preview_checks.get(tool_name)
         if cb is not None and cb.isChecked():
             self.preview_requested.emit(tool_name)
+
+    def _emit_clip_points(self):
+        self.clip_points_changed.emit(
+            self._ht_black_spin.value(),
+            self._ht_white_spin.value(),
+        )
 
     # ================================================================
     # TAB 1: Pre-Process
@@ -348,21 +362,13 @@ class ToolsPanel(QWidget):
         cos_layout.addWidget(self._dead_pixel_check)
 
         self._add_preview_checkbox(cos_layout, "cosmetic")
+        self._hot_sigma_spin.valueChanged.connect(lambda: self._emit_if_preview_enabled("cosmetic"))
+        self._cold_sigma_spin.valueChanged.connect(lambda: self._emit_if_preview_enabled("cosmetic"))
+        self._dead_pixel_check.toggled.connect(lambda: self._emit_if_preview_enabled("cosmetic"))
         self._btn_cosmetic = QPushButton("Apply Cosmetic Correction")
         self._btn_cosmetic.clicked.connect(self.run_cosmetic.emit)
         cos_layout.addWidget(self._btn_cosmetic)
         layout.addWidget(cos_group)
-
-        # --- Subframe Selector ---
-        sub_group = QGroupBox("Subframe Selector")
-        sub_layout = QVBoxLayout(sub_group)
-        sub_layout.addWidget(
-            _info_label("Score and reject light frames by FWHM, eccentricity, SNR, and star count.")
-        )
-        btn_subframe = QPushButton("Open Subframe Selector...")
-        btn_subframe.clicked.connect(self.open_subframe_selector.emit)
-        sub_layout.addWidget(btn_subframe)
-        layout.addWidget(sub_group)
 
         # --- Debayer (OSC / One-Shot Color) ---
         debayer_group = QGroupBox("Debayer (OSC / Color Camera)")
@@ -386,10 +392,13 @@ class ToolsPanel(QWidget):
         debayer_layout.addLayout(_h_row("Pattern:", self._debayer_pattern_combo))
 
         self._debayer_method_combo = QComboBox()
-        self._debayer_method_combo.addItems(["VNG (best quality)", "Edge-Aware (EA)", "Bilinear (fastest)"])
+        self._debayer_method_combo.addItems(
+            ["VNG (best quality)", "Edge-Aware (EA)", "Bilinear (fastest)", "Superpixel (2× bin)"]
+        )
         self._debayer_method_combo.setToolTip(
             "VNG: Variable Number of Gradients — best for astrophotography (default)\n"
             "EA: Edge-Aware — sharpest edges, good for stars\n"
+            "Superpixel: 2×2 bin — half resolution, no interpolation artefacts\n"
             "Bilinear: fastest but softest"
         )
         debayer_layout.addLayout(_h_row("Method:", self._debayer_method_combo))
@@ -539,6 +548,20 @@ class ToolsPanel(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
+        # --- Subframe Selector ---
+        sub_group = QGroupBox("Subframe Selector")
+        sub_layout = QVBoxLayout(sub_group)
+        sub_layout.addWidget(
+            _info_label("Score and reject light frames by FWHM, eccentricity, SNR, and star count.")
+        )
+        btn_subframe = QPushButton("Open Subframe Selector...")
+        btn_subframe.clicked.connect(self.open_subframe_selector.emit)
+        sub_layout.addWidget(btn_subframe)
+        self._subframe_count_label = QLabel("No subframe selection active")
+        self._subframe_count_label.setStyleSheet("color: #aaa; font-size: 10px;")
+        sub_layout.addWidget(self._subframe_count_label)
+        layout.addWidget(sub_group)
+
         # --- Section 1: Registration / Alignment ---
         reg_group = QGroupBox("Registration (Alignment)")
         reg_layout = QVBoxLayout(reg_group)
@@ -547,10 +570,15 @@ class ToolsPanel(QWidget):
         )
 
         self._reg_mode_combo = QComboBox()
-        self._reg_mode_combo.addItems(["Star (1-Pass)", "Star (2-Pass)", "FFT Translation", "Comet"])
+        self._reg_mode_combo.addItems(
+            ["Star (1-Pass)", "Star (2-Pass)", "Triangle Match", "FFT Translation", "Comet"]
+        )
         self._reg_mode_combo.setToolTip(
             "Star 1-Pass: GPU star detection + RANSAC, single pass.\n"
             "Star 2-Pass: as above with refinement pass (large rotations/drift).\n"
+            "Triangle Match: scale/rotation-invariant triangle similarity matching.\n"
+            "  Handles large rotations, reflections, and few-star fields.\n"
+            "  Falls back to nearest-neighbour if matching is ambiguous.\n"
             "FFT Translation: phase cross-correlation, GPU-accelerated (pure shift only).\n"
             "Comet: track comet nucleus position, align by translation only."
         )
@@ -616,64 +644,6 @@ class ToolsPanel(QWidget):
         reg_layout.addWidget(self._btn_align)
         layout.addWidget(reg_group)
 
-        # --- Section 1b: Frame Quality Filter ---
-        quality_group = QGroupBox("Frame Quality Filter")
-        quality_layout = QVBoxLayout(quality_group)
-        quality_layout.addWidget(
-            _info_label(
-                "Reject poor-quality frames before alignment/stacking based on FWHM and SNR."
-            )
-        )
-
-        self._quality_filter_check = QCheckBox("Filter by quality (subframe selector)")
-        self._quality_filter_check.setChecked(False)
-        quality_layout.addWidget(self._quality_filter_check)
-
-        quality_metric_row = QHBoxLayout()
-        quality_metric_row.addWidget(QLabel("Metric:"))
-        self._quality_metric_combo = QComboBox()
-        self._quality_metric_combo.addItems(["FWHM (sharpness)", "SNR (signal)", "Quality Score"])
-        self._quality_metric_combo.setToolTip("Quality metric to use for filtering")
-        quality_metric_row.addWidget(self._quality_metric_combo)
-        quality_layout.addLayout(quality_metric_row)
-
-        quality_mode_row = QHBoxLayout()
-        quality_mode_row.addWidget(QLabel("Mode:"))
-        self._quality_mode_combo = QComboBox()
-        self._quality_mode_combo.addItems(["Keep best N frames", "Keep best %", "Sigma rejection"])
-        self._quality_mode_combo.setToolTip("Filtering mode")
-        self._quality_mode_combo.currentIndexChanged.connect(self._on_quality_mode_changed)
-        quality_mode_row.addWidget(self._quality_mode_combo)
-        quality_layout.addLayout(quality_mode_row)
-
-        self._quality_n_spin = QSpinBox()
-        self._quality_n_spin.setRange(1, 100)
-        self._quality_n_spin.setValue(5)
-        self._quality_n_spin.setToolTip("Number of best frames to keep")
-        quality_layout.addLayout(_h_row("Keep N:", self._quality_n_spin))
-
-        self._quality_percent_spin = QDoubleSpinBox()
-        self._quality_percent_spin.setRange(10.0, 100.0)
-        self._quality_percent_spin.setValue(80.0)
-        self._quality_percent_spin.setSingleStep(5.0)
-        self._quality_percent_spin.setToolTip("Percentage of best frames to keep")
-        self._quality_percent_spin.setEnabled(False)
-        quality_layout.addLayout(_h_row("Keep %:", self._quality_percent_spin))
-
-        self._quality_sigma_spin = QDoubleSpinBox()
-        self._quality_sigma_spin.setRange(0.5, 5.0)
-        self._quality_sigma_spin.setValue(1.5)
-        self._quality_sigma_spin.setSingleStep(0.5)
-        self._quality_sigma_spin.setToolTip(
-            "Frames scoring more than this many sigmas below the mean quality score are rejected"
-        )
-        self._quality_sigma_spin.setEnabled(False)
-        quality_layout.addLayout(_h_row("Rejection Sigma:", self._quality_sigma_spin))
-
-        self._quality_filter_check.toggled.connect(self._on_quality_filter_toggled)
-
-        layout.addWidget(quality_group)
-
         # --- Section 2: Integration / Stacking ---
         stack_group = QGroupBox("Integration (Stacking)")
         stack_layout = QVBoxLayout(stack_group)
@@ -699,8 +669,13 @@ class ToolsPanel(QWidget):
         stack_layout.addLayout(_h_row("Rejection:", self._rejection_combo))
 
         self._integration_combo = QComboBox()
-        self._integration_combo.addItems(["Average", "Median"])
-        self._integration_combo.setToolTip("How to combine remaining pixel values after rejection")
+        self._integration_combo.addItems(["Average", "Median", "Weighted Average"])
+        self._integration_combo.setToolTip(
+            "Average: equal-weight mean.\n"
+            "Median: robust against hot pixels (slower).\n"
+            "Weighted Average: weight each frame by its quality score (SNR/FWHM). "
+            "Scores are computed automatically before stacking."
+        )
         stack_layout.addLayout(_h_row("Integration:", self._integration_combo))
 
         self._kappa_spin = QDoubleSpinBox()
@@ -970,6 +945,55 @@ class ToolsPanel(QWidget):
 
         layout.addWidget(ghs_group)
 
+        # --- Arcsinh Stretch ---
+        arcsinh_group = QGroupBox("Arcsinh Stretch")
+        arcsinh_layout = QVBoxLayout(arcsinh_group)
+        arcsinh_layout.addWidget(
+            _info_label("Lupton et al. 2004 — linear-to-arcsinh ramp. Preserves star colours "
+                        "better than log; reveals faint nebulosity without blowing out stars.")
+        )
+
+        self._arcsinh_factor_spin = QDoubleSpinBox()
+        self._arcsinh_factor_spin.setRange(0.1, 1000.0)
+        self._arcsinh_factor_spin.setValue(10.0)
+        self._arcsinh_factor_spin.setSingleStep(1.0)
+        self._arcsinh_factor_spin.setDecimals(1)
+        self._arcsinh_factor_spin.setToolTip("Stretch factor β — higher = more compression of brights")
+        arcsinh_layout.addLayout(_h_row("Stretch factor:", self._arcsinh_factor_spin))
+
+        self._arcsinh_bp_spin = QDoubleSpinBox()
+        self._arcsinh_bp_spin.setRange(0.0, 0.5)
+        self._arcsinh_bp_spin.setValue(0.0)
+        self._arcsinh_bp_spin.setSingleStep(0.001)
+        self._arcsinh_bp_spin.setDecimals(4)
+        self._arcsinh_bp_spin.setToolTip("Black point — input level mapped to zero")
+        arcsinh_layout.addLayout(_h_row("Black point:", self._arcsinh_bp_spin))
+
+        self._arcsinh_linked_check = QCheckBox("Linked RGB")
+        self._arcsinh_linked_check.setChecked(True)
+        self._arcsinh_linked_check.setToolTip("Same stretch for all channels (preserves colour balance)")
+        arcsinh_layout.addWidget(self._arcsinh_linked_check)
+
+        arcsinh_btn_row = QHBoxLayout()
+        self._btn_arcsinh = QPushButton("Apply Arcsinh Stretch")
+        self._btn_arcsinh.clicked.connect(self.run_arcsinh_stretch.emit)
+        arcsinh_btn_row.addWidget(self._btn_arcsinh)
+        self._btn_arcsinh_reset = QPushButton("Reset")
+        self._btn_arcsinh_reset.setToolTip("Reset to default values")
+        self._btn_arcsinh_reset.clicked.connect(self._reset_arcsinh_params)
+        arcsinh_btn_row.addWidget(self._btn_arcsinh_reset)
+        arcsinh_layout.addLayout(arcsinh_btn_row)
+
+        self._add_preview_checkbox(arcsinh_layout, "arcsinh_stretch")
+        self._arcsinh_factor_spin.valueChanged.connect(
+            lambda: self._emit_if_preview_enabled("arcsinh_stretch")
+        )
+        self._arcsinh_bp_spin.valueChanged.connect(
+            lambda: self._emit_if_preview_enabled("arcsinh_stretch")
+        )
+
+        layout.addWidget(arcsinh_group)
+
         # --- Histogram Transform ---
         ht_group = QGroupBox("Histogram Transform")
         ht_layout = QVBoxLayout(ht_group)
@@ -1027,6 +1051,8 @@ class ToolsPanel(QWidget):
         self._ht_white_spin.valueChanged.connect(
             lambda: self._emit_if_preview_enabled("histogram_transform")
         )
+        self._ht_black_spin.valueChanged.connect(self._emit_clip_points)
+        self._ht_white_spin.valueChanged.connect(self._emit_clip_points)
 
         layout.addWidget(ht_group)
 
@@ -1102,8 +1128,40 @@ class ToolsPanel(QWidget):
         self._bg_order_spin.setToolTip("Polynomial degree for the background surface model")
         bg_layout.addLayout(_h_row("Poly order:", self._bg_order_spin))
 
+        # Auto-grid
+        grid_row = QHBoxLayout()
+        self._bg_grid_rows_spin = QSpinBox()
+        self._bg_grid_rows_spin.setRange(2, 20)
+        self._bg_grid_rows_spin.setValue(5)
+        self._bg_grid_rows_spin.setToolTip("Number of sample rows in auto-grid")
+        grid_row.addWidget(QLabel("Rows:"))
+        grid_row.addWidget(self._bg_grid_rows_spin)
+
+        self._bg_grid_cols_spin = QSpinBox()
+        self._bg_grid_cols_spin.setRange(2, 20)
+        self._bg_grid_cols_spin.setValue(5)
+        self._bg_grid_cols_spin.setToolTip("Number of sample columns in auto-grid")
+        grid_row.addWidget(QLabel("Cols:"))
+        grid_row.addWidget(self._bg_grid_cols_spin)
+        bg_layout.addLayout(grid_row)
+
+        self._bg_box_size_spin = QSpinBox()
+        self._bg_box_size_spin.setRange(8, 256)
+        self._bg_box_size_spin.setValue(64)
+        self._bg_box_size_spin.setSingleStep(8)
+        self._bg_box_size_spin.setToolTip("Side length (pixels) of each sample measurement box")
+        bg_layout.addLayout(_h_row("Box size (px):", self._bg_box_size_spin))
+
+        btn_add_grid = QPushButton("Add Grid")
+        btn_add_grid.setToolTip(
+            "Auto-place sample points in an evenly-spaced grid across the image.\n"
+            "Existing samples are kept — click Clear first to start fresh."
+        )
+        btn_add_grid.clicked.connect(self._on_add_bg_grid)
+        bg_layout.addWidget(btn_add_grid)
+
         # Interactive sample placement
-        self._btn_place_samples = QPushButton("Place Samples")
+        self._btn_place_samples = QPushButton("Place Samples Manually")
         self._btn_place_samples.setCheckable(True)
         self._btn_place_samples.setToolTip(
             "Click on the image to place background sample points.\n"
@@ -1127,6 +1185,52 @@ class ToolsPanel(QWidget):
         bg_layout.addWidget(self._btn_background)
         layout.addWidget(bg_group)
 
+        # --- Background Neutralization ---
+        bn_group = QGroupBox("Background Neutralization")
+        bn_layout = QVBoxLayout(bn_group)
+        bn_layout.addWidget(
+            _info_label(
+                "Shift sky background to neutral zero by subtracting per-channel "
+                "darkest-percentile level."
+            )
+        )
+
+        self._bn_percentile_spin = QDoubleSpinBox()
+        self._bn_percentile_spin.setRange(0.1, 20.0)
+        self._bn_percentile_spin.setValue(2.0)
+        self._bn_percentile_spin.setSingleStep(0.5)
+        self._bn_percentile_spin.setDecimals(1)
+        self._bn_percentile_spin.setToolTip(
+            "Take the Nth percentile of dark-sky pixels as the background estimate.\n"
+            "Keep this low (1–3%) for images with significant nebulosity."
+        )
+        bn_layout.addLayout(_h_row("Percentile:", self._bn_percentile_spin))
+
+        self._bn_protect_spin = QDoubleSpinBox()
+        self._bn_protect_spin.setRange(0.1, 1.0)
+        self._bn_protect_spin.setValue(0.5)
+        self._bn_protect_spin.setSingleStep(0.05)
+        self._bn_protect_spin.setDecimals(2)
+        self._bn_protect_spin.setToolTip(
+            "Ignore pixels brighter than this fraction of the channel maximum\n"
+            "when estimating sky background. 0.5 = use only the darkest 50% of pixels.\n"
+            "Lower values protect more nebulosity from being mistaken for background."
+        )
+        bn_layout.addLayout(_h_row("Protect bright:", self._bn_protect_spin))
+
+        self._bn_amount_spin = QDoubleSpinBox()
+        self._bn_amount_spin.setRange(0.0, 1.0)
+        self._bn_amount_spin.setValue(1.0)
+        self._bn_amount_spin.setSingleStep(0.05)
+        self._bn_amount_spin.setDecimals(2)
+        self._bn_amount_spin.setToolTip("Blend strength: 0 = no change, 1 = full correction")
+        bn_layout.addLayout(_h_row("Amount:", self._bn_amount_spin))
+
+        btn_bn = QPushButton("Run Background Neutralization")
+        btn_bn.clicked.connect(self.run_background_neutralization.emit)
+        bn_layout.addWidget(btn_bn)
+        layout.addWidget(bn_group)
+
         # --- ABE (RBF) ---
         abe_group = QGroupBox("ABE (Advanced)")
         abe_layout = QVBoxLayout(abe_group)
@@ -1145,8 +1249,11 @@ class ToolsPanel(QWidget):
 
         self._abe_degree_spin = QSpinBox()
         self._abe_degree_spin.setRange(1, 5)
-        self._abe_degree_spin.setValue(2)
-        self._abe_degree_spin.setToolTip("Polynomial degree: 1=plane, 2=quadratic, 3=cubic")
+        self._abe_degree_spin.setValue(4)
+        self._abe_degree_spin.setToolTip(
+            "Polynomial degree: 1=plane, 2=quadratic, 3=cubic, 4=quartic.\n"
+            "Degree 4 captures the cos⁴ falloff of optical vignetting at image edges."
+        )
         abe_layout.addLayout(_h_row("Poly degree:", self._abe_degree_spin))
 
         self._abe_kernel_combo = QComboBox()
@@ -1161,7 +1268,34 @@ class ToolsPanel(QWidget):
 
         self._abe_mode_combo = QComboBox()
         self._abe_mode_combo.addItems(["Subtraction", "Division"])
+        self._abe_mode_combo.setToolTip(
+            "Subtraction: remove additive sky gradients / light pollution (default).\n"
+            "Division: correct multiplicative optical vignetting (cos⁴ falloff)."
+        )
         abe_layout.addLayout(_h_row("Mode:", self._abe_mode_combo))
+
+        self._abe_sample_pct_spin = QDoubleSpinBox()
+        self._abe_sample_pct_spin.setRange(1.0, 50.0)
+        self._abe_sample_pct_spin.setValue(10.0)
+        self._abe_sample_pct_spin.setSingleStep(1.0)
+        self._abe_sample_pct_spin.setDecimals(1)
+        self._abe_sample_pct_spin.setToolTip(
+            "Percentile used within each sample box to measure background.\n"
+            "Lower values (5–10) resist nebulosity contamination better."
+        )
+        abe_layout.addLayout(_h_row("Sample pct:", self._abe_sample_pct_spin))
+
+        self._abe_darkest_spin = QDoubleSpinBox()
+        self._abe_darkest_spin.setRange(0.1, 1.0)
+        self._abe_darkest_spin.setValue(0.6)
+        self._abe_darkest_spin.setSingleStep(0.05)
+        self._abe_darkest_spin.setDecimals(2)
+        self._abe_darkest_spin.setToolTip(
+            "Keep only the darkest N fraction of sample points for the background fit.\n"
+            "0.5 = use darkest 50% only — prevents nebula regions from biasing the model.\n"
+            "Increase toward 1.0 for images without significant extended emission."
+        )
+        abe_layout.addLayout(_h_row("Darkest frac:", self._abe_darkest_spin))
 
         btn_abe = QPushButton("Run ABE")
         btn_abe.clicked.connect(self.run_abe.emit)
@@ -1225,6 +1359,10 @@ class ToolsPanel(QWidget):
         band_layout.addLayout(_h_row("Protection:", self._band_sigma_spin))
 
         self._add_preview_checkbox(band_layout, "banding")
+        self._band_h_check.toggled.connect(lambda: self._emit_if_preview_enabled("banding"))
+        self._band_v_check.toggled.connect(lambda: self._emit_if_preview_enabled("banding"))
+        self._band_amount_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("banding"))
+        self._band_sigma_spin.valueChanged.connect(lambda: self._emit_if_preview_enabled("banding"))
         self._btn_banding = QPushButton("Remove Banding")
         self._btn_banding.clicked.connect(self.run_banding.emit)
         band_layout.addWidget(self._btn_banding)
@@ -1448,6 +1586,9 @@ class ToolsPanel(QWidget):
         scnr_layout.addWidget(self._scnr_preserve_lum)
 
         self._add_preview_checkbox(scnr_layout, "scnr")
+        self._scnr_method_combo.currentIndexChanged.connect(lambda: self._emit_if_preview_enabled("scnr"))
+        self._scnr_amount_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("scnr"))
+        self._scnr_preserve_lum.toggled.connect(lambda: self._emit_if_preview_enabled("scnr"))
         self._btn_scnr = QPushButton("Apply SCNR")
         self._btn_scnr.clicked.connect(self.run_scnr.emit)
         scnr_layout.addWidget(self._btn_scnr)
@@ -1496,6 +1637,9 @@ class ToolsPanel(QWidget):
         color_layout.addLayout(row)
 
         self._add_preview_checkbox(color_layout, "color_adjust")
+        self._saturation_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("color_adjust"))
+        self._hue_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("color_adjust"))
+        self._vibrance_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("color_adjust"))
         self._btn_color = QPushButton("Apply Color Adjustment")
         self._btn_color.clicked.connect(self.run_color_adjust.emit)
         color_layout.addWidget(self._btn_color)
@@ -1655,6 +1799,10 @@ class ToolsPanel(QWidget):
         nr_layout.addWidget(self._nr_chrom_check)
 
         self._add_preview_checkbox(nr_layout, "denoise")
+        self._nr_method_combo.currentIndexChanged.connect(lambda: self._emit_if_preview_enabled("denoise"))
+        self._nr_strength_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("denoise"))
+        self._nr_detail_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("denoise"))
+        self._nr_chrom_check.toggled.connect(lambda: self._emit_if_preview_enabled("denoise"))
         self._btn_denoise = QPushButton("Reduce Noise")
         self._btn_denoise.clicked.connect(self.run_denoise.emit)
         nr_layout.addWidget(self._btn_denoise)
@@ -1755,6 +1903,10 @@ class ToolsPanel(QWidget):
         wav_layout.addLayout(row)
 
         self._add_preview_checkbox(wav_layout, "wavelet")
+        self._wav_scales_spin.valueChanged.connect(lambda: self._emit_if_preview_enabled("wavelet"))
+        self._wav_fine_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("wavelet"))
+        self._wav_medium_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("wavelet"))
+        self._wav_coarse_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("wavelet"))
         self._btn_wavelet = QPushButton("Apply Wavelet Sharpening")
         self._btn_wavelet.setToolTip("GPU-accelerated wavelet transform")
         self._btn_wavelet.clicked.connect(self.run_wavelet_sharpen.emit)
@@ -1819,6 +1971,10 @@ class ToolsPanel(QWidget):
         mlt_layout.addLayout(res_row)
 
         self._add_preview_checkbox(mlt_layout, "mlt")
+        for _boost_sl, _, _thr_sl, _ in self._mlt_sliders:
+            _boost_sl.valueChanged.connect(lambda: self._emit_if_preview_enabled("mlt"))
+            _thr_sl.valueChanged.connect(lambda: self._emit_if_preview_enabled("mlt"))
+        self._mlt_residual_spin.valueChanged.connect(lambda: self._emit_if_preview_enabled("mlt"))
         btn_mlt = QPushButton("Apply MLT")
         btn_mlt.setToolTip("Apply multi-scale linear transform")
         btn_mlt.clicked.connect(self.run_mlt.emit)
@@ -1857,6 +2013,9 @@ class ToolsPanel(QWidget):
         lc_layout.addLayout(row)
 
         self._add_preview_checkbox(lc_layout, "local_contrast")
+        self._lc_clip_spin.valueChanged.connect(lambda: self._emit_if_preview_enabled("local_contrast"))
+        self._lc_tile_spin.valueChanged.connect(lambda: self._emit_if_preview_enabled("local_contrast"))
+        self._lc_amount_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("local_contrast"))
         self._btn_local_contrast = QPushButton("Apply Local Contrast")
         self._btn_local_contrast.clicked.connect(self.run_local_contrast.emit)
         lc_layout.addWidget(self._btn_local_contrast)
@@ -1925,6 +2084,9 @@ class ToolsPanel(QWidget):
         usm_layout.addLayout(_h_row("Threshold:", self._usm_threshold_spin))
 
         self._add_preview_checkbox(usm_layout, "unsharp_mask")
+        self._usm_radius_spin.valueChanged.connect(lambda: self._emit_if_preview_enabled("unsharp_mask"))
+        self._usm_amount_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("unsharp_mask"))
+        self._usm_threshold_spin.valueChanged.connect(lambda: self._emit_if_preview_enabled("unsharp_mask"))
         btn_usm = QPushButton("Apply Unsharp Mask")
         btn_usm.clicked.connect(self.run_unsharp_mask.emit)
         usm_layout.addWidget(btn_usm)
@@ -1942,6 +2104,7 @@ class ToolsPanel(QWidget):
         mf_layout.addLayout(_h_row("Kernel size:", self._mf_kernel_spin))
 
         self._add_preview_checkbox(mf_layout, "median_filter")
+        self._mf_kernel_spin.valueChanged.connect(lambda: self._emit_if_preview_enabled("median_filter"))
         btn_mf = QPushButton("Apply Median Filter")
         btn_mf.clicked.connect(self.run_median_filter.emit)
         mf_layout.addWidget(btn_mf)
@@ -1965,9 +2128,7 @@ class ToolsPanel(QWidget):
         aid_group = QGroupBox("AI Denoise")
         aid_layout = QVBoxLayout(aid_group)
         aid_layout.addWidget(
-            _info_label(
-                "Deep learning noise reduction using a trained U-Net model. Requires Pro license."
-            )
+            _info_label("Deep learning noise reduction using a trained U-Net model.")
         )
 
         self._aid_strength_slider = QSlider(Qt.Orientation.Horizontal)
@@ -2017,9 +2178,7 @@ class ToolsPanel(QWidget):
         ais_group = QGroupBox("AI Sharpen")
         ais_layout = QVBoxLayout(ais_group)
         ais_layout.addWidget(
-            _info_label(
-                "Deep learning sharpening using a trained U-Net model. Requires Pro license."
-            )
+            _info_label("Deep learning sharpening using a trained U-Net model.")
         )
 
         self._ais_strength_slider = QSlider(Qt.Orientation.Horizontal)
@@ -2379,12 +2538,14 @@ class ToolsPanel(QWidget):
         integration_map = {
             0: IntegrationMethod.AVERAGE,
             1: IntegrationMethod.MEDIAN,
+            2: IntegrationMethod.WEIGHTED_AVERAGE,
         }
         registration_map = {
             0: RegistrationMode.STAR_1_PASS,
             1: RegistrationMode.STAR_2_PASS,
-            2: RegistrationMode.FFT_TRANSLATION,
-            3: RegistrationMode.COMET,
+            2: RegistrationMode.TRIANGLE,
+            3: RegistrationMode.FFT_TRANSLATION,
+            4: RegistrationMode.COMET,
         }
         # Reference frame index: -1=auto, 0=first, -2=last, or 1-based user input → 0-based
         ref_mode = self._ref_frame_combo.currentIndex()
@@ -2414,23 +2575,9 @@ class ToolsPanel(QWidget):
             reference_frame_index=ref_idx,
         )
 
-    def get_quality_filter_params(self) -> dict | None:
-        """Return quality filter config, or None if filter is disabled."""
-        if not self._quality_filter_check.isChecked():
-            return None
-        metric_map = {0: "fwhm", 1: "snr", 2: "quality_score"}
-        mode_map = {0: "top_n", 1: "top_percent", 2: "sigma"}
-        return {
-            "metric": metric_map.get(self._quality_metric_combo.currentIndex(), "quality_score"),
-            "mode": mode_map.get(self._quality_mode_combo.currentIndex(), "sigma"),
-            "top_n": self._quality_n_spin.value(),
-            "top_percent": self._quality_percent_spin.value(),
-            "rejection_sigma": self._quality_sigma_spin.value(),
-        }
-
     def _on_reg_mode_changed(self, index: int):
         """Show comet nucleus radius spin only when Comet mode is selected."""
-        self._comet_radius_spin.setVisible(index == 3)
+        self._comet_radius_spin.setVisible(index == 4)
 
     def _on_ref_frame_mode_changed(self, index: int):
         """Show frame number spin only when 'Specific frame #' is selected."""
@@ -2439,22 +2586,6 @@ class ToolsPanel(QWidget):
     def set_ref_frame_max(self, n_frames: int):
         """Called by main window to update the max value when frames are loaded."""
         self._ref_frame_spin.setMaximum(max(1, n_frames))
-
-    def _on_quality_mode_changed(self, index: int):
-        """Handle quality filter mode change - show/hide relevant spin boxes."""
-        self._quality_n_spin.setEnabled(index == 0)
-        self._quality_percent_spin.setEnabled(index == 1)
-        self._quality_sigma_spin.setEnabled(index == 2)
-
-    def _on_quality_filter_toggled(self, checked: bool):
-        """Handle quality filter checkbox toggle."""
-        self._quality_n_spin.setEnabled(checked and self._quality_mode_combo.currentIndex() == 0)
-        self._quality_percent_spin.setEnabled(
-            checked and self._quality_mode_combo.currentIndex() == 1
-        )
-        self._quality_sigma_spin.setEnabled(
-            checked and self._quality_mode_combo.currentIndex() == 2
-        )
 
     # ── Multi-session helpers ─────────────────────────────────────────────────
 
@@ -2483,8 +2614,9 @@ class ToolsPanel(QWidget):
         mode_map = {
             0: RegistrationMode.STAR_1_PASS,
             1: RegistrationMode.STAR_2_PASS,
-            2: RegistrationMode.FFT_TRANSLATION,
-            3: RegistrationMode.COMET,
+            2: RegistrationMode.TRIANGLE,
+            3: RegistrationMode.FFT_TRANSLATION,
+            4: RegistrationMode.COMET,
         }
         ref_mode = self._ref_frame_combo.currentIndex()
         if ref_mode == 0:
@@ -2553,6 +2685,22 @@ class ToolsPanel(QWidget):
         ):
             widget.blockSignals(False)
 
+    def get_arcsinh_params(self) -> ArcsinhStretchParams:
+        return ArcsinhStretchParams(
+            stretch_factor=self._arcsinh_factor_spin.value(),
+            black_point=self._arcsinh_bp_spin.value(),
+            linked=self._arcsinh_linked_check.isChecked(),
+        )
+
+    def _reset_arcsinh_params(self):
+        for w in (self._arcsinh_factor_spin, self._arcsinh_bp_spin):
+            w.blockSignals(True)
+        self._arcsinh_factor_spin.setValue(10.0)
+        self._arcsinh_bp_spin.setValue(0.0)
+        self._arcsinh_linked_check.setChecked(True)
+        for w in (self._arcsinh_factor_spin, self._arcsinh_bp_spin):
+            w.blockSignals(False)
+
     def get_curves_params(self) -> CurvesParams:
         return self._curve_editor.get_params()
 
@@ -2565,6 +2713,13 @@ class ToolsPanel(QWidget):
 
     def set_bg_sample_count(self, n: int):
         self._bg_sample_label.setText(f"{n} manual sample{'s' if n != 1 else ''}")
+
+    def _on_add_bg_grid(self):
+        self.add_bg_grid.emit(
+            self._bg_grid_rows_spin.value(),
+            self._bg_grid_cols_spin.value(),
+            self._bg_box_size_spin.value(),
+        )
 
     def get_cosmetic_params(self) -> CosmeticParams:
         return CosmeticParams(
@@ -2698,6 +2853,17 @@ class ToolsPanel(QWidget):
         }
 
     # ── Blink Comparator helpers ──────────────────────────────────────────────
+
+    def set_subframe_count(self, n: int) -> None:
+        """Update the subframe selector status label after accepted frames are chosen."""
+        if n > 0:
+            self._subframe_count_label.setText(
+                f"{n} frame{'s' if n != 1 else ''} selected — will be used for stacking"
+            )
+            self._subframe_count_label.setStyleSheet("color: #90ee90; font-size: 10px;")
+        else:
+            self._subframe_count_label.setText("No subframe selection active")
+            self._subframe_count_label.setStyleSheet("color: #aaa; font-size: 10px;")
 
     def set_blink_slot_label(self, slot: str, name: str) -> None:
         """Update blink comparator A/B slot label. slot='a' or 'b'."""
@@ -2917,6 +3083,15 @@ class ToolsPanel(QWidget):
             rbf_kernel=kernel_map.get(self._abe_kernel_combo.currentIndex(), "thin_plate_spline"),
             rbf_smoothing=self._abe_smoothing_spin.value(),
             correction_mode=mode_map.get(self._abe_mode_combo.currentIndex(), "subtraction"),
+            sample_percentile=self._abe_sample_pct_spin.value(),
+            darkest_fraction=self._abe_darkest_spin.value(),
+        )
+
+    def get_background_neutralization_params(self) -> BackgroundNeutralizationParams:
+        return BackgroundNeutralizationParams(
+            percentile=self._bn_percentile_spin.value(),
+            protect_bright=self._bn_protect_spin.value(),
+            amount=self._bn_amount_spin.value(),
         )
 
     def get_vignette_params(self) -> VignetteParams:
@@ -2978,7 +3153,7 @@ class ToolsPanel(QWidget):
     def get_debayer_params(self) -> dict:
         """Return debayer pattern and method from UI."""
         pattern_items = ["", "RGGB", "BGGR", "GRBG", "GBRG"]
-        method_items = ["vng", "ea", "bilinear"]
+        method_items = ["vng", "ea", "bilinear", "superpixel"]
         return {
             "pattern": pattern_items[self._debayer_pattern_combo.currentIndex()],  # "" = auto
             "method": method_items[self._debayer_method_combo.currentIndex()],

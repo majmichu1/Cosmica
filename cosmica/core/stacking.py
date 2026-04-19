@@ -7,6 +7,7 @@ all statistical methods. No custom reimplementations of known algorithms.
 
 from __future__ import annotations
 
+import gc
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -37,6 +38,9 @@ from cosmica.core.star_detection import (
 )
 from cosmica.core.star_detection import (
     find_transform as _cpu_find_transform,
+)
+from cosmica.core.star_detection import (
+    find_transform_triangle as _cpu_find_transform_triangle,
 )
 
 log = logging.getLogger(__name__)
@@ -127,11 +131,13 @@ class RejectionMethod(Enum):
 class IntegrationMethod(Enum):
     AVERAGE = auto()
     MEDIAN = auto()
+    WEIGHTED_AVERAGE = auto()  # per-frame SNR/FWHM weights via StackingParams.frame_weights
 
 
 class RegistrationMode(Enum):
     STAR_1_PASS = auto()      # GPU star detection → RANSAC → warp (single pass)
     STAR_2_PASS = auto()      # as above + refinement pass with tight radius
+    TRIANGLE = auto()         # triangle-similarity matching (robust, handles large rotations)
     FFT_TRANSLATION = auto()  # FFT phase cross-correlation (translation only)
     COMET = auto()            # Track comet nucleus centroid; align by translation only
 
@@ -160,6 +166,7 @@ class StackingParams:
     use_gpu: bool = True            # prefer GPU; falls back to CPU automatically
     comet_nucleus_radius: int = 15  # search radius for nucleus peak (COMET mode)
     reference_frame_index: int = -1 # -1 = auto (highest variance), ≥0 = explicit index
+    frame_weights: list[float] | None = None  # per-frame weights for WEIGHTED_AVERAGE
 
 
 @dataclass
@@ -397,10 +404,18 @@ def _get_mask(masked_data: np.ma.MaskedArray, shape: tuple) -> np.ndarray:
     return np.asarray(masked_data.mask)
 
 
-def _integrate(masked_data: np.ma.MaskedArray, method: IntegrationMethod) -> np.ndarray:
+def _integrate(
+    masked_data: np.ma.MaskedArray,
+    method: IntegrationMethod,
+    weights: np.ndarray | None = None,
+) -> np.ndarray:
     """Combine pixel values after rejection."""
     if method == IntegrationMethod.MEDIAN:
         return np.ma.median(masked_data, axis=0).data
+    if method == IntegrationMethod.WEIGHTED_AVERAGE and weights is not None:
+        w = np.asarray(weights, dtype=np.float64)
+        w = w / w.sum()
+        return np.ma.average(masked_data, axis=0, weights=w).data.astype(np.float32)
     return np.ma.mean(masked_data, axis=0).data
 
 
@@ -456,9 +471,9 @@ def _fft_align_frames(
     if n <= 1:
         return list(images)
 
-    # Reference: highest variance after normalisation
-    normalized = [img.data / (img.data.max() + 1e-10) for img in images]
-    ref_idx = int(np.argmax([np.var(v) for v in normalized]))
+    # Reference: highest variance after normalisation — vectorised over (N, H, W)
+    normalized = np.stack([img.data / (img.data.max() + 1e-10) for img in images], axis=0)
+    ref_idx = int(np.var(normalized, axis=tuple(range(1, normalized.ndim))).argmax())
     ref_img = images[ref_idx]
 
     log.info("FFT alignment: reference frame #%d", ref_idx + 1)
@@ -667,33 +682,32 @@ def _comet_align_frames(
         dy = ref_cy - cy
         log.debug("Frame %d nucleus: (%.1f, %.1f), shift: (%.1f, %.1f)", i + 1, cx, cy, dx, dy)
 
-        # Apply translation with cv2.warpAffine
-        import cv2 as _cv2
-
-        M = np.float32([[1, 0, dx], [0, 1, dy]])
+        # Apply translation: use GPU (warp_image_gpu) when available, else OpenCV
         d = frame.data
-        if d.ndim == 2:
-            h, w = d.shape
-            shifted = _cv2.warpAffine(
-                d, M, (w, h),
-                flags=_cv2.INTER_LINEAR,
-                borderMode=_cv2.BORDER_CONSTANT,
-                borderValue=0.0,
-            )
+        dm = get_device_manager()
+        if dm.device.type != "cpu":
+            # warp_image_gpu expects the inverse (output→input) affine matrix.
+            # Forward shift (dx_col, dy_row) → inverse matrix has (-dx, -dy).
+            M_inv = np.float32([[1, 0, -dx], [0, 1, -dy]])
+            t_frame = torch.from_numpy(d).to(dm.device)
+            with torch.no_grad():
+                warped_t = warp_image_gpu(t_frame, M_inv, mode="bilinear")
+            shifted = warped_t.cpu().numpy()
+            del t_frame, warped_t
         else:
-            c, h, w = d.shape
-            shifted = np.stack(
-                [
-                    _cv2.warpAffine(
-                        d[ch], M, (w, h),
-                        flags=_cv2.INTER_LINEAR,
-                        borderMode=_cv2.BORDER_CONSTANT,
-                        borderValue=0.0,
-                    )
-                    for ch in range(c)
-                ],
-                axis=0,
-            )
+            import cv2 as _cv2
+            M = np.float32([[1, 0, dx], [0, 1, dy]])
+            if d.ndim == 2:
+                h_d, w_d = d.shape
+                shifted = _cv2.warpAffine(d, M, (w_d, h_d), flags=_cv2.INTER_LINEAR,
+                                          borderMode=_cv2.BORDER_CONSTANT, borderValue=0.0)
+            else:
+                c_d, h_d, w_d = d.shape
+                shifted = np.stack([
+                    _cv2.warpAffine(d[ch], M, (w_d, h_d), flags=_cv2.INTER_LINEAR,
+                                    borderMode=_cv2.BORDER_CONSTANT, borderValue=0.0)
+                    for ch in range(c_d)
+                ], axis=0)
 
         aligned.append(ImageData(
             data=shifted.astype(np.float32),
@@ -771,6 +785,12 @@ def align_frames(
         log.info("Reference: %d stars detected (CPU)", len(ref_sf))
 
     two_pass = params.registration_mode == RegistrationMode.STAR_2_PASS
+    use_triangle = params.registration_mode == RegistrationMode.TRIANGLE
+
+    # Pre-detect ref stars on CPU for triangle mode (always CPU, no GPU path needed)
+    if use_triangle:
+        ref_sf = _cpu_detect_stars(ref_img.data)
+        gpu_available = False  # triangle mode always uses CPU path
 
     for i in range(n):
         if i == ref_idx:
@@ -790,7 +810,7 @@ def align_frames(
             transform = estimate_transform_gpu(matches)
 
             if transform is None:
-                log.warning("Frame %d: transform failed, using CPU fallback", i + 1)
+                log.warning("Frame %d: GPU transform failed, using CPU fallback", i + 1)
                 ref_sf2 = _cpu_detect_stars(ref_img.data)
                 tgt_sf2 = _cpu_detect_stars(frame.data)
                 transform = _cpu_find_transform(ref_sf2, tgt_sf2)
@@ -827,9 +847,12 @@ def align_frames(
             del t_img, final  # free GPU tensors immediately after warp
 
         else:
-            # Pure CPU path using star_detection + OpenCV
+            # CPU path: triangle-matching or standard nearest-neighbor
             tgt_sf = _cpu_detect_stars(frame.data)
-            transform = _cpu_find_transform(ref_sf, tgt_sf)
+            if use_triangle:
+                transform = _cpu_find_transform_triangle(ref_sf, tgt_sf)
+            else:
+                transform = _cpu_find_transform(ref_sf, tgt_sf)
             if transform is None:
                 log.warning("Frame %d: no transform found, skipping", i + 1)
                 aligned[i] = frame
@@ -851,7 +874,7 @@ def align_frames(
     # Free GPU reference tensor and flush allocator cache
     if gpu_available:
         del t_ref
-        import gc as _gc; _gc.collect()
+        gc.collect()
         torch.cuda.empty_cache()
 
     progress(1.0, f"Alignment complete: {n} frames")
@@ -976,18 +999,13 @@ def align_from_paths(
         log.info("align_from_paths: using user-specified frame #%d", ref_idx + 1)
     else:
         # Auto: sample center crop of each frame to find highest variance.
-        # Fast path: use FITS memmap to read only a 256x256 center section,
-        # avoiding a full frame load (~100ms per file vs ~2s for full load).
-        # For large datasets (>30 frames), scan every Nth frame.
-        max_scan = 30
-        if n <= max_scan:
-            scan_indices = list(range(n))
-        else:
-            step = n / max_scan
-            scan_indices = [int(i * step) for i in range(max_scan)]
+        # Fast path: use FITS memmap to read only a 256×256 center section
+        # (~5–20 ms per file vs ~1–2 s for a full load), so scanning all
+        # frames is affordable even for 200+ frame datasets.
+        scan_indices = list(range(n))
         log.info(
-            "align_from_paths: scanning %d/%d frames for highest variance (auto ref)...",
-            len(scan_indices), n,
+            "align_from_paths: scanning all %d frames for best reference (center-crop)…",
+            n,
         )
         best_var, ref_idx = -1.0, n // 2  # default to middle frame if all samples fail
         for i in scan_indices:
@@ -1002,9 +1020,13 @@ def align_from_paths(
     progress(0.05, f"Reference: frame #{ref_idx + 1}")
 
     # ── Load reference frame fully ────────────────────────────────────────────
-    # debayer=False: keep raw Bayer mono for alignment (3× less GPU memory,
-    # avoids expensive VNG debayer per frame; stacking debayers the final result)
-    ref_img = load_image(str(paths[ref_idx]), debayer=False)
+    # Debayer OSC frames BEFORE warping so the affine transform operates on
+    # proper R/G/B channels, not raw Bayer mosaic pixels.  Warping a Bayer
+    # mosaic with bicubic/Lanczos interpolation mixes pixels of different
+    # filter colours (R with neighbouring G and B), corrupting the CFA pattern
+    # and producing severe colour fringing on stars after debayering.
+    # Industry standard (Siril, PixInsight) is to debayer first, then align.
+    ref_img = load_image(str(paths[ref_idx]), debayer=True)
     ref_shape = ref_img.data.shape
 
     # Detection scale: run star detection on 1/2 resolution.
@@ -1012,24 +1034,32 @@ def align_from_paths(
     # Star positions scaled back to full-res before matching; warp on full frame.
     _DETECT_SCALE = 2
 
+    # Star detection always needs a 2D luminance view.
+    _ref_for_detection = ref_img.data
+    if _ref_for_detection.ndim == 3:
+        _ref_for_detection = _ref_for_detection.mean(axis=0).astype(np.float32)
+
     t_ref = None
     if gpu_available:
-        t_ref = dm.from_numpy(ref_img.data)
-        t_ref_small = _interp_for_detection(t_ref, 1.0 / _DETECT_SCALE)
+        # Upload luminance-only for detection (saves VRAM; warp uses full color tensor later).
+        t_ref_lum = dm.from_numpy(_ref_for_detection)
+        t_ref_small = _interp_for_detection(t_ref_lum, 1.0 / _DETECT_SCALE)
         ref_stars_small = detect_stars_gpu(_highpass_for_detection(t_ref_small))
-        del t_ref_small
-        # Scale detected positions back to full-resolution coordinates
+        del t_ref_small, t_ref_lum
         ref_stars = [
             Star(x=s.x * _DETECT_SCALE, y=s.y * _DETECT_SCALE, flux=s.flux, fwhm=s.fwhm * _DETECT_SCALE)
             for s in ref_stars_small
         ]
-        del t_ref  # free GPU reference frame tensor immediately — not needed after star detection
-        t_ref = None
     else:
         ref_stars = None
-        ref_sf = _cpu_detect_stars(ref_img.data)
+        ref_sf = _cpu_detect_stars(_ref_for_detection)
 
     two_pass = params.registration_mode == RegistrationMode.STAR_2_PASS
+    use_triangle = params.registration_mode == RegistrationMode.TRIANGLE
+    if use_triangle:
+        # Triangle mode: always CPU, no GPU path
+        ref_sf = _cpu_detect_stars(_ref_for_detection)
+        gpu_available = False
 
     # ── Write reference frame aligned (it's already aligned to itself) ────────
     out_paths: list = [None] * n
@@ -1041,7 +1071,7 @@ def align_from_paths(
     # ── Align all other frames — prefetch IO hides disk latency ─────────────
     # While the GPU processes frame i, a background thread loads frame i+1.
     # This overlaps IO (slow) with GPU compute, typically 1.5-2× faster.
-    from concurrent.futures import ThreadPoolExecutor, Future
+    from concurrent.futures import Future, ThreadPoolExecutor
 
     non_ref = [i for i in range(n) if i != ref_idx]
     gc_interval = 10  # run gc every N frames instead of every frame
@@ -1049,13 +1079,13 @@ def align_from_paths(
     def _load(idx: int):
         """Load one frame from disk; returns (idx, ImageData|None).
 
-        debayer=False: skip VNG debayering during alignment — saves 1-2s/frame
-        on OSC cameras.  Bayer pattern header is preserved so the aligned files
-        are still recognisable by the stacking pipeline, which debayers the
-        final stacked result instead (better SNR).
+        debayer=True: debayer OSC frames before warping so that the affine
+        transform operates on proper R/G/B channels.  Warping a raw Bayer
+        mosaic with bicubic/Lanczos interpolation mixes R/G/B neighbours,
+        corrupting the CFA pattern and producing colour fringing on stars.
         """
         try:
-            return idx, load_image(str(paths[idx]), debayer=False)
+            return idx, load_image(str(paths[idx]), debayer=True)
         except Exception as exc:
             log.warning("align_from_paths: failed to load %s: %s", paths[idx].name, exc)
             return idx, None
@@ -1089,15 +1119,18 @@ def align_from_paths(
                 del frame
                 continue
 
+            # Luminance view for star detection (works for both mono and RGB frames).
+            frame_lum = frame.data.mean(axis=0).astype(np.float32) if frame.data.ndim == 3 else frame.data
+
             t_img = None
             if gpu_available:
                 t_img = dm.from_numpy(frame.data)
 
-                # Detect stars at 1/4 resolution — same as reference frame above.
-                # Warp still applies to full-res t_img.
-                t_small = _interp_for_detection(t_img, 1.0 / _DETECT_SCALE)
+                # Detect on luminance at half-res — saves VRAM; warp uses full color t_img.
+                t_lum = dm.from_numpy(frame_lum)
+                t_small = _interp_for_detection(t_lum, 1.0 / _DETECT_SCALE)
                 tgt_stars_small = detect_stars_gpu(_highpass_for_detection(t_small))
-                del t_small
+                del t_small, t_lum
                 tgt_stars = [
                     Star(x=s.x * _DETECT_SCALE, y=s.y * _DETECT_SCALE, flux=s.flux, fwhm=s.fwhm * _DETECT_SCALE)
                     for s in tgt_stars_small
@@ -1108,9 +1141,11 @@ def align_from_paths(
                 if transform is not None and two_pass:
                     t_inv_coarse = _invert_affine_2x3(transform)
                     warped_c = warp_image_gpu(t_img, t_inv_coarse, mode="bilinear")
-                    wc_small = _interp_for_detection(warped_c, 1.0 / _DETECT_SCALE)
+                    # Compute luminance of coarsely warped frame for refinement detection
+                    warped_lum = warped_c.mean(dim=0, keepdim=False) if warped_c.dim() == 3 else warped_c
+                    wc_small = _interp_for_detection(warped_lum, 1.0 / _DETECT_SCALE)
                     re_stars_small = detect_stars_gpu(_highpass_for_detection(wc_small))
-                    del wc_small
+                    del wc_small, warped_lum, warped_c
                     re_stars = [
                         Star(x=s.x * _DETECT_SCALE, y=s.y * _DETECT_SCALE, flux=s.flux, fwhm=s.fwhm * _DETECT_SCALE)
                         for s in re_stars_small
@@ -1128,8 +1163,8 @@ def align_from_paths(
                         res = res[0]
                 else:
                     log.warning("Frame %d: GPU transform failed, trying CPU", i + 1)
-                    ref_sf2 = _cpu_detect_stars(ref_img.data)
-                    tgt_sf2 = _cpu_detect_stars(frame.data)
+                    ref_sf2 = _cpu_detect_stars(_ref_for_detection)
+                    tgt_sf2 = _cpu_detect_stars(frame_lum)
                     cpu_t = _cpu_find_transform(ref_sf2, tgt_sf2)
                     if cpu_t is None:
                         log.warning("Frame %d: CPU fallback also failed, copying as-is", i + 1)
@@ -1137,15 +1172,22 @@ def align_from_paths(
                     else:
                         res = _cpu_align_image(frame.data, cpu_t, ref_shape).astype(np.float32)
             else:
-                tgt_sf = _cpu_detect_stars(frame.data)
-                transform = _cpu_find_transform(ref_sf, tgt_sf)
+                tgt_sf = _cpu_detect_stars(frame_lum)
+                if use_triangle:
+                    transform = _cpu_find_transform_triangle(ref_sf, tgt_sf)
+                else:
+                    transform = _cpu_find_transform(ref_sf, tgt_sf)
                 if transform is None:
                     log.warning("Frame %d: no transform found, copying as-is", i + 1)
                     res = frame.data
                 else:
                     if two_pass:
                         warped_c = _cpu_align_image(frame.data, transform, ref_shape)
-                        tgt_sf2 = _cpu_detect_stars(warped_c)
+                        warped_lum = (
+                            warped_c.mean(axis=0).astype(np.float32)
+                            if warped_c.ndim == 3 else warped_c
+                        )
+                        tgt_sf2 = _cpu_detect_stars(warped_lum)
                         refine = _cpu_find_transform(ref_sf, tgt_sf2)
                         if refine is not None:
                             transform = compose_affine_transforms(transform, refine)
@@ -1202,6 +1244,7 @@ def _write_aligned_fits(img: ImageData, out_path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@torch.no_grad()
 def _gpu_sigma_clip(
     stack: torch.Tensor,
     kappa_low: float,
@@ -1232,6 +1275,7 @@ def _gpu_sigma_clip(
     return result, n_rejected
 
 
+@torch.no_grad()
 def _gpu_percentile_clip(
     stack: torch.Tensor,
     pct_low: float,
@@ -1248,6 +1292,7 @@ def _gpu_percentile_clip(
     return result, n_rejected
 
 
+@torch.no_grad()
 def _gpu_min_max(
     stack: torch.Tensor,
     n_reject: int,
@@ -1437,6 +1482,15 @@ def stack_from_paths(
         output = np.zeros((h, w), dtype=np.float32)
     total_rejected = 0
 
+    # Pre-normalise per-frame weights once (reused every tile)
+    _tile_weights_np: np.ndarray | None = None
+    _tile_weights_t: "torch.Tensor | None" = None
+    if params.frame_weights is not None:
+        _tile_weights_np = np.asarray(params.frame_weights, dtype=np.float32)
+        _tile_weights_np = _tile_weights_np / _tile_weights_np.sum()
+        if use_gpu:
+            _tile_weights_t = torch.from_numpy(_tile_weights_np).to(dm.device)
+
     # 5. Process tiles
     for tile_idx in range(n_tiles):
         y0 = tile_idx * tile_h
@@ -1482,12 +1536,20 @@ def stack_from_paths(
             elif params.rejection == RejectionMethod.MIN_MAX:
                 result_t, n_rej = _gpu_min_max(t, params.min_max_reject)
             else:  # NONE
-                result_t = t.mean(dim=0)
+                if (params.integration == IntegrationMethod.WEIGHTED_AVERAGE
+                        and _tile_weights_t is not None):
+                    # Broadcast weights over spatial dims: (N,) → (N, 1, ..., 1)
+                    w_view = _tile_weights_t.view(-1, *([1] * (t.dim() - 1)))
+                    result_t = (t * w_view).sum(dim=0)
+                else:
+                    result_t = t.mean(dim=0)
                 n_rej = 0
 
             total_rejected += n_rej
             tile_result = result_t.cpu().numpy()
             del t, result_t
+            if use_gpu and tile_idx % 10 == 9:
+                dm.empty_cache()
         else:
             # CPU fallback (ESD and others not yet on GPU)
             if params.rejection == RejectionMethod.SIGMA_CLIP:
@@ -1507,7 +1569,7 @@ def stack_from_paths(
 
             tile_mask = _get_mask(masked, tile_stack.shape)
             total_rejected += int(np.sum(tile_mask))
-            tile_result = _integrate(masked, params.integration)
+            tile_result = _integrate(masked, params.integration, weights=_tile_weights_np)
             del tile_stack, masked
 
         if is_color:
@@ -1529,8 +1591,7 @@ def stack_from_paths(
 
     # Release GPU memory back to OS; PyTorch caches it otherwise
     if use_gpu:
-        import gc as _gc
-        _gc.collect()
+        gc.collect()
         torch.cuda.empty_cache()
 
     # Load header from first file for metadata
@@ -1646,7 +1707,8 @@ def stack_images(
 
     # 5. Integration
     progress(0.85, "Integrating frames...")
-    result = _integrate(masked_data, params.integration)
+    _weights = np.asarray(params.frame_weights, dtype=np.float32) if params.frame_weights else None
+    result = _integrate(masked_data, params.integration, weights=_weights)
 
     # 6. Finalize
     result = np.clip(result, 0, 1).astype(np.float32)

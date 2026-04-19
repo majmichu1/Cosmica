@@ -9,6 +9,9 @@ mean quality score are rejected.
 from __future__ import annotations
 
 import logging
+import multiprocessing as mp
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Callable
 
@@ -21,6 +24,14 @@ from cosmica.core.stretch import compute_channel_stats
 log = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[float, str], None]
+
+# ProcessPoolExecutor context: forkserver on Linux gives fork-speed startup without
+# inheriting the parent process's CUDA handles (which would be UB in child processes).
+# Falls back to spawn on Windows/macOS where forkserver is unavailable.
+try:
+    _MP_CTX: mp.context.BaseContext = mp.get_context("forkserver")
+except ValueError:
+    _MP_CTX = mp.get_context("spawn")
 
 
 def _noop_progress(fraction: float, message: str) -> None:
@@ -140,8 +151,10 @@ def _measure_frame(file_path: str) -> dict:
         image_data = load_image(file_path)
         data = image_data.data
 
-        # Measure PSF (FWHM + eccentricity)
-        psf = measure_psf(data)
+        # Measure PSF (FWHM + eccentricity).  force_cpu=True so parallel threads
+        # don't contend on CUDA dispatch (Python GIL is held during kernel launch,
+        # serializing the pool).  Pure numpy/scipy releases the GIL → true multi-core.
+        psf = measure_psf(data, force_cpu=True)
         fwhm = psf.fwhm
         eccentricity = psf.ellipticity
         n_stars = psf.n_stars_used
@@ -184,6 +197,7 @@ def score_subframes(
     frame_paths: list[str],
     params: SubframeSelectorParams | None = None,
     progress: ProgressCallback | None = None,
+    frame_callback: Callable[[int, dict], None] | None = None,
 ) -> list[SubframeScore]:
     """Score and rank a list of light frames for quality-based rejection.
 
@@ -202,6 +216,9 @@ def score_subframes(
         Scoring and rejection parameters.  Defaults are used if *None*.
     progress : callable, optional
         Progress callback with signature ``(fraction: float, message: str)``.
+    frame_callback : callable, optional
+        Called as each frame finishes measuring with ``(idx, metrics_dict)``
+        so callers can stream per-frame raw metrics before global normalisation.
 
     Returns
     -------
@@ -222,13 +239,34 @@ def score_subframes(
 
     log.info("Scoring %d subframes...", n_frames)
 
-    # -- Phase 1: Measure each frame ------------------------------------------
-    measurements: list[dict] = []
-    for idx, path in enumerate(frame_paths):
-        progress(idx / n_frames * 0.8, f"Measuring frame {idx + 1}/{n_frames}...")
-        log.debug("Measuring: %s", path)
-        m = _measure_frame(path)
-        measurements.append(m)
+    # -- Phase 1: Measure each frame (parallel, multi-process) ----------------
+    # ProcessPoolExecutor gives each worker its own Python interpreter and its
+    # own GIL.  This is essential here because scipy.optimize.curve_fit calls
+    # the Python callback _gaussian_2d on every MINPACK function evaluation —
+    # that callback holds the GIL, so ThreadPoolExecutor workers would all
+    # serialize on it.  Separate processes bypass this entirely.
+    # _measure_frame is a module-level function with str input / dict output,
+    # so it's trivially picklable for cross-process IPC.
+    n_workers = min(os.cpu_count() or 4, n_frames)
+    measurements: list[dict] = [{}] * n_frames
+    completed = 0
+
+    with ProcessPoolExecutor(max_workers=n_workers, mp_context=_MP_CTX) as pool:
+        futures = {pool.submit(_measure_frame, path): idx for idx, path in enumerate(frame_paths)}
+        for future in as_completed(futures):
+            idx = futures[future]
+            try:
+                measurements[idx] = future.result()
+            except Exception:
+                log.exception("Failed to measure frame at index %d", idx)
+                measurements[idx] = {
+                    "fwhm": 999.0, "eccentricity": 1.0,
+                    "snr": 0.0, "background": 0.0, "n_stars": 0,
+                }
+            completed += 1
+            if frame_callback is not None:
+                frame_callback(idx, measurements[idx])
+            progress(completed / n_frames * 0.8, f"Measured {completed}/{n_frames} frames…")
 
     progress(0.8, "Computing quality scores...")
 

@@ -97,6 +97,8 @@ def debayer(
         pattern = "RGGB"
 
     method = method.lower()
+    if method == "superpixel":
+        return _debayer_superpixel(data, pattern)
     if method not in ("bilinear", "vng", "ea"):
         method = "vng"
 
@@ -132,3 +134,36 @@ def debayer(
         data.shape, result.shape, pattern, method,
     )
     return result.astype(np.float32)
+
+
+def _debayer_superpixel(data: np.ndarray, pattern: str) -> np.ndarray:
+    """Superpixel (2×2 bin) debayer — each 2×2 Bayer quad → one color pixel.
+
+    Output is half the spatial resolution but has no interpolation artefacts
+    (each channel uses only its actual sensor pixels).  Useful for severely
+    underexposed frames where interpolation noise would dominate.
+    """
+    h, w = data.shape
+    h2, w2 = h // 2, w // 2
+
+    # Map pattern to the (row, col) offsets of each colour in the 2×2 quad
+    _offsets = {
+        "RGGB": {"R": (0, 0), "G1": (0, 1), "G2": (1, 0), "B": (1, 1)},
+        "BGGR": {"B": (0, 0), "G1": (0, 1), "G2": (1, 0), "R": (1, 1)},
+        "GRBG": {"G1": (0, 0), "R": (0, 1), "B": (1, 0), "G2": (1, 1)},
+        "GBRG": {"G1": (0, 0), "B": (0, 1), "R": (1, 0), "G2": (1, 1)},
+    }
+    offs = _offsets.get(pattern, _offsets["RGGB"])
+
+    r0, c0 = offs["R"]
+    g1r, g1c = offs["G1"]
+    g2r, g2c = offs["G2"]
+    br, bc = offs["B"]
+
+    out = np.empty((3, h2, w2), dtype=np.float32)
+    out[0] = data[r0::2, c0::2][:h2, :w2]  # R
+    out[1] = (data[g1r::2, g1c::2][:h2, :w2] + data[g2r::2, g2c::2][:h2, :w2]) * 0.5  # G avg
+    out[2] = data[br::2, bc::2][:h2, :w2]  # B
+
+    log.debug("Superpixel debayer %s → shape %s", data.shape, out.shape)
+    return out

@@ -105,6 +105,7 @@ def auto_stretch(
     return result
 
 
+@torch.no_grad()
 def _stretch_channel_gpu(channel: np.ndarray, params: StretchParams) -> np.ndarray:
     """Stretch a single channel using GPU acceleration."""
     stats = compute_channel_stats(channel)
@@ -118,6 +119,69 @@ def _stretch_channel_gpu(channel: np.ndarray, params: StretchParams) -> np.ndarr
     stretched_np = stretched_t.cpu().numpy()
 
     return midtone_transfer_function(stretched_np, params.midtone)
+
+
+@dataclass
+class ArcsinhStretchParams:
+    """Parameters for arcsinh stretch.
+
+    Arcsinh stretch (Lupton et al. 2004) is a linear-to-arcsinh ramp that
+    compresses bright stars less aggressively than log while still revealing
+    faint nebulosity. Widely used in SDSS, DECaLS, and amateur astronomy.
+    """
+
+    stretch_factor: float = 10.0  # controls how aggressively bright features are compressed
+    black_point: float = 0.0  # input level mapped to zero
+    linked: bool = True  # link RGB channels
+
+
+def arcsinh_stretch(
+    data: np.ndarray,
+    params: ArcsinhStretchParams | None = None,
+) -> np.ndarray:
+    """Apply arcsinh stretch — GPU-accelerated.
+
+    Maps x → arcsinh(β·x) / arcsinh(β) where β = stretch_factor.
+    Result is renormalized to [0, 1].  Preserves star colours better
+    than a pure log stretch because arcsinh is linear near zero.
+    """
+    if params is None:
+        params = ArcsinhStretchParams()
+
+    dm = get_device_manager()
+
+    def _stretch_channel(t: "torch.Tensor", beta: float) -> "torch.Tensor":
+        shifted = (t - params.black_point).clamp(0.0, None)
+        if beta < 1e-6:
+            return shifted.clamp(0.0, 1.0)
+        norm = float(torch.asinh(torch.tensor(beta)))
+        if norm < 1e-12:
+            return shifted.clamp(0.0, 1.0)
+        return (torch.asinh(beta * shifted) / norm).clamp(0.0, 1.0)
+
+    beta = float(params.stretch_factor)
+
+    with torch.no_grad():
+        if data.ndim == 2:
+            t = dm.from_numpy(data)
+            out = _stretch_channel(t, beta)
+            return out.cpu().numpy().astype(np.float32)
+        else:
+            t = dm.from_numpy(data)  # (C, H, W)
+            if params.linked:
+                # Use luminance to derive a single stretch; apply to all channels
+                lum = t.mean(dim=0, keepdim=True)
+                norm = float(torch.asinh(torch.tensor(beta)))
+                if norm < 1e-12:
+                    return data.copy()
+                scale_map = (torch.asinh(beta * lum.clamp(0.0)) / norm) / (
+                    lum.clamp(1e-12)
+                )
+                shifted = (t - params.black_point).clamp(0.0, None)
+                out = (shifted * scale_map).clamp(0.0, 1.0)
+            else:
+                out = torch.stack([_stretch_channel(t[ch], beta) for ch in range(t.shape[0])])
+            return out.cpu().numpy().astype(np.float32)
 
 
 @dataclass
@@ -157,6 +221,7 @@ def generalized_hyperbolic_stretch(
     return result
 
 
+@torch.no_grad()
 def _ghs_channel_gpu(channel: np.ndarray, params: GHSParams) -> np.ndarray:
     """Apply GHS to a single channel using GPU acceleration."""
     dm = get_device_manager()

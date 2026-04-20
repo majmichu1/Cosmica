@@ -144,7 +144,7 @@ class _FrameRow(QFrame):
         if selected:
             self.setStyleSheet(
                 f"QFrame {{ background-color: {ACCENT_DARK}; border: 1px solid {ACCENT};"
-                "border-radius: 5px; }}"
+                "border-radius: 5px; }"
             )
         else:
             self.setStyleSheet(
@@ -165,7 +165,7 @@ class _FrameRow(QFrame):
         if not self._selected:
             self.setStyleSheet(
                 f"QFrame {{ background-color: {BG_HOVER}; border: 1px solid transparent;"
-                "border-radius: 5px; }}"
+                "border-radius: 5px; }"
             )
         super().enterEvent(event)
 
@@ -189,7 +189,7 @@ class ProjectPanel(QWidget):
         super().__init__(parent)
         self.setMinimumWidth(200)
         self.setMaximumWidth(400)
-        self.setStyleSheet(f"background-color: {BG_SECONDARY};")
+        self.setStyleSheet(f"QWidget {{ background-color: {BG_SECONDARY}; }}")
 
         self._project: Project | None = None
         self._active_filter = "ALL"
@@ -209,7 +209,7 @@ class ProjectPanel(QWidget):
 
         # ── Header ────────────────────────────────────────────────────────────
         header = QWidget()
-        header.setStyleSheet(f"background-color: {BG_SECONDARY};")
+        header.setStyleSheet(f"QWidget#pp_header {{ background-color: {BG_SECONDARY}; }}")
         header_layout = QVBoxLayout(header)
         header_layout.setContentsMargins(12, 10, 12, 8)
         header_layout.setSpacing(6)
@@ -227,7 +227,7 @@ class ProjectPanel(QWidget):
         btn_new.setToolTip("New Project")
         btn_new.setStyleSheet(
             f"QPushButton {{ color: {TEXT_SECONDARY}; background: transparent; border: none;"
-            "font-size: 13px; }}"
+            "font-size: 13px; }"
             f"QPushButton:hover {{ color: {TEXT_PRIMARY}; }}"
         )
         btn_open = QPushButton("⌂")
@@ -265,7 +265,7 @@ class ProjectPanel(QWidget):
         btn_lights.setFixedHeight(26)
         btn_lights.setStyleSheet(
             f"QPushButton {{ background-color: {ACCENT}; color: #fff; border: none;"
-            "border-radius: 4px; font-size: 10px; font-weight: 600; }}"
+            "border-radius: 4px; font-size: 10px; font-weight: 600; }"
             f"QPushButton:hover {{ background-color: #3fb950; }}"
         )
         btn_lights.clicked.connect(lambda: self._import_frames(FrameType.LIGHT))
@@ -293,7 +293,7 @@ class ProjectPanel(QWidget):
         # ── Filter tabs ────────────────────────────────────────────────────────
         filter_bar = QWidget()
         filter_bar.setFixedHeight(30)
-        filter_bar.setStyleSheet(f"background-color: {BG_SECONDARY};")
+        filter_bar.setStyleSheet(f"QWidget {{ background-color: {BG_SECONDARY}; }}")
         filter_layout = QHBoxLayout(filter_bar)
         filter_layout.setContentsMargins(8, 0, 8, 0)
         filter_layout.setSpacing(0)
@@ -310,7 +310,7 @@ class ProjectPanel(QWidget):
 
         # ── Search ────────────────────────────────────────────────────────────
         search_wrap = QWidget()
-        search_wrap.setStyleSheet(f"background-color: {BG_SECONDARY};")
+        search_wrap.setStyleSheet(f"QWidget {{ background-color: {BG_SECONDARY}; }}")
         search_layout = QHBoxLayout(search_wrap)
         search_layout.setContentsMargins(8, 6, 8, 6)
         self._search_edit = QLineEdit()
@@ -319,7 +319,7 @@ class ProjectPanel(QWidget):
         self._search_edit.setStyleSheet(
             f"QLineEdit {{ background-color: {BG_TERTIARY}; color: {TEXT_PRIMARY};"
             f"border: 1px solid {BORDER}; border-radius: 5px; padding: 3px 8px;"
-            "font-size: 11px; }}"
+            "font-size: 11px; }"
             f"QLineEdit:focus {{ border-color: {ACCENT}; }}"
         )
         self._search_edit.textChanged.connect(self._on_search)
@@ -349,7 +349,7 @@ class ProjectPanel(QWidget):
 
         # ── Plate Solve section ───────────────────────────────────────────────
         plate_section = QWidget()
-        plate_section.setStyleSheet(f"background-color: {BG_SECONDARY};")
+        plate_section.setStyleSheet(f"QWidget {{ background-color: {BG_SECONDARY}; }}")
         plate_layout = QVBoxLayout(plate_section)
         plate_layout.setContentsMargins(8, 8, 8, 6)
         plate_layout.setSpacing(4)
@@ -385,7 +385,7 @@ class ProjectPanel(QWidget):
 
         # ── Stats section ─────────────────────────────────────────────────────
         stats_section = QWidget()
-        stats_section.setStyleSheet(f"background-color: {BG_SECONDARY};")
+        stats_section.setStyleSheet(f"QWidget {{ background-color: {BG_SECONDARY}; }}")
         stats_layout = QHBoxLayout(stats_section)
         stats_layout.setContentsMargins(8, 6, 8, 8)
         stats_layout.setSpacing(4)
@@ -416,7 +416,7 @@ class ProjectPanel(QWidget):
         self._hist_toggle = QPushButton("▶ History")
         self._hist_toggle.setStyleSheet(
             f"QPushButton {{ color: {TEXT_SECONDARY}; background: transparent; border: none;"
-            "font-size: 10px; text-align: left; padding: 4px 8px; }}"
+            "font-size: 10px; text-align: left; padding: 4px 8px; }"
             f"QPushButton:hover {{ color: {TEXT_PRIMARY}; }}"
         )
         self._hist_toggle.clicked.connect(self._toggle_history)
@@ -447,7 +447,7 @@ class ProjectPanel(QWidget):
         return (
             f"QPushButton {{ padding: 4px 0; font-size: 10px; font-weight: 600;"
             f"background: none; border: none; border-bottom: {border}; color: {color};"
-            "border-radius: 0; }}"
+            "border-radius: 0; }"
             f"QPushButton:hover {{ color: {TEXT_PRIMARY}; }}"
         )
 

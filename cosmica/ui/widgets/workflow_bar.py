@@ -146,6 +146,7 @@ class _StepButton(QPushButton):
         lay.setSpacing(0)
 
         col = QWidget()
+        col.setStyleSheet("background-color: transparent;")
         col_lay = __import__(
             "PyQt6.QtWidgets", fromlist=["QVBoxLayout"]
         ).QVBoxLayout(col)
@@ -160,13 +161,7 @@ class _StepButton(QPushButton):
         self._check_name.addWidget(self._name_lbl)
         self._check_name.addStretch()
 
-        self._sub_lbl = QLabel(subtitle)
-        self._sub_lbl.setStyleSheet(
-            f"color: {TEXT_SECONDARY}; font-size: 9px;"
-        )
-
         col_lay.addLayout(self._check_name)
-        col_lay.addWidget(self._sub_lbl)
         lay.addWidget(col)
 
     def set_state(self, done: bool, current: bool, future: bool) -> None:
@@ -176,21 +171,13 @@ class _StepButton(QPushButton):
             else TEXT_SECONDARY if not future
             else DIM
         )
-        sub_color = ACCENT_HOVER if current else TEXT_SECONDARY
-        border_b  = f"border-bottom: 2px solid {ACCENT};" if current else \
-                    "border-bottom: 2px solid transparent;"
-
         self._name_lbl.setStyleSheet(
-            f"color: {name_color}; font-size: 11px; font-weight: 600;"
-        )
-        self._sub_lbl.setStyleSheet(
-            f"color: {sub_color}; font-size: 9px;"
+            f"color: {name_color}; font-size: 11px; font-weight: 600; background-color: transparent;"
         )
         self._check_lbl.setText("✓ " if done else "")
         self.setStyleSheet(f"""
             QPushButton {{
                 background: transparent; border: none;
-                {border_b}
             }}
             QPushButton:hover {{ background: {BG_HOVER}; }}
         """)

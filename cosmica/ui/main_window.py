@@ -1167,7 +1167,8 @@ class MainWindow(QMainWindow):
     def _update_vram_label(self):
         try:
             import psutil as _psutil
-            ram_gb = _psutil.virtual_memory().used / 1024**3
+            vm = _psutil.virtual_memory()
+            ram_gb = (vm.total - vm.available) / 1024**3
             self._ram_chip_label.setText(f"RAM {ram_gb:.1f} GB")
         except Exception:
             pass
@@ -1176,9 +1177,10 @@ class MainWindow(QMainWindow):
             dm = get_device_manager()
             if dm.device.type == "cuda":
                 import torch as _torch
-                alloc = _torch.cuda.memory_allocated(dm.device) / 1024**3
-                total = _torch.cuda.get_device_properties(dm.device).total_memory / 1024**3
-                vram_text = f"VRAM {alloc:.1f}/{total:.1f} GB"
+                free, total_bytes = _torch.cuda.mem_get_info(dm.device)
+                total = total_bytes / 1024**3
+                used = (total_bytes - free) / 1024**3
+                vram_text = f"VRAM {used:.1f}/{total:.1f} GB"
                 self._vram_label.setText(vram_text)
                 _gpu_raw = dm.info.name
                 for _pfx in ("NVIDIA GeForce ", "NVIDIA ", "AMD Radeon ", "AMD ", "Intel "):

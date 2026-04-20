@@ -57,7 +57,8 @@ QWidget {{
 /* Transparent background on non-container widgets so parent backgrounds
    show through correctly — prevents the "highlight block" artefact */
 QLabel, QCheckBox, QRadioButton {{
-    background: transparent;
+    background-color: transparent;
+    border: none;
 }}
 
 /* ── Menu Bar ───────────────────────────────────────── */
@@ -235,10 +236,11 @@ QTabBar QToolButton {{
     border: 1px solid {BORDER};
     border-radius: 3px;
     color: {TEXT_PRIMARY};
-    min-width: 18px;
-    min-height: 18px;
+    width: 20px;
+    height: 20px;
     padding: 0px;
-    margin: 2px 1px;
+    margin: 2px 2px;
+    font-size: 11px;
 }}
 
 QTabBar QToolButton:hover {{

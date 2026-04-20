@@ -69,16 +69,17 @@ QTabBar::tab:hover:!selected {{
     color: {TEXT_PRIMARY};
 }}
 QTabBar::scroller {{
-    width: 22px;
+    width: 24px;
 }}
 QTabBar QToolButton {{
-    background: {BG_TERTIARY}; border: 1px solid {BORDER};
+    background-color: {BG_TERTIARY}; border: 1px solid {BORDER};
     border-radius: 3px; color: {TEXT_PRIMARY};
-    min-width: 18px; min-height: 18px;
-    padding: 0px; margin: 2px 1px;
+    width: 20px; height: 20px;
+    padding: 0px; margin: 2px 2px;
+    font-size: 11px;
 }}
 QTabBar QToolButton:hover {{
-    background: {BG_HOVER}; color: #ffffff;
+    background-color: {BG_HOVER}; color: #ffffff;
 }}
 """
 
@@ -1099,6 +1100,11 @@ class ToolsPanel(QWidget):
             midtone=self._ht_midtone_slider.value(),
             white_point=float(self._ht_white_spin.value()),
         )
+
+    def reset_histogram_transform_params(self) -> None:
+        self._ht_black_spin.setValue(0.0)
+        self._ht_midtone_slider.setValue(0.5)
+        self._ht_white_spin.setValue(1.0)
 
     def get_background_params(self) -> BackgroundParams:
         return BackgroundParams(

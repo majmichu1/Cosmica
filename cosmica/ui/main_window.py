@@ -2678,8 +2678,8 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot()
     def _on_preview_cancelled(self):
-        """Clear the split preview."""
-        self._canvas.set_split_mode(False)
+        """Clear the split preview and restore normal view."""
+        self._canvas.set_view_mode("after")
         self._canvas.clear_after_image()
         self._preview_indicator.setText("")
 
@@ -2892,6 +2892,7 @@ class MainWindow(QMainWindow):
                 fwhm_x=result.fwhm_x, fwhm_y=result.fwhm_y,
                 theta=result.theta, fwhm_std=result.fwhm_std,
             )
+            self._tools_panel.set_psf_fwhm(result.fwhm)
             self._log_panel.log(
                 f"PSF: FWHM={result.fwhm:.2f}px  ellipticity={result.ellipticity:.2f}"
                 f"  ({result.n_stars_used} stars)",

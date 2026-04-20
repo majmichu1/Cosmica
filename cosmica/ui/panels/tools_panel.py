@@ -24,7 +24,7 @@ from cosmica.core.color_calibration import ColorCalibrationParams
 from cosmica.core.color_tools import ColorAdjustParams, SCNRParams
 from cosmica.core.cosmetic import CosmeticParams
 from cosmica.core.curves import CurvesParams
-from cosmica.core.deconvolution import DeconvolutionParams
+from cosmica.core.deconvolution import DeconvolutionParams, SpatialDeconvParams
 from cosmica.core.denoise import DenoiseParams
 from cosmica.core.filters import UnsharpMaskParams
 from cosmica.core.histogram_transform import HistogramTransformParams
@@ -748,12 +748,20 @@ class ToolsPanel(QWidget):
         self._deconv_method_combo = dec.add_combo(
             "Method", ["Richardson-Lucy", "Blind (Spatial)", "Wiener"]
         )
-        self._deconv_iter = dec.add_slider("Iterations", 30, 5, 100, 1, 0)
+        self._deconv_psf_spin   = dec.add_spin("PSF FWHM (px)", 0.5, 20.0, 3.0, 0.1, 1)
+        self._deconv_iter       = dec.add_slider("Iterations", 50, 5, 200, 1, 0)
+        self._deconv_reg        = dec.add_spin("Regularization", 0.0, 0.1, 0.001, 0.001, 4)
+        self._deconv_deringing  = dec.add_check("Deringing protection", True)
+        self._deconv_dering_amt = dec.add_slider("Deringing amount", 0.5, 0.0, 1.0, 0.05, 2)
         btns = dec.add_btn_row([("Measure PSF", True), ("Star Mask", True)])
         btns[0].clicked.connect(self.measure_psf.emit)
         btns[1].clicked.connect(self.open_star_mask_dialog.emit)
         self._deconv_preview_check = dec.add_check("Live split preview")
-        self._deconv_iter.value_changed.connect(
+        for _w in (self._deconv_iter, self._deconv_dering_amt):
+            _w.value_changed.connect(
+                lambda _: self._fire_preview("deconvolution", self._deconv_preview_check)
+            )
+        self._deconv_psf_spin.valueChanged.connect(
             lambda _: self._fire_preview("deconvolution", self._deconv_preview_check)
         )
         self._deconv_preview_check.toggled.connect(
@@ -1241,6 +1249,27 @@ class ToolsPanel(QWidget):
             protect_stars=self._ai_star_protect.isChecked(),
             tiled=self._ai_tiled_check.isChecked(),
         )
+
+    def get_deconvolution_params(self) -> "DeconvolutionParams | SpatialDeconvParams":
+        method = self._deconv_method_combo.currentText()
+        iters = int(self._deconv_iter.value())
+        reg = float(self._deconv_reg.value())
+        if method == "Blind (Spatial)":
+            return SpatialDeconvParams(
+                iterations=iters,
+                regularization=reg,
+            )
+        return DeconvolutionParams(
+            psf_fwhm=float(self._deconv_psf_spin.value()),
+            iterations=iters,
+            regularization=reg,
+            deringing=self._deconv_deringing.isChecked(),
+            deringing_amount=self._deconv_dering_amt.value(),
+        )
+
+    def set_psf_fwhm(self, fwhm: float) -> None:
+        """Auto-populate the PSF FWHM field from a Measure PSF result."""
+        self._deconv_psf_spin.setValue(round(fwhm, 1))
 
     def get_denoise_params(self) -> DenoiseParams:
         return DenoiseParams(

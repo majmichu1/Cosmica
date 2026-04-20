@@ -673,6 +673,14 @@ class ToolsPanel(QWidget):
             ["Average Neutral", "Maximum Neutral", "Additive-Subtractive Mask"],
         )
         self._scnr_amount = scnr.add_slider("Amount", 0.5, 0.0, 1.0, 0.01, 2)
+        self._scnr_preview_check = scnr.add_check("Live split preview")
+        self._scnr_amount.value_changed.connect(
+            lambda _: self._fire_preview("scnr", self._scnr_preview_check)
+        )
+        self._scnr_preview_check.toggled.connect(
+            lambda on: self.preview_requested.emit("scnr") if on
+            else self.preview_cancelled.emit()
+        )
         scnr.add_run("▶ Apply SCNR", self.run_scnr.emit)
         lay.addWidget(scnr)
 
@@ -744,6 +752,14 @@ class ToolsPanel(QWidget):
         btns = dec.add_btn_row([("Measure PSF", True), ("Star Mask", True)])
         btns[0].clicked.connect(self.measure_psf.emit)
         btns[1].clicked.connect(self.open_star_mask_dialog.emit)
+        self._deconv_preview_check = dec.add_check("Live split preview")
+        self._deconv_iter.value_changed.connect(
+            lambda _: self._fire_preview("deconvolution", self._deconv_preview_check)
+        )
+        self._deconv_preview_check.toggled.connect(
+            lambda on: self.preview_requested.emit("deconvolution") if on
+            else self.preview_cancelled.emit()
+        )
         dec.add_run("▶ Apply Deconvolution", self.run_deconvolution.emit)
         lay.addWidget(dec)
 
@@ -787,6 +803,15 @@ class ToolsPanel(QWidget):
         self._denoise_amount     = dnz.add_slider("Amount",     0.5, 0.0, 1.0, 0.05, 2)
         self._denoise_lum        = dnz.add_slider("Luminance",  0.7, 0.0, 1.0, 0.05, 2)
         self._denoise_chrom      = dnz.add_slider("Chrominance",0.5, 0.0, 1.0, 0.05, 2)
+        self._denoise_preview_check = dnz.add_check("Live split preview")
+        for _sl in (self._denoise_amount, self._denoise_lum, self._denoise_chrom):
+            _sl.value_changed.connect(
+                lambda _, s=self._denoise_preview_check: self._fire_preview("denoise", s)
+            )
+        self._denoise_preview_check.toggled.connect(
+            lambda on: self.preview_requested.emit("denoise") if on
+            else self.preview_cancelled.emit()
+        )
         dnz.add_run("▶ Apply Denoise", self.run_denoise.emit)
         lay.addWidget(dnz)
 
@@ -809,6 +834,15 @@ class ToolsPanel(QWidget):
         for i in range(5):
             s = wav.add_slider(f"Layer {i+1}", defaults[i], 0.0, 2.0, 0.1, 1)
             self._wavelet_layer_sliders.append(s)
+        self._wav_preview_check = wav.add_check("Live split preview")
+        for _sl in self._wavelet_layer_sliders:
+            _sl.value_changed.connect(
+                lambda _, s=self._wav_preview_check: self._fire_preview("wavelet", s)
+            )
+        self._wav_preview_check.toggled.connect(
+            lambda on: self.preview_requested.emit("wavelet") if on
+            else self.preview_cancelled.emit()
+        )
         btns = wav.add_btn_row([("▶ Wavelets", False), ("▶ MLT", False)])
         btns[0].clicked.connect(self.run_wavelet_sharpen.emit)
         btns[1].clicked.connect(self.run_mlt.emit)
@@ -818,6 +852,15 @@ class ToolsPanel(QWidget):
         clh = CollapsibleSection("Local Contrast / CLAHE")
         self._clahe_clip  = clh.add_slider("Clip limit", 2.0, 0.5, 10.0, 0.5, 1)
         self._clahe_tiles = clh.add_slider("Tile size",  8,   4,   32,   1,   0)
+        self._clahe_preview_check = clh.add_check("Live split preview")
+        for _sl in (self._clahe_clip, self._clahe_tiles):
+            _sl.value_changed.connect(
+                lambda _, s=self._clahe_preview_check: self._fire_preview("local_contrast", s)
+            )
+        self._clahe_preview_check.toggled.connect(
+            lambda on: self.preview_requested.emit("local_contrast") if on
+            else self.preview_cancelled.emit()
+        )
         clh.add_run("▶ Apply CLAHE", self.run_local_contrast.emit)
         lay.addWidget(clh)
 
@@ -826,6 +869,15 @@ class ToolsPanel(QWidget):
         self._um_radius    = um.add_slider("Radius (px)", 1.5, 0.5, 10.0, 0.5, 1)
         self._um_amount    = um.add_slider("Amount",      0.5, 0.0,  2.0, 0.05, 2)
         self._um_threshold = um.add_slider("Threshold",   0.0, 0.0,  0.1, 0.005, 3)
+        self._um_preview_check = um.add_check("Live split preview")
+        for _sl in (self._um_radius, self._um_amount, self._um_threshold):
+            _sl.value_changed.connect(
+                lambda _, s=self._um_preview_check: self._fire_preview("unsharp_mask", s)
+            )
+        self._um_preview_check.toggled.connect(
+            lambda on: self.preview_requested.emit("unsharp_mask") if on
+            else self.preview_cancelled.emit()
+        )
         um.add_run("▶ Apply Unsharp Mask", self.run_unsharp_mask.emit)
         lay.addWidget(um)
 

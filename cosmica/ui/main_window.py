@@ -715,12 +715,12 @@ class MainWindow(QMainWindow):
                 btn.setShortcut(shortcut)
             return btn
 
-        undo_btn = _tbtn("⎌", "Undo  Ctrl+Z", "Ctrl+Z")
+        undo_btn = _tbtn("⎌", "Undo  Ctrl+Z")
         undo_btn.clicked.connect(self._undo)
         tb.addWidget(undo_btn)
         self._tb_undo_btn = undo_btn
 
-        redo_btn = _tbtn("↷", "Redo  Ctrl+Shift+Z", "Ctrl+Shift+Z")
+        redo_btn = _tbtn("↷", "Redo  Ctrl+Shift+Z")
         redo_btn.clicked.connect(self._redo)
         tb.addWidget(redo_btn)
 
@@ -1645,7 +1645,8 @@ class MainWindow(QMainWindow):
         geometric=True for ops that only change image extent (crop/rotate/flip/resize):
         those should re-stretch from the result's own statistics, not the pre-op reference.
         """
-        self._canvas.capture_before()  # save current render for Before/After compare
+        self._on_preview_cancelled()    # clear any live split preview before replacing image
+        self._canvas.capture_before()   # save current render for Before/After compare
         before = self._current_image
         # For pixel-value operations, anchor the display stretch to the pre-op image so
         # the executed result matches the live-preview brightness exactly.
@@ -2678,6 +2679,7 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def _on_preview_cancelled(self):
         """Clear the split preview."""
+        self._canvas.set_split_mode(False)
         self._canvas.clear_after_image()
         self._preview_indicator.setText("")
 

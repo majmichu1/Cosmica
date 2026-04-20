@@ -485,6 +485,7 @@ class ToolsPanel(QWidget):
         self._shadow_spin = aut.add_spin("Shadow clip", -10.0, 0.0, -2.8, 0.1, 1)
         self._linked_check = aut.add_check("Link RGB channels", True)
         self._split_check  = aut.add_check("Before/After split preview")
+        self._split_check.toggled.connect(lambda _: self.stretch_params_changed.emit())
         btns = aut.add_btn_row([("▶ Apply Stretch", False), ("Reset", True)])
         btns[0].clicked.connect(self.run_stretch.emit)
         btns[1].clicked.connect(lambda: self._midtone_slider.setValue(0.25))
@@ -501,6 +502,17 @@ class ToolsPanel(QWidget):
         )
         self._arcsinh_bp_spin = arc.add_spin("Black point", 0.0, 0.5, 0.0, 0.001, 4)
         self._arcsinh_linked_check = arc.add_check("Linked RGB", True)
+        self._arcsinh_preview_check = arc.add_check("Live split preview")
+        self._arcsinh_factor_spin.valueChanged.connect(
+            lambda _: self._fire_preview("arcsinh_stretch", self._arcsinh_preview_check)
+        )
+        self._arcsinh_bp_spin.valueChanged.connect(
+            lambda _: self._fire_preview("arcsinh_stretch", self._arcsinh_preview_check)
+        )
+        self._arcsinh_preview_check.toggled.connect(
+            lambda on: self.preview_requested.emit("arcsinh_stretch") if on
+            else self.preview_cancelled.emit()
+        )
         btns = arc.add_btn_row([("▶ Apply Arcsinh Stretch", False), ("Reset", True)])
         btns[0].clicked.connect(self.run_arcsinh_stretch.emit)
         btns[1].clicked.connect(lambda: (
@@ -517,6 +529,19 @@ class ToolsPanel(QWidget):
         self._ghs_sp_spin = ghs.add_spin("Sym. point",    0.0,  1.0, 0.0, 0.05, 3)
         self._ghs_shadow_slider    = ghs.add_slider("Shadow prot.",    0.0, 0.0, 1.0, 0.01, 2)
         self._ghs_highlight_slider = ghs.add_slider("Highlight prot.", 0.0, 0.0, 1.0, 0.01, 2)
+        self._ghs_preview_check = ghs.add_check("Live split preview")
+        for _ghs_spin in (self._ghs_d_spin, self._ghs_b_spin, self._ghs_sp_spin):
+            _ghs_spin.valueChanged.connect(
+                lambda _, s=self._ghs_preview_check: self._fire_preview("ghs", s)
+            )
+        for _ghs_sl in (self._ghs_shadow_slider, self._ghs_highlight_slider):
+            _ghs_sl.value_changed.connect(
+                lambda _, s=self._ghs_preview_check: self._fire_preview("ghs", s)
+            )
+        self._ghs_preview_check.toggled.connect(
+            lambda on: self.preview_requested.emit("ghs") if on
+            else self.preview_cancelled.emit()
+        )
         btns = ghs.add_btn_row([("▶ Apply GHS", False), ("Reset", True)])
         btns[0].clicked.connect(self.run_ghs.emit)
         lay.addWidget(ghs)
@@ -529,6 +554,20 @@ class ToolsPanel(QWidget):
         self._ht_white_spin  = ht.add_spin("White point", 0.01, 1.0, 1.0, 0.01, 3)
         self._ht_black_spin.valueChanged.connect(lambda _: self._emit_clip_points())
         self._ht_white_spin.valueChanged.connect(lambda _: self._emit_clip_points())
+        self._ht_preview_check = ht.add_check("Live split preview")
+        self._ht_black_spin.valueChanged.connect(
+            lambda _: self._fire_preview("histogram_transform", self._ht_preview_check)
+        )
+        self._ht_midtone_slider.value_changed.connect(
+            lambda _: self._fire_preview("histogram_transform", self._ht_preview_check)
+        )
+        self._ht_white_spin.valueChanged.connect(
+            lambda _: self._fire_preview("histogram_transform", self._ht_preview_check)
+        )
+        self._ht_preview_check.toggled.connect(
+            lambda on: self.preview_requested.emit("histogram_transform") if on
+            else self.preview_cancelled.emit()
+        )
         btns = ht.add_btn_row([("▶ Apply HT", False), ("Reset", True)])
         btns[0].clicked.connect(self.run_histogram_transform.emit)
         lay.addWidget(ht)
@@ -979,6 +1018,10 @@ class ToolsPanel(QWidget):
 
     # ── Internal helpers ──────────────────────────────────
 
+    def _fire_preview(self, tool_name: str, check: "QCheckBox") -> None:
+        if check.isChecked():
+            self.preview_requested.emit(tool_name)
+
     def _emit_clip_points(self):
         self.clip_points_changed.emit(
             float(self._ht_black_spin.value()),
@@ -1264,6 +1307,10 @@ class ToolsPanel(QWidget):
         )
 
     # ── Compatibility properties used by main_window ──────
+    @property
+    def split_preview_enabled(self) -> bool:
+        return self._split_check.isChecked()
+
     @property
     def curve_editor(self) -> "CurveEditor":
         return self._curve_editor

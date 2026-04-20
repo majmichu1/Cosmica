@@ -408,9 +408,9 @@ class ToolsPanel(QWidget):
         btn_grid = bg.add_run(
             "⊞ Add Auto-Grid Samples",
             lambda: self.add_bg_grid.emit(
-                self._bg_grid_rows_spin.value(),
-                self._bg_grid_cols_spin.value(),
-                self._bg_box_size_spin.value(),
+                int(self._bg_grid_rows_spin.value()),
+                int(self._bg_grid_cols_spin.value()),
+                int(self._bg_box_size_spin.value()),
             ),
             flat=True,
         )

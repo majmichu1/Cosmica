@@ -267,7 +267,7 @@ def styled_check(label: str, checked: bool = False) -> QCheckBox:
     cb = QCheckBox(label)
     cb.setChecked(checked)
     cb.setStyleSheet(f"""
-        QCheckBox {{ color: {TEXT_PRIMARY}; font-size: 12px; spacing: 6px; }}
+        QCheckBox {{ color: {TEXT_PRIMARY}; font-size: 12px; spacing: 6px; background-color: transparent; }}
         QCheckBox::indicator {{
             width: 14px; height: 14px;
             border: 1.5px solid {BORDER}; border-radius: 3px;

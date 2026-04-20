@@ -228,7 +228,7 @@ QTabBar::tab:hover:!selected {{
 }}
 
 QTabBar::scroller {{
-    width: 22px;
+    width: 26px;
 }}
 
 QTabBar QToolButton {{
@@ -239,7 +239,7 @@ QTabBar QToolButton {{
     width: 20px;
     height: 20px;
     padding: 0px;
-    margin: 2px 2px;
+    margin: 2px 4px 2px 2px;
     font-size: 11px;
 }}
 

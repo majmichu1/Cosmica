@@ -124,18 +124,18 @@ class _FrameRow(QFrame):
                 snr_lbl = QLabel(
                     f'SNR <span style="color:#388bfd;font-family:monospace">{snr:.1f}</span>'
                 )
-                snr_lbl.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 10px;")
+                snr_lbl.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 10px; background-color: transparent;")
                 bot_row.addWidget(snr_lbl)
             if fwhm is not None:
                 fwhm_color = "#f85149" if fwhm > 4.0 else TEXT_PRIMARY
                 fwhm_lbl = QLabel(
                     f'FWHM <span style="color:{fwhm_color};font-family:monospace">{fwhm:.1f}"</span>'
                 )
-                fwhm_lbl.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 10px;")
+                fwhm_lbl.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 10px; background-color: transparent;")
                 bot_row.addWidget(fwhm_lbl)
             if fwhm is not None and fwhm > 4.0:
                 warn = QLabel("⚠")
-                warn.setStyleSheet("color: #d29922; font-size: 10px;")
+                warn.setStyleSheet("color: #d29922; font-size: 10px; background-color: transparent;")
                 bot_row.addWidget(warn)
             bot_row.addStretch()
             layout.addLayout(bot_row)
@@ -248,7 +248,7 @@ class ProjectPanel(QWidget):
         name_box_layout.setContentsMargins(8, 5, 8, 5)
         name_box_layout.setSpacing(1)
         self._proj_name_lbl = QLabel("No Project")
-        self._proj_name_lbl.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 10px;")
+        self._proj_name_lbl.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 10px; background-color: transparent;")
         self._proj_stats_lbl = QLabel("")
         self._proj_stats_lbl.setStyleSheet(
             f"color: {ACCENT}; font-size: 10px;"
@@ -355,7 +355,7 @@ class ProjectPanel(QWidget):
         plate_layout.setSpacing(4)
 
         plate_hdr = QLabel("PLATE SOLVE")
-        plate_hdr.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 10px; font-weight: 600;")
+        plate_hdr.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 10px; font-weight: 600; background-color: transparent;")
         plate_layout.addWidget(plate_hdr)
 
         plate_btn_row = QHBoxLayout()

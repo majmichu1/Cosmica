@@ -155,13 +155,19 @@ class _StepButton(QPushButton):
 
         self._check_name = QHBoxLayout()
         self._check_lbl  = QLabel("")
-        self._check_lbl.setStyleSheet(f"color: {ACCENT}; font-size: 10px;")
+        self._check_lbl.setStyleSheet(f"color: {ACCENT}; font-size: 10px; background-color: transparent;")
         self._name_lbl   = QLabel(name)
         self._check_name.addWidget(self._check_lbl)
         self._check_name.addWidget(self._name_lbl)
         self._check_name.addStretch()
 
+        self._sub_lbl = QLabel(subtitle)
+        self._sub_lbl.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; font-size: 9px; background-color: transparent;"
+        )
+
         col_lay.addLayout(self._check_name)
+        col_lay.addWidget(self._sub_lbl)
         lay.addWidget(col)
 
     def set_state(self, done: bool, current: bool, future: bool) -> None:
@@ -171,8 +177,12 @@ class _StepButton(QPushButton):
             else TEXT_SECONDARY if not future
             else DIM
         )
+        sub_color = ACCENT_HOVER if current else TEXT_SECONDARY
         self._name_lbl.setStyleSheet(
             f"color: {name_color}; font-size: 11px; font-weight: 600; background-color: transparent;"
+        )
+        self._sub_lbl.setStyleSheet(
+            f"color: {sub_color}; font-size: 9px; background-color: transparent;"
         )
         self._check_lbl.setText("✓ " if done else "")
         self.setStyleSheet(f"""

@@ -63,7 +63,7 @@ def make_label(text: str, color: str = TEXT_SECONDARY,
     weight = "600" if bold else "normal"
     family = f"font-family: {FONT_MONO};" if mono else ""
     lbl.setStyleSheet(
-        f"color: {color}; font-size: {size}px; font-weight: {weight}; {family}"
+        f"color: {color}; font-size: {size}px; font-weight: {weight}; background-color: transparent; {family}"
     )
     return lbl
 
@@ -84,7 +84,7 @@ class InfoLabel(QLabel):
         super().__init__(text, parent)
         self.setWordWrap(True)
         self.setStyleSheet(
-            f"color: {TEXT_SECONDARY}; font-size: 11px;"
+            f"color: {TEXT_SECONDARY}; font-size: 11px; background-color: transparent;"
         )
 
 
@@ -358,16 +358,14 @@ class CollapsibleSection(QWidget):
 
         self._title_lbl = QLabel(title)
         self._title_lbl.setStyleSheet(
-            f"color: {TEXT_PRIMARY}; font-size: 12px; font-weight: 600;"
-            "background: transparent; border: none;"
+            f"color: {TEXT_PRIMARY}; font-size: 12px; font-weight: 600; background-color: transparent; border: none;"
         )
         hdr_inner.addWidget(self._title_lbl)
         hdr_inner.addStretch()
 
         self._chevron = QLabel("▲" if default_open else "▼")
         self._chevron.setStyleSheet(
-            f"color: {TEXT_SECONDARY}; font-size: 9px;"
-            "background: transparent; border: none;"
+            f"color: {TEXT_SECONDARY}; font-size: 9px; background-color: transparent; border: none;"
         )
         hdr_inner.addWidget(self._chevron)
         outer.addWidget(self._hdr)

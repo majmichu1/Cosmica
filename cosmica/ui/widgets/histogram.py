@@ -53,7 +53,9 @@ class HistogramWidget(QWidget):
             return None
         channel_map = {"RGB": "luminance", "R": "red", "G": "green", "B": "blue", "L": "luminance"}
         key = channel_map.get(self._active_channel, "luminance")
-        counts = self._data.get(key) or self._data.get("gray")
+        counts = self._data.get(key)
+        if counts is None:
+            counts = self._data.get("gray")
         if counts is None:
             return None
         counts = counts.astype(np.float64)

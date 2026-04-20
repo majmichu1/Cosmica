@@ -40,7 +40,7 @@ from cosmica.core.vignette import VignetteParams
 from cosmica.core.wavelets import WaveletParams
 from cosmica.ui.widgets.curves_widget import CurveEditor
 from cosmica.ui.widgets.ui_kit import (
-    ACCENT, ACCENT_DARK, ACCENT_PURPLE, BG_PRIMARY, BG_SECONDARY,
+    ACCENT, ACCENT_DARK, ACCENT_HOVER, ACCENT_PURPLE, BG_HOVER, BG_PRIMARY, BG_SECONDARY,
     BG_TERTIARY, BLUE, BORDER, FONT_MONO, ORANGE, RED,
     TEXT_PRIMARY, TEXT_SECONDARY,
     CollapsibleSection, InfoLabel, RunBtn, SliderRow,

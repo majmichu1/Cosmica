@@ -106,7 +106,7 @@ from cosmica.ui.widgets.histogram import HistogramWidget
 from cosmica.ui.widgets.image_canvas import ImageCanvas
 from cosmica.ui.widgets.log_panel import LogPanel, QtLogHandler
 from cosmica.ui.widgets.tweaks_panel import TweaksPanel
-from cosmica.ui.widgets.workflow_bar import StepState, WorkflowBar
+from cosmica.ui.widgets.workflow_bar import WorkflowBar
 
 log = logging.getLogger(__name__)
 
@@ -197,6 +197,47 @@ def _score_and_stack_worker(
 
 class _ProcessingCancelled(BaseException):
     """Raised inside the worker thread when the user cancels an operation."""
+
+
+class _CosmicaLogo(QWidget):
+    """SVG-equivalent logo matching the HTML prototype."""
+
+    def __init__(self, size: int = 18, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(size, size)
+
+    def paintEvent(self, event):
+        from PyQt6.QtCore import QPointF, QRectF
+        from PyQt6.QtGui import QBrush, QColor, QPainter, QPen
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        cx, cy = w / 2, h / 2
+        accent = QColor("#2ea043")
+
+        def _pen(alpha: int, width: float) -> QPen:
+            c = QColor(accent)
+            c.setAlpha(alpha)
+            return QPen(c, width)
+
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        # Outer ring
+        p.setPen(_pen(255, 1.2))
+        r1 = cx - 0.5
+        p.drawEllipse(QRectF(cx - r1, cy - r1, r1 * 2, r1 * 2))
+        # Middle ring (60% opacity)
+        p.setPen(_pen(153, 0.8))
+        r2 = cx * 0.5
+        p.drawEllipse(QRectF(cx - r2, cy - r2, r2 * 2, r2 * 2))
+        # Crosshair lines (30% opacity)
+        p.setPen(_pen(77, 0.5))
+        p.drawLine(QPointF(0, cy), QPointF(w, cy))
+        p.drawLine(QPointF(cx, 0), QPointF(cx, h))
+        # Centre dot
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(accent))
+        p.drawEllipse(QRectF(cx - 1.5, cy - 1.5, 3, 3))
+        p.end()
 
 
 class ProcessingWorker(QThread):
@@ -346,15 +387,17 @@ class MainWindow(QMainWindow):
         left_layout = QHBoxLayout(left_corner)
         left_layout.setContentsMargins(8, 0, 8, 0)
         left_layout.setSpacing(6)
-        logo_label = QLabel("✦ Cosmica")
+        logo_widget = _CosmicaLogo(18)
+        logo_label = QLabel("Cosmica")
         logo_label.setStyleSheet(
-            "color: #e6edf3; font-size: 13px; font-weight: 700; letter-spacing: 0.5px;"
+            "color: #e6edf3; font-size: 13px; font-weight: 700; background: transparent;"
         )
         version_badge = QLabel(f"v{cosmica.__version__}")
         version_badge.setStyleSheet(
             "color: #8b949e; font-size: 10px; background: #21262d; border: 1px solid #30363d;"
             " border-radius: 4px; padding: 1px 5px;"
         )
+        left_layout.addWidget(logo_widget)
         left_layout.addWidget(logo_label)
         left_layout.addWidget(version_badge)
         menu.setCornerWidget(left_corner, Qt.Corner.TopLeftCorner)
@@ -705,7 +748,7 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
 
-        smart_btn = _tbtn("⚡ Smart", "Smart Processor  Ctrl+Shift+P", "Ctrl+Shift+P")
+        smart_btn = _tbtn("⚡", "Smart Processor  Ctrl+Shift+P", "Ctrl+Shift+P")
         smart_btn.clicked.connect(self._show_smart_processor_dialog)
         tb.addWidget(smart_btn)
 
@@ -916,7 +959,14 @@ class MainWindow(QMainWindow):
                 for _b in self._view_btn_group.buttons():
                     if _b is not toggled_btn:
                         _b.setChecked(False)
-            self._canvas.set_split_mode(split_tb.isChecked())
+            if after_tb.isChecked():
+                self._canvas.set_view_mode("after")
+            elif before_tb.isChecked():
+                self._canvas.set_view_mode("before")
+            elif split_tb.isChecked():
+                self._canvas.set_view_mode("split")
+            else:
+                self._canvas.set_view_mode("after")
 
         after_tb.toggled.connect(lambda c: _on_view_mode_toggled(after_tb, c))
         before_tb.toggled.connect(lambda c: _on_view_mode_toggled(before_tb, c))
@@ -1111,7 +1161,7 @@ class MainWindow(QMainWindow):
 
         self._vram_timer = QTimer(self)
         self._vram_timer.timeout.connect(self._update_vram_label)
-        self._vram_timer.start(3000)
+        self._vram_timer.start(1000)
         self._update_vram_label()
 
     def _update_vram_label(self):
@@ -1130,7 +1180,13 @@ class MainWindow(QMainWindow):
                 total = _torch.cuda.get_device_properties(dm.device).total_memory / 1024**3
                 vram_text = f"VRAM {alloc:.1f}/{total:.1f} GB"
                 self._vram_label.setText(vram_text)
-                gpu_text = f"● {dm.info.name[:20]}"
+                _gpu_raw = dm.info.name
+                for _pfx in ("NVIDIA GeForce ", "NVIDIA ", "AMD Radeon ", "AMD ", "Intel "):
+                    if _gpu_raw.startswith(_pfx):
+                        _gpu_raw = _gpu_raw[len(_pfx):]
+                        break
+                _gpu_short = " ".join(_gpu_raw.split()[:2])
+                gpu_text = f"● {_gpu_short}"
                 self._gpu_chip_label.setText(gpu_text)
                 self._cuda_badge.setText("CUDA active")
                 self._cuda_badge.show()
@@ -1456,18 +1512,16 @@ class MainWindow(QMainWindow):
 
     def _on_workflow_step_clicked(self, idx: int):
         """Switch to the tools panel tab corresponding to the workflow step."""
-        tab_map = {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6}
-        tab_idx = tab_map.get(idx, 0)
         tp = self._tools_panel
-        if hasattr(tp, "_tab_widget"):
-            tp._tab_widget.setCurrentIndex(min(tab_idx, tp._tab_widget.count() - 1))
+        if hasattr(tp, "_tabs"):
+            tp._tabs.setCurrentIndex(min(idx, tp._tabs.count() - 1))
 
     def _advance_workflow(self, completed_step: int):
         """Mark a step done and activate the next."""
-        self._workflow_bar.set_step_state(completed_step, StepState.DONE)
+        self._workflow_bar.mark_complete(completed_step)
         next_step = completed_step + 1
         if next_step <= 6:
-            self._workflow_bar.set_step_state(next_step, StepState.ACTIVE)
+            self._workflow_bar.set_current(next_step)
 
     # ---------- Image display ----------
 
@@ -1589,6 +1643,7 @@ class MainWindow(QMainWindow):
         geometric=True for ops that only change image extent (crop/rotate/flip/resize):
         those should re-stretch from the result's own statistics, not the pre-op reference.
         """
+        self._canvas.capture_before()  # save current render for Before/After compare
         before = self._current_image
         # For pixel-value operations, anchor the display stretch to the pre-op image so
         # the executed result matches the live-preview brightness exactly.
@@ -1626,9 +1681,8 @@ class MainWindow(QMainWindow):
         self._status_depth.setText(depth)
         ch = "RGB" if img.data.ndim == 3 and img.data.shape[0] == 3 else "Mono"
         self._status_channels.setText(ch)
-        idx = self._undo_stack.current_index()
-        cap = self._undo_stack.capacity()
-        self._status_history.setText(f"{idx} / {cap}")
+        idx = self._undo_stack.count
+        self._status_history.setText(f"{idx} steps")
 
     @pyqtSlot(int, int, list)
     def _update_pixel_readout(self, x: int, y: int, values: list):

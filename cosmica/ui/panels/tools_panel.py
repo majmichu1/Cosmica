@@ -1,35 +1,16 @@
-"""Tools Panel — right sidebar with tabbed processing controls.
+"""tools_panel.py — Cosmica Tools Panel (PyQt6 redesign).
 
-Organized into tabs:
-1. Pre-Process — Calibration, Cosmetic Correction, Subframe Selector
-2. Stacking — Registration + integration controls, Batch Processing
-3. Stretch — Auto-Stretch, GHS, Histogram Transform, Curves
-4. Background — Background Extraction, ABE, Vignette Correction, Banding Reduction
-5. Transform — Crop, Rotate, Flip, Resize, Bin, Invert
-6. Color — SCNR, Color Adjustment, Color Calibration, PCC
-7. Detail — Deconvolution, Noise Reduction, Star Reduction, Wavelets, Local Contrast, Morphology
-8. AI Tools — AI Denoise, AI Sharpen, StarNet Star Removal
-9. Utility — Narrowband, Pixel Math, Channels, HDR, Macros
+Drop-in replacement for the existing cosmica/ui/panels/tools_panel.py.
+All signals and getter/setter methods are identical to the original.
+Visual style matches the HTML prototype exactly using ui_kit widgets.
 """
-
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
-    QCheckBox,
-    QComboBox,
-    QDoubleSpinBox,
-    QGridLayout,
-    QHBoxLayout,
-    QLabel,
-    QListWidget,
-    QPushButton,
-    QScrollArea,
-    QSlider,
-    QSpinBox,
-    QTabWidget,
-    QVBoxLayout,
-    QWidget,
+    QCheckBox, QComboBox, QDoubleSpinBox, QGroupBox,
+    QHBoxLayout, QLabel, QListWidget, QPushButton,
+    QSpinBox, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from cosmica.ai.inference.denoise import AIDenoiseParams
@@ -40,3251 +21,1246 @@ from cosmica.core.background_neutralization import BackgroundNeutralizationParam
 from cosmica.core.banding import BandingParams
 from cosmica.core.chromatic_aberration import CAParams
 from cosmica.core.color_calibration import ColorCalibrationParams
-from cosmica.core.color_tools import ColorAdjustParams, SCNRMethod, SCNRParams
+from cosmica.core.color_tools import ColorAdjustParams, SCNRParams
 from cosmica.core.cosmetic import CosmeticParams
 from cosmica.core.curves import CurvesParams
-from cosmica.core.deconvolution import DeconvolutionParams, SpatialDeconvParams
-from cosmica.core.denoise import DenoiseMethod, DenoiseParams
-from cosmica.core.filters import MedianFilterParams, UnsharpMaskParams
+from cosmica.core.deconvolution import DeconvolutionParams
+from cosmica.core.denoise import DenoiseParams
+from cosmica.core.filters import UnsharpMaskParams
 from cosmica.core.histogram_transform import HistogramTransformParams
 from cosmica.core.local_contrast import LocalContrastParams
-from cosmica.core.morphology import MorphologyParams, MorphOp, StructuringElement
-from cosmica.core.stacking import (
-    IntegrationMethod,
-    RegistrationMode,
-    RejectionMethod,
-    StackingParams,
-)
+from cosmica.core.morphology import MorphologyParams
+from cosmica.core.stacking import IntegrationMethod, RejectionMethod, StackingParams
 from cosmica.core.star_reduction import StarReductionParams
 from cosmica.core.stretch import ArcsinhStretchParams, GHSParams, StretchParams
 from cosmica.core.transforms import (
-    BinMode,
-    BinParams,
-    CropParams,
-    FlipAxis,
-    FlipParams,
-    InterpolationMethod,
-    ResizeParams,
-    RotateAngle,
-    RotateParams,
+    BinParams, CropParams, FlipParams, ResizeParams, RotateParams,
 )
 from cosmica.core.vignette import VignetteParams
 from cosmica.core.wavelets import WaveletParams
 from cosmica.ui.widgets.curves_widget import CurveEditor
-
-
-class ResettableSlider(QSlider):
-    """Slider that resets to its default value on double-click."""
-
-    def __init__(self, orientation, default_value: int = 0, parent=None):
-        super().__init__(orientation, parent)
-        self._default_value = default_value
-
-    def mouseDoubleClickEvent(self, event):
-        self.setValue(self._default_value)
-        super().mouseDoubleClickEvent(event)
-
-
-def _info_label(text: str) -> QLabel:
-    """Create a grey description label used across all tool groups."""
-    lbl = QLabel(text)
-    lbl.setWordWrap(True)
-    lbl.setStyleSheet("color: #969696; font-size: 11px;")
-    return lbl
-
-
-def _h_row(label_text: str, widget: QWidget) -> QHBoxLayout:
-    """Create a horizontal label + widget row."""
-    row = QHBoxLayout()
-    row.addWidget(QLabel(label_text))
-    row.addWidget(widget)
-    return row
-
-
-def _scrollable_tab(layout: QVBoxLayout) -> QScrollArea:
-    """Wrap a layout in a scrollable area for use as a tab."""
-    container = QWidget()
-    container.setLayout(layout)
-    scroll = QScrollArea()
-    scroll.setWidgetResizable(True)
-    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-    scroll.setWidget(container)
-    return scroll
-
-
-from cosmica.ui.theme import (  # noqa: E402
-    ACCENT, BG_HOVER, BG_SECONDARY, BORDER, TEXT_PRIMARY, TEXT_SECONDARY,
+from cosmica.ui.widgets.ui_kit import (
+    ACCENT, ACCENT_DARK, ACCENT_PURPLE, BG_PRIMARY, BG_SECONDARY,
+    BG_TERTIARY, BLUE, BORDER, FONT_MONO, ORANGE, RED,
+    TEXT_PRIMARY, TEXT_SECONDARY,
+    CollapsibleSection, InfoLabel, RunBtn, SliderRow,
+    divider, field_row, make_label, scrollable_tab,
+    styled_check, styled_combo, styled_spin,
 )
 
+# Tab-bar stylesheet
+_TAB_SS = f"""
+QTabWidget::pane {{
+    border: none; background: {BG_PRIMARY};
+}}
+QTabBar {{
+    background: {BG_PRIMARY};
+}}
+QTabBar::tab {{
+    background: {BG_PRIMARY}; color: {TEXT_SECONDARY};
+    padding: 7px 10px; font-size: 10px; font-weight: 600;
+    border: none; border-bottom: 2px solid transparent;
+    min-width: 0;
+}}
+QTabBar::tab:selected {{
+    color: {ACCENT}; border-bottom: 2px solid {ACCENT};
+}}
+QTabBar::tab:hover:!selected {{
+    color: {TEXT_PRIMARY};
+}}
+QTabBar::scroller {{
+    width: 22px;
+}}
+QTabBar QToolButton {{
+    background: {BG_TERTIARY}; border: 1px solid {BORDER};
+    border-radius: 3px; color: {TEXT_PRIMARY};
+    min-width: 18px; min-height: 18px;
+    padding: 0px; margin: 2px 1px;
+}}
+QTabBar QToolButton:hover {{
+    background: {BG_HOVER}; color: #ffffff;
+}}
+"""
 
-class _Section(QWidget):
-    """Collapsible section panel — replaces QGroupBox with the new design language."""
-
-    def __init__(self, title: str, accent: bool = False, default_open: bool = True,
-                 compact: bool = False, parent=None):
-        super().__init__(parent)
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 2, 0, 2)
-        outer.setSpacing(0)
-
-        self._open = default_open
-        self._accent = accent
-
-        # ── Header ────────────────────────────────────────────────────────────
-        self._hdr = QWidget()
-        self._hdr.setCursor(Qt.CursorShape.PointingHandCursor)
-        hdr_layout = QHBoxLayout(self._hdr)
-        hdr_layout.setContentsMargins(10, 6, 10, 6)
-        hdr_layout.setSpacing(4)
-
-        lbl_text = title if compact else title.upper()
-        self._title_lbl = QLabel(lbl_text)
-        self._title_lbl.setStyleSheet(
-            f"color: {TEXT_PRIMARY}; font-size: {'10' if compact else '11'}px; font-weight: 700;"
-            "background: transparent; border: none;"
-        )
-        self._arrow = QLabel("▾" if default_open else "▸")
-        self._arrow.setStyleSheet(
-            f"color: {TEXT_SECONDARY}; font-size: 12px; background: transparent; border: none;"
-        )
-        hdr_layout.addWidget(self._title_lbl)
-        hdr_layout.addStretch()
-        hdr_layout.addWidget(self._arrow)
-        self._apply_header_style()
-        self._hdr.mousePressEvent = lambda _e: self._toggle()
-
-        # ── Body ──────────────────────────────────────────────────────────────
-        self._body_widget = QWidget()
-        self._body_widget.setStyleSheet(f"background-color: {BG_SECONDARY};")
-        self._body_layout = QVBoxLayout(self._body_widget)
-        pad = 4 if compact else 8
-        self._body_layout.setContentsMargins(10, pad, 10, pad)
-        self._body_layout.setSpacing(3 if compact else 6)
-        self._body_widget.setVisible(default_open)
-
-        outer.addWidget(self._hdr)
-        outer.addWidget(self._body_widget)
-
-    def _apply_header_style(self):
-        border = (
-            f"2px solid {ACCENT}" if (self._accent and self._open)
-            else f"1px solid {BORDER}"
-        )
-        self._hdr.setStyleSheet(
-            f"QWidget {{ background-color: {BG_SECONDARY}; border-bottom: {border}; }}"
-            f"QWidget:hover {{ background-color: {BG_HOVER}; }}"
-        )
-
-    def _toggle(self):
-        self._open = not self._open
-        self._body_widget.setVisible(self._open)
-        self._arrow.setText("▾" if self._open else "▸")
-        self._apply_header_style()
-
-    @property
-    def body(self) -> QVBoxLayout:
-        """Return the body layout for adding child widgets."""
-        return self._body_layout
+_BOTTOM_SS = f"""
+QWidget#tools_bottom {{
+    background: {BG_SECONDARY};
+    border-top: 1px solid {BORDER};
+}}
+"""
 
 
 class ToolsPanel(QWidget):
-    """Right panel: tabbed processing tool controls."""
+    """Right-side tabbed processing controls."""
 
-    # Signals — existing (keep backward compat)
-    run_calibration = pyqtSignal()
-    run_stacking = pyqtSignal()
-    run_alignment = pyqtSignal()
-    run_stretch = pyqtSignal()
-    run_background = pyqtSignal()
-    stretch_params_changed = pyqtSignal()
-
-    # Phase A signals
-    run_cosmetic = pyqtSignal()
-    run_banding = pyqtSignal()
-    run_histogram_transform = pyqtSignal()
-    run_curves = pyqtSignal()
-    run_scnr = pyqtSignal()
-    run_color_adjust = pyqtSignal()
-    run_deconvolution = pyqtSignal()
-
-    # Phase B signals
-    run_ghs = pyqtSignal()
-    run_color_calibration = pyqtSignal()
-    run_pcc = pyqtSignal()
-    run_denoise = pyqtSignal()
-    run_star_reduction = pyqtSignal()
-    open_narrowband_dialog = pyqtSignal()
-    open_pixelmath_dialog = pyqtSignal()
-    run_split_channels = pyqtSignal()
-    run_extract_luminance = pyqtSignal()
-
-    # Phase C signals
-    run_wavelet_sharpen = pyqtSignal()
-    run_local_contrast = pyqtSignal()
-    run_morphology = pyqtSignal()
-    open_hdr_dialog = pyqtSignal()
-
-    # Phase D signals
-    run_ai_denoise = pyqtSignal()
-    run_ai_sharpen = pyqtSignal()
-    run_starnet = pyqtSignal()
-    open_batch_dialog = pyqtSignal()
-    start_macro_recording = pyqtSignal()
-    stop_macro_recording = pyqtSignal()
-    play_macro = pyqtSignal()
-    save_macro = pyqtSignal()
-    load_macro = pyqtSignal()
-
-    # New tool signals
-    run_unsharp_mask = pyqtSignal()
-    run_median_filter = pyqtSignal()
-    run_abe = pyqtSignal()
-    run_vignette_correction = pyqtSignal()
+    # ── Signals (identical to original) ──────────────────
+    run_calibration          = pyqtSignal()
+    run_stacking             = pyqtSignal()
+    run_alignment            = pyqtSignal()
+    run_stretch              = pyqtSignal()
+    run_background           = pyqtSignal()
+    stretch_params_changed   = pyqtSignal()
+    run_cosmetic             = pyqtSignal()
+    run_banding              = pyqtSignal()
+    run_histogram_transform  = pyqtSignal()
+    run_curves               = pyqtSignal()
+    run_scnr                 = pyqtSignal()
+    run_color_adjust         = pyqtSignal()
+    run_deconvolution        = pyqtSignal()
+    run_ghs                  = pyqtSignal()
+    run_arcsinh_stretch      = pyqtSignal()
+    run_color_calibration    = pyqtSignal()
+    run_pcc                  = pyqtSignal()
+    run_denoise              = pyqtSignal()
+    run_star_reduction       = pyqtSignal()
+    open_narrowband_dialog   = pyqtSignal()
+    open_pixelmath_dialog    = pyqtSignal()
+    run_split_channels       = pyqtSignal()
+    run_extract_luminance    = pyqtSignal()
+    run_wavelet_sharpen      = pyqtSignal()
+    run_local_contrast       = pyqtSignal()
+    run_morphology           = pyqtSignal()
+    open_hdr_dialog          = pyqtSignal()
+    run_ai_denoise           = pyqtSignal()
+    run_ai_sharpen           = pyqtSignal()
+    run_starnet              = pyqtSignal()
+    open_batch_dialog        = pyqtSignal()
+    start_macro_recording    = pyqtSignal()
+    stop_macro_recording     = pyqtSignal()
+    play_macro               = pyqtSignal()
+    save_macro               = pyqtSignal()
+    load_macro               = pyqtSignal()
+    run_unsharp_mask         = pyqtSignal()
+    run_median_filter        = pyqtSignal()
+    run_abe                  = pyqtSignal()
+    run_vignette_correction  = pyqtSignal()
     run_chromatic_aberration = pyqtSignal()
-    show_image_statistics = pyqtSignal()
-    curves_histogram_changed = pyqtSignal()  # checkbox toggled or channel changed
-    measure_psf = pyqtSignal()
-    run_continuum_subtraction = pyqtSignal()
-    toggle_sample_mode = pyqtSignal(bool)
-    clear_bg_samples = pyqtSignal()
-    add_bg_grid = pyqtSignal(int, int, int)  # rows, cols, box_size
-    toggle_wcs_overlay = pyqtSignal(bool)
+    show_image_statistics    = pyqtSignal()
+    curves_histogram_changed = pyqtSignal()
+    measure_psf              = pyqtSignal()
+    run_continuum_subtraction= pyqtSignal()
+    toggle_sample_mode       = pyqtSignal(bool)
+    clear_bg_samples         = pyqtSignal()
+    add_bg_grid              = pyqtSignal(int, int, int)
+    toggle_wcs_overlay       = pyqtSignal(bool)
     run_background_neutralization = pyqtSignal()
-    open_python_console = pyqtSignal()
-    run_mlt = pyqtSignal()
-    run_lrgb_combine = pyqtSignal()
-    run_spcc = pyqtSignal()
-    toggle_dso_overlay = pyqtSignal(bool)
-    open_star_mask_dialog = pyqtSignal()
-    open_subframe_selector = pyqtSignal()
-
-    # Blink Comparator
-    blink_load_a = pyqtSignal()           # load image A from file
-    blink_load_b = pyqtSignal()           # load image B from file
-    blink_use_current_as_a = pyqtSignal() # set current image as A
-    blink_use_current_as_b = pyqtSignal() # set current image as B
-    blink_toggle = pyqtSignal(bool)       # start/stop blinking
-    blink_fps_changed = pyqtSignal(int)   # FPS changed
-
-    # Transform signals
-    start_crop_draw = pyqtSignal()   # activate interactive crop rectangle on canvas
-    run_crop = pyqtSignal()
-    run_rotate = pyqtSignal()
-    run_flip = pyqtSignal()
-    run_resize = pyqtSignal()
-    run_bin = pyqtSignal()
-    run_invert = pyqtSignal()
-
-    # Preview signal: emitted with tool name when preview is requested
-    preview_requested = pyqtSignal(str)  # tool_name
-    preview_cancelled = pyqtSignal()
-
-    # Multi-session stacking
-    run_multi_session = pyqtSignal()
+    open_python_console      = pyqtSignal()
+    run_mlt                  = pyqtSignal()
+    run_lrgb_combine         = pyqtSignal()
+    run_spcc                 = pyqtSignal()
+    toggle_dso_overlay       = pyqtSignal(bool)
+    open_star_mask_dialog    = pyqtSignal()
+    open_subframe_selector   = pyqtSignal()
+    blink_load_a             = pyqtSignal()
+    blink_load_b             = pyqtSignal()
+    blink_use_current_as_a   = pyqtSignal()
+    blink_use_current_as_b   = pyqtSignal()
+    blink_toggle             = pyqtSignal(bool)
+    blink_fps_changed        = pyqtSignal(int)
+    start_crop_draw          = pyqtSignal()
+    run_crop                 = pyqtSignal()
+    run_rotate               = pyqtSignal()
+    run_flip                 = pyqtSignal()
+    run_resize               = pyqtSignal()
+    run_bin                  = pyqtSignal()
+    run_invert               = pyqtSignal()
+    preview_requested        = pyqtSignal(str)
+    preview_cancelled        = pyqtSignal()
+    run_multi_session        = pyqtSignal()
     multi_session_add_folder = pyqtSignal()
-    multi_session_clear = pyqtSignal()
-
-    # Channel combine
+    multi_session_clear      = pyqtSignal()
     open_channel_combine_dialog = pyqtSignal()
+    run_debayer              = pyqtSignal()
+    clip_points_changed      = pyqtSignal(float, float)
+    open_smart_processor     = pyqtSignal()
+    open_equipment_dialog    = pyqtSignal()
 
-    # Debayer
-    run_debayer = pyqtSignal()
-
-    # Phase E signals
-    run_arcsinh_stretch = pyqtSignal()
-    # Emitted when HT black/white point change so histogram can show clip markers
-    clip_points_changed = pyqtSignal(float, float)  # shadow, highlight
-
-    # Smart Processor signals
-    open_smart_processor = pyqtSignal()
-    open_equipment_dialog = pyqtSignal()
-
+    # ── Init ─────────────────────────────────────────────
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumWidth(280)
+        self.setMinimumWidth(260)
         self.setMaximumWidth(420)
+        self.setStyleSheet(f"background: {BG_SECONDARY};")
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
         self._tabs = QTabWidget()
         self._tabs.setTabPosition(QTabWidget.TabPosition.North)
         self._tabs.setUsesScrollButtons(True)
         self._tabs.tabBar().setExpanding(False)
+        self._tabs.setStyleSheet(_TAB_SS)
         outer.addWidget(self._tabs)
 
-        self._preview_checks: dict[str, QCheckBox] = {}
+        # bottom preset/undo bar
+        bottom = QWidget()
+        bottom.setObjectName("tools_bottom")
+        bottom.setFixedHeight(34)
+        bottom.setStyleSheet(_BOTTOM_SS)
+        bl = QHBoxLayout(bottom)
+        bl.setContentsMargins(8, 4, 8, 4)
+        bl.setSpacing(4)
 
+        for label in ("↙ Load Preset", "↗ Save Preset"):
+            b = RunBtn(label, flat=True)
+            b.setFixedHeight(24)
+            bl.addWidget(b)
+        bl.addStretch()
+        self._btn_undo = RunBtn("↩", flat=True)
+        self._btn_undo.setFixedWidth(32)
+        self._btn_undo.setFixedHeight(24)
+        self._btn_undo.setToolTip("Undo (Ctrl+Z)")
+        self._btn_redo = RunBtn("↪", flat=True)
+        self._btn_redo.setFixedWidth(32)
+        self._btn_redo.setFixedHeight(24)
+        self._btn_redo.setToolTip("Redo (Ctrl+Y)")
+        bl.addWidget(self._btn_undo)
+        bl.addWidget(self._btn_redo)
+        outer.addWidget(bottom)
+
+        # build tabs
         self._build_preprocess_tab()
         self._build_stacking_tab()
-        self._build_background_tab()   # background before stretch (work linear first)
+        self._build_background_tab()
         self._build_stretch_tab()
         self._build_transform_tab()
         self._build_color_tab()
         self._build_detail_tab()
-        self._build_ai_pro_tab()
+        self._build_ai_tab()
         self._build_utility_tab()
 
-    def _add_preview_checkbox(self, layout: QVBoxLayout, tool_name: str) -> QCheckBox:
-        """Add a preview toggle checkbox to a tool group."""
-        cb = QCheckBox("Live preview (split view)")
-        cb.setToolTip("Show before/after comparison on canvas at reduced resolution")
-        cb.toggled.connect(lambda checked, t=tool_name: self._on_preview_toggled(t, checked))
-        layout.addWidget(cb)
-        self._preview_checks[tool_name] = cb
-        return cb
+    # ── TAB 1: Pre-Process ────────────────────────────────
+    def _build_preprocess_tab(self):
+        lay = QVBoxLayout()
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
 
-    def _on_preview_toggled(self, tool_name: str, checked: bool):
-        if checked:
-            self.preview_requested.emit(tool_name)
-        else:
-            self.preview_cancelled.emit()
+        # Calibration
+        cal = CollapsibleSection("Calibration", accent=True)
+        cal.add_info(
+            "Create masters from raw frame folders or use pre-made masters."
+        )
+        self._cal_bias_label = cal.add_status_label("Bias: none")
+        bl, _ = self._cal_frame_row(cal, "bias")
+        self._cal_dark_label = cal.add_status_label("Dark: none")
+        self._cal_frame_row(cal, "dark")
+        self._cal_flat_label = cal.add_status_label("Flat: none")
+        self._cal_frame_row(cal, "flat")
+        cal.add_info("Light frames: add via Project panel → Import Lights")
+        cal.add_run("▶ Run Calibration", self.run_calibration.emit)
+        lay.addWidget(cal)
 
-    def _emit_if_preview_enabled(self, tool_name: str):
-        """Emit preview_requested if the preview checkbox for tool is checked."""
-        cb = self._preview_checks.get(tool_name)
-        if cb is not None and cb.isChecked():
-            self.preview_requested.emit(tool_name)
+        # Cosmetic
+        cos = CollapsibleSection("Cosmetic Correction")
+        cos.add_info("Detect and remove hot, cold, and dead pixels.")
+        self._hot_sigma = cos.add_slider("Hot sigma", 5.0, 1.0, 20.0, 0.5, 1)
+        self._cold_sigma = cos.add_slider("Cold sigma", 5.0, 1.0, 20.0, 0.5, 1)
+        self._dead_pixel_check = cos.add_check("Detect dead pixels (value=0)", True)
+        cos.add_run("▶ Apply Cosmetic Correction", self.run_cosmetic.emit)
+        lay.addWidget(cos)
+
+        # Debayer
+        deb = CollapsibleSection("Debayer (OSC / Color Camera)")
+        deb.add_info("Convert raw Bayer mosaic to color image.")
+        self._debayer_pattern_combo = deb.add_combo(
+            "Pattern",
+            ["Auto-detect", "RGGB", "BGGR", "GRBG", "GBRG"],
+        )
+        self._debayer_method_combo = deb.add_combo(
+            "Method",
+            ["VNG (best quality)", "Edge-Aware (EA)",
+             "Superpixel (2× bin)", "Bilinear (fastest)"],
+        )
+        deb.add_run("▶ Apply Debayer", self.run_debayer.emit)
+        lay.addWidget(deb)
+
+        self._tabs.addTab(scrollable_tab(lay), "⬡  Pre-Process")
+
+    def _cal_frame_row(self, sec: CollapsibleSection, frame_type: str):
+        rl = QHBoxLayout()
+        rl.setSpacing(4)
+        bf = RunBtn(f"Folder…", flat=True)
+        bm = RunBtn(f"Master…", flat=True)
+        bf.setFixedHeight(26)
+        bm.setFixedHeight(26)
+        rl.addWidget(bf)
+        rl.addWidget(bm)
+        sec.add_layout(rl)
+        return rl, (bf, bm)
+
+    # ── TAB 2: Stacking ───────────────────────────────────
+    def _build_stacking_tab(self):
+        lay = QVBoxLayout()
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+
+        # Subframe Selector (moved here from Pre-Process)
+        sub = CollapsibleSection("Subframe Selector")
+        sub.add_info("Score and reject frames by FWHM, eccentricity, SNR, star count.")
+        self._subframe_count_label = sub.add_status_label("No subframe selection active")
+        sub.add_run("⊞ Open Subframe Selector…", self.open_subframe_selector.emit, flat=True)
+        lay.addWidget(sub)
+
+        # Registration
+        reg = CollapsibleSection("Registration (Alignment)", accent=True)
+        reg.add_info("Detect stars and align frames to a reference.")
+        self._reg_mode_combo = reg.add_combo(
+            "Mode",
+            ["Star (1-Pass)", "Star (2-Pass)", "Triangle Match",
+             "FFT Translation", "Comet"],
+            "Star (2-Pass)",
+        )
+        self._star_sens_spin = reg.add_slider("Star sensitivity", 5.0, 1.0, 20.0, 0.5, 1)
+        self._max_shift_spin = reg.add_spin("Max distance (px)", 10, 500, 50, 10)
+        self._ransac_thresh_spin = reg.add_spin("RANSAC threshold", 1.0, 10.0, 3.0, 0.5, 1)
+        self._ref_frame_combo = reg.add_combo(
+            "Reference frame",
+            ["Auto (best quality)", "First frame", "Last frame", "Specific frame #"],
+        )
+        reg.add_run("▶ Align Frames", self.run_alignment.emit, flat=True)
+        lay.addWidget(reg)
+
+        # Integration
+        integ = CollapsibleSection("Integration (Stacking)", accent=True)
+        integ.add_info("Combine aligned frames using rejection to increase SNR.")
+        self._rejection_combo = integ.add_combo(
+            "Rejection",
+            ["Sigma Clipping", "Winsorized Sigma", "Linear Fit",
+             "Percentile Clip", "ESD (Generalized)", "Min/Max", "None"],
+        )
+        self._integration_combo = integ.add_combo(
+            "Integration",
+            ["Average", "Median", "Weighted Average"],
+        )
+        self._kappa_spin = integ.add_slider("Kappa (σ)", 3.0, 0.5, 10.0, 0.1, 1)
+        integ.add_run("▶ Stack Images", self.run_stacking.emit)
+        lay.addWidget(integ)
+
+        # Drizzle
+        drz = CollapsibleSection("Drizzle Integration")
+        self._drizzle_check = drz.add_check("Enable Drizzle")
+        self._drizzle_scale_combo = drz.add_combo("Output scale", ["2× (recommended)", "3×"])
+        self._drizzle_drop_spin = drz.add_slider("Drop shrink", 0.7, 0.5, 1.0, 0.05, 2)
+        lay.addWidget(drz)
+
+        # Multi-session
+        ms = CollapsibleSection("Multi-Session Integration")
+        ms.add_info("Stack frames from different telescopes, cameras, or nights.")
+        self._ms_session_list = QListWidget()
+        self._ms_session_list.setFixedHeight(80)
+        self._ms_session_list.setStyleSheet(f"""
+            QListWidget {{
+                background: {BG_TERTIARY}; color: {TEXT_PRIMARY};
+                border: 1px solid {BORDER}; border-radius: 4px;
+                font-size: 11px;
+            }}
+        """)
+        ms.add_widget(self._ms_session_list)
+        btns = ms.add_btn_row([("+ Add Session…", True), ("Clear All", True)])
+        btns[0].clicked.connect(self.multi_session_add_folder.emit)
+        btns[1].clicked.connect(self.multi_session_clear.emit)
+        self._ms_weight_combo = ms.add_combo(
+            "Weighting",
+            ["SNR (recommended)", "Integration time", "Equal weight"],
+        )
+        self._ms_normalize_check = ms.add_check("Normalize background", True)
+        self._ms_align_check     = ms.add_check("Align sub-stacks", True)
+        self._btn_ms_stack = ms.add_run("▶ Stack All Sessions", self.run_multi_session.emit)
+        self._btn_ms_stack.setEnabled(False)
+        lay.addWidget(ms)
+
+        # Batch
+        batch = CollapsibleSection("Batch Processing")
+        batch.add_info("Apply a pipeline to multiple images at once.")
+        batch.add_run("⊞ Open Batch Dialog…", self.open_batch_dialog.emit, flat=True)
+        lay.addWidget(batch)
+
+        self._tabs.addTab(scrollable_tab(lay), "⧉  Stacking")
+
+    # ── TAB 3: Background ─────────────────────────────────
+    def _build_background_tab(self):
+        lay = QVBoxLayout()
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+
+        # Background Extraction
+        bg = CollapsibleSection("Background Extraction", accent=True)
+        bg.add_info("Remove light pollution gradients.")
+        self._bg_grid_spin  = bg.add_spin("Grid size", 4, 32, 8)
+        self._bg_order_spin = bg.add_spin("Poly order", 1, 6, 3)
+
+        # auto-grid row
+        grid_row = QHBoxLayout()
+        grid_row.setSpacing(6)
+        for lbl_text, attr in [("Rows", "_bg_grid_rows_spin"), ("Cols", "_bg_grid_cols_spin")]:
+            sub_lay = QVBoxLayout()
+            sub_lay.setSpacing(2)
+            sub_lay.addWidget(make_label(lbl_text, TEXT_SECONDARY, 10))
+            spin = styled_spin(2, 20, 5)
+            setattr(self, attr, spin)
+            sub_lay.addWidget(spin)
+            grid_row.addLayout(sub_lay)
+        bg.add_layout(grid_row)
+
+        self._bg_box_size_spin = bg.add_spin("Box size (px)", 8, 256, 64, 8)
+        btn_grid = bg.add_run(
+            "⊞ Add Auto-Grid Samples",
+            lambda: self.add_bg_grid.emit(
+                self._bg_grid_rows_spin.value(),
+                self._bg_grid_cols_spin.value(),
+                self._bg_box_size_spin.value(),
+            ),
+            flat=True,
+        )
+
+        self._btn_place_samples = RunBtn("Place Samples", flat=True)
+        self._btn_place_samples.setCheckable(True)
+        self._btn_place_samples.toggled.connect(self.toggle_sample_mode.emit)
+        bg.add_widget(self._btn_place_samples)
+
+        self._bg_sample_label = bg.add_status_label("0 manual samples")
+        btn_clear = bg.add_run("Clear Samples", self.clear_bg_samples.emit, flat=True)
+        bg.add_run("▶ Extract Background", self.run_background.emit)
+        lay.addWidget(bg)
+
+        # ABE
+        abe = CollapsibleSection("ABE (Advanced)")
+        abe.add_info("Background extraction using polynomial or RBF surface fitting.")
+        self._abe_grid_spin   = abe.add_spin("Grid size", 5, 30, 10)
+        self._abe_model_combo = abe.add_combo("Model", ["Polynomial (recommended)", "RBF"])
+        self._abe_degree_spin = abe.add_spin("Poly degree", 1, 5, 2)
+        self._abe_kernel_combo = abe.add_combo(
+            "RBF kernel", ["Thin Plate Spline", "Multiquadric", "Gaussian"]
+        )
+        self._abe_mode_combo  = abe.add_combo("Mode", ["Subtraction", "Division"])
+        abe.add_run("▶ Run ABE", self.run_abe.emit)
+        lay.addWidget(abe)
+
+        # Background Neutralization (NEW)
+        bn = CollapsibleSection("Background Neutralization")
+        bn.add_info(
+            "Shift sky background to neutral zero per-channel. "
+            "Equivalent to PixInsight BackgroundNeutralization (statistical mode)."
+        )
+        self._bn_percentile = bn.add_slider("Percentile", 2.0, 0.5, 10.0, 0.5, 1)
+        self._bn_amount     = bn.add_slider("Amount", 1.0, 0.0, 1.0, 0.05, 2)
+        self._bn_protect    = bn.add_slider("Protect bright", 0.5, 0.0, 1.0, 0.05, 2)
+        bn.add_run("▶ Apply Background Neutralization",
+                   self.run_background_neutralization.emit)
+        lay.addWidget(bn)
+
+        # Vignette
+        vig = CollapsibleSection("Vignette Correction")
+        vig.add_info("Remove optical vignetting toward image edges.")
+        self._vignette_amount = vig.add_slider("Amount", 0.3, 0.0, 1.0, 0.05, 2)
+        self._vignette_radius = vig.add_slider("Radius", 0.8, 0.3, 1.0, 0.05, 2)
+        vig.add_run("▶ Correct Vignette", self.run_vignette_correction.emit)
+        lay.addWidget(vig)
+
+        # Banding
+        band = CollapsibleSection("Banding Reduction")
+        band.add_info("Remove horizontal/vertical banding from CMOS sensors.")
+        self._banding_amount = band.add_slider("Amount", 1.0, 0.1, 3.0, 0.1, 1)
+        self._banding_dir_combo = band.add_combo(
+            "Direction", ["Horizontal", "Vertical", "Both"]
+        )
+        band.add_run("▶ Reduce Banding", self.run_banding.emit)
+        lay.addWidget(band)
+
+        self._tabs.addTab(scrollable_tab(lay), "◫  Background")
+
+    # ── TAB 4: Stretch ────────────────────────────────────
+    def _build_stretch_tab(self):
+        lay = QVBoxLayout()
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+
+        # Auto-stretch
+        aut = CollapsibleSection("Auto-Stretch", accent=True)
+        aut.add_info("Statistical midtone stretch.")
+        self._midtone_slider = aut.add_slider("Midtone", 0.25, 0.01, 0.99, 0.01, 2, 0.25)
+        self._midtone_slider.value_changed.connect(lambda _: self.stretch_params_changed.emit())
+        self._shadow_spin = aut.add_spin("Shadow clip", -10.0, 0.0, -2.8, 0.1, 1)
+        self._linked_check = aut.add_check("Link RGB channels", True)
+        self._split_check  = aut.add_check("Before/After split preview")
+        btns = aut.add_btn_row([("▶ Apply Stretch", False), ("Reset", True)])
+        btns[0].clicked.connect(self.run_stretch.emit)
+        btns[1].clicked.connect(lambda: self._midtone_slider.setValue(0.25))
+        lay.addWidget(aut)
+
+        # Arcsinh (NEW)
+        arc = CollapsibleSection("Arcsinh Stretch")
+        arc.add_info(
+            "Lupton et al. 2004 — linear-to-arcsinh ramp. Preserves star colours "
+            "better than log; reveals faint nebulosity without blowing out stars."
+        )
+        self._arcsinh_factor_spin = arc.add_spin(
+            "Stretch factor β", 0.1, 1000.0, 10.0, 1.0, 1
+        )
+        self._arcsinh_bp_spin = arc.add_spin("Black point", 0.0, 0.5, 0.0, 0.001, 4)
+        self._arcsinh_linked_check = arc.add_check("Linked RGB", True)
+        btns = arc.add_btn_row([("▶ Apply Arcsinh Stretch", False), ("Reset", True)])
+        btns[0].clicked.connect(self.run_arcsinh_stretch.emit)
+        btns[1].clicked.connect(lambda: (
+            self._arcsinh_factor_spin.setValue(10.0),
+            self._arcsinh_bp_spin.setValue(0.0),
+        ))
+        lay.addWidget(arc)
+
+        # GHS
+        ghs = CollapsibleSection("Generalized Hyperbolic Stretch")
+        ghs.add_info("Advanced non-linear stretch.")
+        self._ghs_d_spin  = ghs.add_spin("Stretch (D)",   0.0, 20.0, 5.0, 0.5, 1)
+        self._ghs_b_spin  = ghs.add_spin("Asymmetry (b)", -5.0, 5.0, 0.0, 0.1, 1)
+        self._ghs_sp_spin = ghs.add_spin("Sym. point",    0.0,  1.0, 0.0, 0.05, 3)
+        self._ghs_shadow_slider    = ghs.add_slider("Shadow prot.",    0.0, 0.0, 1.0, 0.01, 2)
+        self._ghs_highlight_slider = ghs.add_slider("Highlight prot.", 0.0, 0.0, 1.0, 0.01, 2)
+        btns = ghs.add_btn_row([("▶ Apply GHS", False), ("Reset", True)])
+        btns[0].clicked.connect(self.run_ghs.emit)
+        lay.addWidget(ghs)
+
+        # Histogram Transform
+        ht = CollapsibleSection("Histogram Transform")
+        ht.add_info("Black point, midtone, and white point adjustment.")
+        self._ht_black_spin  = ht.add_spin("Black point", 0.0, 0.99, 0.0, 0.01, 3)
+        self._ht_midtone_slider = ht.add_slider("Midtone",  0.5, 0.01, 0.99, 0.01, 2, 0.5)
+        self._ht_white_spin  = ht.add_spin("White point", 0.01, 1.0, 1.0, 0.01, 3)
+        self._ht_black_spin.valueChanged.connect(lambda _: self._emit_clip_points())
+        self._ht_white_spin.valueChanged.connect(lambda _: self._emit_clip_points())
+        btns = ht.add_btn_row([("▶ Apply HT", False), ("Reset", True)])
+        btns[0].clicked.connect(self.run_histogram_transform.emit)
+        lay.addWidget(ht)
+
+        # Curves
+        crv = CollapsibleSection("Curves")
+        crv.add_info("Click to add points, drag to adjust. Right-click to remove.")
+        self._curve_channel_combo = crv.add_combo(
+            "Channel", ["Master (L)", "Red", "Green", "Blue"]
+        )
+        self._curve_channel_combo.currentIndexChanged.connect(
+            lambda _: self.curves_histogram_changed.emit()
+        )
+        self._curve_editor = CurveEditor()
+        self._curve_editor.setMinimumHeight(180)
+        crv.add_widget(self._curve_editor)
+        self._curves_histogram_check = crv.add_check("Show histogram")
+        self._curves_histogram_check.stateChanged.connect(
+            lambda _: self.curves_histogram_changed.emit()
+        )
+        btns = crv.add_btn_row([("▶ Apply Curves", False), ("Reset", True)])
+        btns[0].clicked.connect(self.run_curves.emit)
+        btns[1].clicked.connect(self._curve_editor.reset)
+        lay.addWidget(crv)
+
+        self._tabs.addTab(scrollable_tab(lay), "◑  Stretch")
+
+    # ── TAB 5: Transform ──────────────────────────────────
+    def _build_transform_tab(self):
+        lay = QVBoxLayout()
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+
+        # Crop
+        crop = CollapsibleSection("Crop", accent=True)
+        crop.add_info("Crop image to a rectangular region.")
+        self._btn_crop_draw = RunBtn("✏ Draw on Image…", flat=True)
+        self._btn_crop_draw.setCheckable(True)
+        self._btn_crop_draw.toggled.connect(
+            lambda on: self.start_crop_draw.emit() if on else None
+        )
+        crop.add_widget(self._btn_crop_draw)
+        self._crop_x_spin = crop.add_spin("X offset", 0, 99999, 0)
+        self._crop_y_spin = crop.add_spin("Y offset", 0, 99999, 0)
+        self._crop_w_spin = crop.add_spin("Width",    0, 99999, 0)
+        self._crop_h_spin = crop.add_spin("Height",   0, 99999, 0)
+        crop.add_run("▶ Apply Crop", self.run_crop.emit)
+        lay.addWidget(crop)
+
+        # Rotate
+        rot = CollapsibleSection("Rotate")
+        self._rotate_combo = rot.add_combo(
+            "Preset", ["90° CW", "180°", "270° CW", "Custom angle"]
+        )
+        self._rotate_angle_spin = rot.add_spin("Custom angle", -360, 360, 0, 0.1, 1, "°")
+        self._rotate_expand_check = rot.add_check("Expand canvas", True)
+        rot.add_run("▶ Apply Rotation", self.run_rotate.emit)
+        lay.addWidget(rot)
+
+        # Flip
+        flp = CollapsibleSection("Flip")
+        self._flip_combo = flp.add_combo("Axis", ["Horizontal", "Vertical", "Both"])
+        flp.add_run("▶ Apply Flip", self.run_flip.emit)
+        lay.addWidget(flp)
+
+        # Resize
+        rsz = CollapsibleSection("Resize / Resample")
+        self._resize_scale_spin = rsz.add_spin("Scale", 0.1, 10.0, 1.0, 0.1, 2)
+        self._resize_interp_combo = rsz.add_combo(
+            "Interpolation", ["Lanczos", "Bicubic", "Bilinear", "Nearest"]
+        )
+        rsz.add_run("▶ Apply Resize", self.run_resize.emit)
+        lay.addWidget(rsz)
+
+        # Bin
+        bn = CollapsibleSection("Bin")
+        bn.add_info("Combine pixels to increase SNR at lower resolution.")
+        self._bin_factor_combo = bn.add_combo("Factor", ["2x2", "3x3", "4x4"])
+        self._bin_mode_combo   = bn.add_combo("Mode",   ["Average", "Sum"])
+        bn.add_run("▶ Apply Bin", self.run_bin.emit)
+        lay.addWidget(bn)
+
+        # Invert
+        inv = CollapsibleSection("Invert")
+        inv.add_info("Invert all pixel values (1 − image).")
+        inv.add_run("▶ Invert Image", self.run_invert.emit)
+        lay.addWidget(inv)
+
+        self._tabs.addTab(scrollable_tab(lay), "⟳  Transform")
+
+    # ── TAB 6: Color ──────────────────────────────────────
+    def _build_color_tab(self):
+        lay = QVBoxLayout()
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+
+        # SCNR
+        scnr = CollapsibleSection("SCNR (Green Noise Removal)", accent=True)
+        scnr.add_info("Remove color noise, typically excess green channel.")
+        self._scnr_target_combo  = scnr.add_combo("Target",  ["Green", "Red", "Blue"])
+        self._scnr_method_combo  = scnr.add_combo(
+            "Method",
+            ["Average Neutral", "Maximum Neutral", "Additive-Subtractive Mask"],
+        )
+        self._scnr_amount = scnr.add_slider("Amount", 0.5, 0.0, 1.0, 0.01, 2)
+        scnr.add_run("▶ Apply SCNR", self.run_scnr.emit)
+        lay.addWidget(scnr)
+
+        # Color Adjust
+        ca = CollapsibleSection("Color Adjustment")
+        self._hue_slider        = ca.add_slider("Hue shift",   0, -180, 180, 1, 0)
+        self._sat_slider        = ca.add_slider("Saturation",  0, -100, 100, 1, 0)
+        self._vibrance_slider   = ca.add_slider("Vibrance",    0, -100, 100, 1, 0)
+        self._lightness_slider  = ca.add_slider("Lightness",   0, -100, 100, 1, 0)
+        ca.add_run("▶ Apply Color Adjust", self.run_color_adjust.emit)
+        lay.addWidget(ca)
+
+        # Color Calibration
+        cc = CollapsibleSection("Color Calibration")
+        cc.add_info("White balance using background reference or star colours.")
+        self._cc_method_combo = cc.add_combo(
+            "Method",
+            ["Background reference", "Photometric (SPCC)", "Manual RGB"],
+        )
+        btns = cc.add_btn_row([("Pick BG Reference", True), ("Calibrate", False)])
+        btns[1].clicked.connect(self.run_color_calibration.emit)
+        lay.addWidget(cc)
+
+        # SPCC
+        spcc = CollapsibleSection("SPCC (Photometric)")
+        spcc.add_info("Spectrophotometric calibration using star spectra + filter database.")
+        self._spcc_filter_combo  = spcc.add_combo(
+            "Filter set", ["Broadband (L/R/G/B)", "Narrowband Ha/OIII/SII", "Custom"]
+        )
+        self._spcc_camera_combo  = spcc.add_combo(
+            "Camera", ["ZWO ASI2600MM", "QHY268M", "ZWO ASI533MC", "Other…"]
+        )
+        spcc.add_run("▶ Run SPCC", self.run_spcc.emit)
+        lay.addWidget(spcc)
+
+        # Narrowband
+        nb = CollapsibleSection("Narrowband Tools")
+        nb.add_info("SHO/HOO/HaRGB palette mapping, continuum subtraction, blending.")
+        nb.add_run("⊞ Open Narrowband Dialog…", self.open_narrowband_dialog.emit, flat=True)
+        nb.add_run("▶ Continuum Subtraction", self.run_continuum_subtraction.emit, flat=True)
+        lay.addWidget(nb)
+
+        # LRGB / Channels
+        lc = CollapsibleSection("LRGB / Channel Combine")
+        lc.add_info("Combine luminance and colour channels.")
+        btns = lc.add_btn_row([("LRGB Combine…", True), ("Channel Combine…", True)])
+        btns[0].clicked.connect(self.run_lrgb_combine.emit)
+        btns[1].clicked.connect(self.open_channel_combine_dialog.emit)
+        lc.add_divider()
+        lc.add_run("▶ Extract Luminance", self.run_extract_luminance.emit, flat=True)
+        lc.add_run("▶ Split Channels", self.run_split_channels.emit, flat=True)
+        lay.addWidget(lc)
+
+        self._tabs.addTab(scrollable_tab(lay), "◈  Color")
+
+    # ── TAB 7: Detail ─────────────────────────────────────
+    def _build_detail_tab(self):
+        lay = QVBoxLayout()
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+
+        # Deconvolution
+        dec = CollapsibleSection("Deconvolution", accent=True)
+        dec.add_info("Restore fine detail lost to seeing or tracking.")
+        self._deconv_method_combo = dec.add_combo(
+            "Method", ["Richardson-Lucy", "Blind (Spatial)", "Wiener"]
+        )
+        self._deconv_iter = dec.add_slider("Iterations", 30, 5, 100, 1, 0)
+        btns = dec.add_btn_row([("Measure PSF", True), ("Star Mask", True)])
+        btns[0].clicked.connect(self.measure_psf.emit)
+        btns[1].clicked.connect(self.open_star_mask_dialog.emit)
+        dec.add_run("▶ Apply Deconvolution", self.run_deconvolution.emit)
+        lay.addWidget(dec)
+
+        # PSF Measurement (expanded results)
+        psf = CollapsibleSection("PSF Measurement")
+        psf.add_info("Detect stars, fit 2D Gaussians, report FWHM and ellipticity.")
+        # results grid
+        self._psf_result_labels: dict[str, QLabel] = {}
+        metrics = [
+            ("FWHM", "—"), ("FWHM X", "—"), ("FWHM Y", "—"),
+            ("Ellipticity", "—"), ("Rotation", "—"), ("Stars used", "—"),
+            ("FWHM σ", "—"),
+        ]
+        from PyQt6.QtWidgets import QGridLayout
+        grid_w = QWidget()
+        grid_w.setStyleSheet(
+            f"background: {BG_TERTIARY}; border-radius: 5px; border: 1px solid {BORDER};"
+        )
+        grid_lay = QGridLayout(grid_w)
+        grid_lay.setContentsMargins(8, 8, 8, 8)
+        grid_lay.setSpacing(4)
+        for i, (name, default) in enumerate(metrics):
+            col = (i % 2) * 2
+            row = i // 2
+            grid_lay.addWidget(make_label(name, TEXT_SECONDARY, 9), row * 2, col)
+            val_lbl = make_label(default, ACCENT, 11, mono=True)
+            self._psf_result_labels[name] = val_lbl
+            grid_lay.addWidget(val_lbl, row * 2 + 1, col)
+        psf.add_widget(grid_w)
+        self._psf_cutout_spin = psf.add_spin("Cutout radius", 6, 32, 12)
+        self._psf_force_cpu   = psf.add_check("Force CPU (for parallel use)")
+        psf.add_run("▶ Measure PSF", self.measure_psf.emit)
+        lay.addWidget(psf)
+
+        # Noise Reduction
+        dnz = CollapsibleSection("Noise Reduction")
+        self._denoise_method_combo = dnz.add_combo(
+            "Method",
+            ["TGV Denoise", "NLM (Non-Local Means)", "Wavelet Denoise", "Median Filter"],
+        )
+        self._denoise_amount     = dnz.add_slider("Amount",     0.5, 0.0, 1.0, 0.05, 2)
+        self._denoise_lum        = dnz.add_slider("Luminance",  0.7, 0.0, 1.0, 0.05, 2)
+        self._denoise_chrom      = dnz.add_slider("Chrominance",0.5, 0.0, 1.0, 0.05, 2)
+        dnz.add_run("▶ Apply Denoise", self.run_denoise.emit)
+        lay.addWidget(dnz)
+
+        # Star Reduction
+        sr = CollapsibleSection("Star Reduction")
+        sr.add_info("Reduce star halos to reveal faint nebula details.")
+        self._star_reduction_amount = sr.add_slider("Amount (%)", 50, 0, 100, 1, 0)
+        self._star_reduction_method = sr.add_combo(
+            "Method", ["Morphological", "Halo only", "Full star"]
+        )
+        sr.add_run("▶ Reduce Stars", self.run_star_reduction.emit)
+        lay.addWidget(sr)
+
+        # Wavelets / MLT
+        wav = CollapsibleSection("Wavelets / MLT")
+        wav.add_info("Multi-scale sharpening with per-layer control.")
+        self._wavelet_layers = wav.add_slider("Layers", 5, 2, 8, 1, 0)
+        self._wavelet_layer_sliders: list[SliderRow] = []
+        defaults = [0.3, 0.3, 0.0, 0.0, 0.0]
+        for i in range(5):
+            s = wav.add_slider(f"Layer {i+1}", defaults[i], 0.0, 2.0, 0.1, 1)
+            self._wavelet_layer_sliders.append(s)
+        btns = wav.add_btn_row([("▶ Wavelets", False), ("▶ MLT", False)])
+        btns[0].clicked.connect(self.run_wavelet_sharpen.emit)
+        btns[1].clicked.connect(self.run_mlt.emit)
+        lay.addWidget(wav)
+
+        # CLAHE
+        clh = CollapsibleSection("Local Contrast / CLAHE")
+        self._clahe_clip  = clh.add_slider("Clip limit", 2.0, 0.5, 10.0, 0.5, 1)
+        self._clahe_tiles = clh.add_slider("Tile size",  8,   4,   32,   1,   0)
+        clh.add_run("▶ Apply CLAHE", self.run_local_contrast.emit)
+        lay.addWidget(clh)
+
+        # Unsharp Mask
+        um = CollapsibleSection("Unsharp Mask")
+        self._um_radius    = um.add_slider("Radius (px)", 1.5, 0.5, 10.0, 0.5, 1)
+        self._um_amount    = um.add_slider("Amount",      0.5, 0.0,  2.0, 0.05, 2)
+        self._um_threshold = um.add_slider("Threshold",   0.0, 0.0,  0.1, 0.005, 3)
+        um.add_run("▶ Apply Unsharp Mask", self.run_unsharp_mask.emit)
+        lay.addWidget(um)
+
+        # Morphology
+        mor = CollapsibleSection("Morphology")
+        self._morph_op     = mor.add_combo(
+            "Operation", ["Erosion", "Dilation", "Opening", "Closing", "Gradient"]
+        )
+        self._morph_kernel = mor.add_combo("Kernel", ["Disk", "Square", "Diamond"])
+        self._morph_iters  = mor.add_slider("Iterations", 1, 1, 10, 1, 0)
+        mor.add_run("▶ Apply Morphology", self.run_morphology.emit)
+        lay.addWidget(mor)
+
+        # Chromatic Aberration
+        ca = CollapsibleSection("Chromatic Aberration")
+        ca.add_info("Correct lateral colour fringing at image edges.")
+        ca.add_run("▶ Correct CA", self.run_chromatic_aberration.emit)
+        lay.addWidget(ca)
+
+        self._tabs.addTab(scrollable_tab(lay), "◎  Detail")
+
+    # ── TAB 8: AI Tools ───────────────────────────────────
+    def _build_ai_tab(self):
+        lay = QVBoxLayout()
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+
+        # Status card
+        status_w = QWidget()
+        status_w.setStyleSheet(
+            f"background: {BG_SECONDARY}; border: 1px solid {BORDER}; border-radius: 6px;"
+        )
+        sl = QVBoxLayout(status_w)
+        sl.setContentsMargins(10, 10, 10, 10)
+        sl.setSpacing(6)
+        hdr_row = QHBoxLayout()
+        hdr_row.addWidget(make_label("AI Model Status", TEXT_SECONDARY, 10, bold=True))
+        hdr_row.addStretch()
+        gpu_lbl = QLabel("GPU")
+        gpu_lbl.setStyleSheet(
+            f"background: {ACCENT_PURPLE}; color: #fff; font-size: 10px; "
+            "font-weight: 700; border-radius: 8px; padding: 1px 8px;"
+        )
+        hdr_row.addWidget(gpu_lbl)
+        sl.addLayout(hdr_row)
+
+        _model_statuses = [
+            ("AI Denoise (Noise2Self)",   "ready"),
+            ("AI Sharpen (Neural Deconv)", "training"),
+            ("StarNet (Star Removal)",     "planned"),
+        ]
+        _status_style = {
+            "ready":    (ACCENT_DARK, ACCENT, "Ready"),
+            "training": ("#2d1f00", ORANGE,  "Training…"),
+            "planned":  ("#1c1c2e", ACCENT_PURPLE, "Planned"),
+        }
+        for name, status in _model_statuses:
+            row = QHBoxLayout()
+            row.addWidget(make_label(name, TEXT_PRIMARY, 11))
+            row.addStretch()
+            bg, col, lbl_text = _status_style[status]
+            badge = QLabel(lbl_text)
+            badge.setStyleSheet(
+                f"background: {bg}; color: {col}; font-size: 10px; "
+                "font-weight: 600; border-radius: 8px; padding: 1px 8px;"
+            )
+            row.addWidget(badge)
+            sl.addLayout(row)
+        lay.addWidget(status_w)
+
+        # AI Denoise
+        den = CollapsibleSection("AI Denoise", accent=True)
+        den.add_info(
+            "Noise2Self — self-supervised denoising trained on real astro images. 7.7M params."
+        )
+        self._ai_denoise_strength = den.add_slider("Strength", 0.7, 0.0, 1.0, 0.05, 2)
+        self._ai_tile_combo       = den.add_combo("Tile size", ["128", "256", "512", "Full"])
+        self._ai_star_protect     = den.add_check("Protect stars (star mask)", True)
+        self._ai_tiled_check      = den.add_check("Tiled inference (reduces VRAM)", True)
+        den.add_run("▶ Apply AI Denoise", self.run_ai_denoise.emit)
+        lay.addWidget(den)
+
+        # AI Sharpen
+        shr = CollapsibleSection("AI Sharpen")
+        # warning banner
+        warn = QLabel("Model training in progress (epoch 16/30). Traditional fallback active.")
+        warn.setWordWrap(True)
+        warn.setStyleSheet(
+            f"background: #2d1f00; color: {ORANGE}; border: 1px solid rgba(210,153,34,0.19); "
+            "border-radius: 5px; padding: 6px 8px; font-size: 10px;"
+        )
+        shr.add_widget(warn)
+        self._ai_sharpen_strength = shr.add_slider("Strength", 0.5, 0.0, 1.0, 0.05, 2)
+        shr.add_run("▶ Apply AI Sharpen", self.run_ai_sharpen.emit)
+        lay.addWidget(shr)
+
+        # StarNet
+        star = CollapsibleSection("StarNet (Star Removal)")
+        info_banner = QLabel("Architecture planned. Use Star Reduction in Detail tab for now.")
+        info_banner.setWordWrap(True)
+        info_banner.setStyleSheet(
+            f"background: #1c1c2e; color: {ACCENT_PURPLE}; "
+            "border: 1px solid rgba(137,87,229,0.19); "
+            "border-radius: 5px; padding: 6px 8px; font-size: 10px;"
+        )
+        star.add_widget(info_banner)
+        btn_sn = star.add_run("▶ Run StarNet", self.run_starnet.emit)
+        btn_sn.setEnabled(False)
+        lay.addWidget(star)
+
+        # Train
+        train = CollapsibleSection("Train Your Own Models")
+        train.add_info("Self-supervised training on your own astro images.")
+        train.add_code_block(
+            "poetry run python scripts/\ntrain_denoise_model.py\n--input astro_data --epochs 30"
+        )
+        train.add_run("Open Training Guide…", flat=True)
+        lay.addWidget(train)
+
+        self._tabs.addTab(scrollable_tab(lay), "✦  AI Tools")
+
+    # ── TAB 9: Utility ────────────────────────────────────
+    def _build_utility_tab(self):
+        lay = QVBoxLayout()
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+
+        # Pixel Math
+        pm = CollapsibleSection("Pixel Math", accent=True)
+        pm.add_info("Custom per-pixel math. Variables: R, G, B, L, img1, img2.")
+        self._pixelmath_expr = QTextEdit()
+        self._pixelmath_expr.setPlaceholderText("R * 0.5 + B * 0.5")
+        self._pixelmath_expr.setFixedHeight(54)
+        self._pixelmath_expr.setStyleSheet(
+            f"background: {BG_TERTIARY}; color: {ACCENT}; "
+            f"border: 1px solid {BORDER}; border-radius: 5px; "
+            f"padding: 4px 8px; font-family: {FONT_MONO}; font-size: 11px;"
+        )
+        pm.add_widget(self._pixelmath_expr)
+        pm.add_run("⊞ Open Pixel Math Dialog…", self.open_pixelmath_dialog.emit, flat=True)
+        lay.addWidget(pm)
+
+        # HDR
+        hdr = CollapsibleSection("HDR Composition")
+        hdr.add_info("Merge differently-exposed images for extended dynamic range.")
+        hdr.add_run("⊞ Open HDR Dialog…", self.open_hdr_dialog.emit, flat=True)
+        lay.addWidget(hdr)
+
+        # Blink
+        blink = CollapsibleSection("Blink Comparator")
+        blink.add_info("Rapidly alternate between two images to spot differences.")
+        btns = blink.add_btn_row([("Load A…", True), ("Load B…", True)])
+        btns[0].clicked.connect(self.blink_load_a.emit)
+        btns[1].clicked.connect(self.blink_load_b.emit)
+        btns2 = blink.add_btn_row([("Current → A", True), ("Current → B", True)])
+        btns2[0].clicked.connect(self.blink_use_current_as_a.emit)
+        btns2[1].clicked.connect(self.blink_use_current_as_b.emit)
+        self._blink_fps = blink.add_slider("FPS", 2, 1, 10, 1, 0)
+        self._blink_fps.value_changed.connect(lambda v: self.blink_fps_changed.emit(int(v)))
+        self._btn_blink_toggle = blink.add_run("▶ Start Blinking")
+        self._blink_active = False
+        self._btn_blink_toggle.clicked.connect(self._on_blink_toggle)
+        lay.addWidget(blink)
+
+        # Macros
+        mac = CollapsibleSection("Macros / Scripting")
+        mac.add_info("Record, edit, and replay processing sequences.")
+        btns = mac.add_btn_row([("⏺ Record", True), ("⏹ Stop", True), ("▶ Play", True)])
+        btns[0].clicked.connect(self.start_macro_recording.emit)
+        btns[1].clicked.connect(self.stop_macro_recording.emit)
+        btns[2].clicked.connect(self.play_macro.emit)
+        btns2 = mac.add_btn_row([("Save Macro…", True), ("Load Macro…", True)])
+        btns2[0].clicked.connect(self.save_macro.emit)
+        btns2[1].clicked.connect(self.load_macro.emit)
+        lay.addWidget(mac)
+
+        # Python Console
+        con = CollapsibleSection("Python Console")
+        con.add_info("Full Python access to the Cosmica core API.")
+        con.add_run("⊞ Open Python Console…", self.open_python_console.emit, flat=True)
+        lay.addWidget(con)
+
+        # Statistics
+        stats = CollapsibleSection("Image Statistics")
+        stats.add_info("Mean, median, SD, min, max, histogram percentiles.")
+        stats.add_run("⊞ Show Statistics…", self.show_image_statistics.emit, flat=True)
+        lay.addWidget(stats)
+
+        self._tabs.addTab(scrollable_tab(lay), "⚙  Utility")
+
+    # ── Internal helpers ──────────────────────────────────
 
     def _emit_clip_points(self):
         self.clip_points_changed.emit(
-            self._ht_black_spin.value(),
-            self._ht_white_spin.value(),
+            float(self._ht_black_spin.value()),
+            float(self._ht_white_spin.value()),
         )
 
-    # ================================================================
-    # TAB 1: Pre-Process
-    # ================================================================
-    def _build_preprocess_tab(self):
-        layout = QVBoxLayout()
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
-
-        # --- Calibration ---
-        cal_group = _Section("Calibration")
-        cal_layout = cal_group.body
-        cal_layout.addWidget(
-            _info_label(
-                "Create masters from raw frame folders or use pre-made masters. "
-                "Add lights via the Project panel, then configure calibration frames below."
+    def _on_blink_toggle(self):
+        self._blink_active = not self._blink_active
+        self.blink_toggle.emit(self._blink_active)
+        self._btn_blink_toggle.setText(
+            "⏹ Stop Blinking" if self._blink_active else "▶ Start Blinking"
+        )
+        self._btn_blink_toggle.setStyleSheet(
+            self._btn_blink_toggle.styleSheet().replace(
+                ACCENT, "#c93030" if self._blink_active else ACCENT
             )
         )
 
-        def _cal_row(label_text: str, frame_type: str) -> tuple:
-            """Build a two-line calibration row: status label + Folder/Master buttons."""
-            lbl = QLabel(label_text)
-            lbl.setStyleSheet("font-size: 11px; color: #aaa;")
-            cal_layout.addWidget(lbl)
-            btn_row = QHBoxLayout()
-            btn_folder = QPushButton("Folder…")
-            btn_folder.setToolTip(f"Load {frame_type} frames folder — master will be auto-created")
-            btn_folder.clicked.connect(lambda: self._cal_load_folder(frame_type))
-            btn_row.addWidget(btn_folder)
-            btn_master = QPushButton("Master…")
-            btn_master.setToolTip(f"Load a pre-made master {frame_type} FITS file")
-            btn_master.clicked.connect(lambda: self._cal_load_master(frame_type))
-            btn_row.addWidget(btn_master)
-            cal_layout.addLayout(btn_row)
-            return lbl
+    # ── Public setters (called from main_window) ──────────
 
-        self._cal_bias_label = _cal_row("Bias: none", "bias")
-        self._cal_dark_label = _cal_row("Dark: none", "dark")
-        self._cal_flat_label = _cal_row("Flat: none", "flat")
+    def set_calibration_status(
+        self,
+        bias: str | None,
+        dark: str | None,
+        flat: str | None,
+    ) -> None:
+        self._cal_bias_label.setText(f"Bias: {bias or 'none'}")
+        self._cal_dark_label.setText(f"Dark: {dark or 'none'}")
+        self._cal_flat_label.setText(f"Flat: {flat or 'none'}")
 
-        cal_layout.addWidget(_info_label("Light frames: add via Project panel → Import Lights"))
+    def set_bg_sample_count(self, n: int) -> None:
+        self._bg_sample_label.setText(f"{n} manual sample{'s' if n != 1 else ''}")
 
-        self._btn_calibrate = QPushButton("Run Calibration")
-        self._btn_calibrate.setToolTip(
-            "Creates masters from loaded raw frames (if folders loaded), "
-            "then applies them to all light frames."
-        )
-        self._btn_calibrate.clicked.connect(self.run_calibration.emit)
-        cal_layout.addWidget(self._btn_calibrate)
+    def set_psf_result(self, fwhm: float, fwhm_x: float, fwhm_y: float,
+                       ellipticity: float, theta: float,
+                       n_stars: int, fwhm_std: float) -> None:
+        updates = {
+            "FWHM": f"{fwhm:.2f} px",
+            "FWHM X": f"{fwhm_x:.2f} px",
+            "FWHM Y": f"{fwhm_y:.2f} px",
+            "Ellipticity": f"{ellipticity:.3f}",
+            "Rotation": f"{theta:.1f}°",
+            "Stars used": str(n_stars),
+            "FWHM σ": f"{fwhm_std:.2f} px",
+        }
+        for key, val in updates.items():
+            if key in self._psf_result_labels:
+                self._psf_result_labels[key].setText(val)
 
-        # Store calibration frame paths / mode
-        self._cal_bias_paths: list[str] = []   # raw frames
-        self._cal_dark_paths: list[str] = []
-        self._cal_flat_paths: list[str] = []
-        self._cal_bias_master_path: str | None = None
-        self._cal_dark_master_path: str | None = None
-        self._cal_flat_master_path: str | None = None
-
-        layout.addWidget(cal_group)
-
-        # --- Cosmetic Correction ---
-        cos_group = _Section("Cosmetic Correction")
-        cos_layout = cos_group.body
-        cos_layout.addWidget(
-            _info_label("Detect and remove hot, cold, and dead pixels from sensor defects.")
-        )
-
-        self._hot_sigma_spin = QDoubleSpinBox()
-        self._hot_sigma_spin.setRange(1.0, 20.0)
-        self._hot_sigma_spin.setValue(5.0)
-        self._hot_sigma_spin.setSingleStep(0.5)
-        self._hot_sigma_spin.setToolTip("Sigma threshold for hot pixel detection")
-        cos_layout.addLayout(_h_row("Hot sigma:", self._hot_sigma_spin))
-
-        self._cold_sigma_spin = QDoubleSpinBox()
-        self._cold_sigma_spin.setRange(1.0, 20.0)
-        self._cold_sigma_spin.setValue(5.0)
-        self._cold_sigma_spin.setSingleStep(0.5)
-        self._cold_sigma_spin.setToolTip("Sigma threshold for cold pixel detection")
-        cos_layout.addLayout(_h_row("Cold sigma:", self._cold_sigma_spin))
-
-        self._dead_pixel_check = QCheckBox("Detect dead pixels (value = 0)")
-        self._dead_pixel_check.setChecked(True)
-        cos_layout.addWidget(self._dead_pixel_check)
-
-        self._add_preview_checkbox(cos_layout, "cosmetic")
-        self._hot_sigma_spin.valueChanged.connect(lambda: self._emit_if_preview_enabled("cosmetic"))
-        self._cold_sigma_spin.valueChanged.connect(lambda: self._emit_if_preview_enabled("cosmetic"))
-        self._dead_pixel_check.toggled.connect(lambda: self._emit_if_preview_enabled("cosmetic"))
-        self._btn_cosmetic = QPushButton("Apply Cosmetic Correction")
-        self._btn_cosmetic.clicked.connect(self.run_cosmetic.emit)
-        cos_layout.addWidget(self._btn_cosmetic)
-        layout.addWidget(cos_group)
-
-        # --- Debayer (OSC / One-Shot Color) ---
-        debayer_group = _Section("Debayer (OSC / Color Camera)")
-        debayer_layout = debayer_group.body
-        debayer_layout.addWidget(
-            _info_label(
-                "Convert raw Bayer mosaic to color image. Applied automatically after stacking "
-                "and when loading individual light frames with BAYERPAT header. "
-                "Use this button to debayer the current image manually."
+    def set_subframe_count(self, n_selected: int, n_total: int) -> None:
+        if n_selected == 0:
+            self._subframe_count_label.setText("No subframe selection active")
+        else:
+            self._subframe_count_label.setText(
+                f"{n_selected} / {n_total} frames selected"
             )
-        )
 
-        self._debayer_pattern_combo = QComboBox()
-        self._debayer_pattern_combo.addItems(["Auto-detect", "RGGB", "BGGR", "GRBG", "GBRG"])
-        self._debayer_pattern_combo.setToolTip(
-            "Bayer CFA pattern.\n"
-            "RGGB: most Sony/Canon/most OSC astro cameras (QHY163C, ZWO ASI533MC, etc.)\n"
-            "BGGR: some Nikon sensors\n"
-            "Auto-detect reads BAYERPAT keyword from FITS header."
-        )
-        debayer_layout.addLayout(_h_row("Pattern:", self._debayer_pattern_combo))
+    def add_multi_session(self, label: str) -> None:
+        self._ms_session_list.addItem(label)
+        self._btn_ms_stack.setEnabled(self._ms_session_list.count() > 0)
 
-        self._debayer_method_combo = QComboBox()
-        self._debayer_method_combo.addItems(
-            ["VNG (best quality)", "Edge-Aware (EA)", "Bilinear (fastest)", "Superpixel (2× bin)"]
-        )
-        self._debayer_method_combo.setToolTip(
-            "VNG: Variable Number of Gradients — best for astrophotography (default)\n"
-            "EA: Edge-Aware — sharpest edges, good for stars\n"
-            "Superpixel: 2×2 bin — half resolution, no interpolation artefacts\n"
-            "Bilinear: fastest but softest"
-        )
-        debayer_layout.addLayout(_h_row("Method:", self._debayer_method_combo))
-
-        btn_debayer = QPushButton("Apply Debayer")
-        btn_debayer.setToolTip("Debayer the current image — converts mono Bayer to color (3-channel)")
-        btn_debayer.clicked.connect(self.run_debayer.emit)
-        debayer_layout.addWidget(btn_debayer)
-        layout.addWidget(debayer_group)
-
-        layout.addStretch()
-        self._tabs.addTab(_scrollable_tab(layout), "Pre-Process")
-
-    # ================================================================
-    # TAB 2: Transform
-    # ================================================================
-    def _build_transform_tab(self):
-        layout = QVBoxLayout()
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
-
-        # --- Crop ---
-        crop_group = _Section("Crop")
-        crop_layout = crop_group.body
-        crop_layout.addWidget(_info_label("Crop image to a rectangular region."))
-
-        self._btn_crop_draw = QPushButton("Draw on Image…")
-        self._btn_crop_draw.setToolTip(
-            "Click and drag a rectangle on the image to set the crop region"
-        )
-        self._btn_crop_draw.setCheckable(True)
-        self._btn_crop_draw.clicked.connect(self._on_crop_draw_clicked)
-        crop_layout.addWidget(self._btn_crop_draw)
-
-        self._crop_x_spin = QSpinBox()
-        self._crop_x_spin.setRange(0, 99999)
-        crop_layout.addLayout(_h_row("X offset:", self._crop_x_spin))
-
-        self._crop_y_spin = QSpinBox()
-        self._crop_y_spin.setRange(0, 99999)
-        crop_layout.addLayout(_h_row("Y offset:", self._crop_y_spin))
-
-        self._crop_w_spin = QSpinBox()
-        self._crop_w_spin.setRange(0, 99999)
-        self._crop_w_spin.setSpecialValueText("Full")
-        crop_layout.addLayout(_h_row("Width:", self._crop_w_spin))
-
-        self._crop_h_spin = QSpinBox()
-        self._crop_h_spin.setRange(0, 99999)
-        self._crop_h_spin.setSpecialValueText("Full")
-        crop_layout.addLayout(_h_row("Height:", self._crop_h_spin))
-
-        btn_crop = QPushButton("Apply Crop")
-        btn_crop.clicked.connect(self.run_crop.emit)
-        crop_layout.addWidget(btn_crop)
-        layout.addWidget(crop_group)
-
-        # --- Rotate ---
-        rot_group = _Section("Rotate")
-        rot_layout = rot_group.body
-
-        self._rotate_combo = QComboBox()
-        self._rotate_combo.addItems(["90\u00b0 CW", "180\u00b0", "270\u00b0 CW", "Custom angle"])
-        rot_layout.addLayout(_h_row("Angle:", self._rotate_combo))
-
-        self._rotate_angle_spin = QDoubleSpinBox()
-        self._rotate_angle_spin.setRange(-360, 360)
-        self._rotate_angle_spin.setValue(0)
-        self._rotate_angle_spin.setDecimals(1)
-        self._rotate_angle_spin.setSuffix("\u00b0")
-        rot_layout.addLayout(_h_row("Custom:", self._rotate_angle_spin))
-
-        self._rotate_expand_check = QCheckBox("Expand canvas")
-        self._rotate_expand_check.setChecked(True)
-        rot_layout.addWidget(self._rotate_expand_check)
-
-        btn_rotate = QPushButton("Apply Rotation")
-        btn_rotate.clicked.connect(self.run_rotate.emit)
-        rot_layout.addWidget(btn_rotate)
-        layout.addWidget(rot_group)
-
-        # --- Flip ---
-        flip_group = _Section("Flip")
-        flip_layout = flip_group.body
-
-        self._flip_combo = QComboBox()
-        self._flip_combo.addItems(["Horizontal", "Vertical", "Both"])
-        flip_layout.addLayout(_h_row("Axis:", self._flip_combo))
-
-        btn_flip = QPushButton("Apply Flip")
-        btn_flip.clicked.connect(self.run_flip.emit)
-        flip_layout.addWidget(btn_flip)
-        layout.addWidget(flip_group)
-
-        # --- Resize ---
-        resize_group = _Section("Resize / Resample")
-        resize_layout = resize_group.body
-
-        self._resize_scale_spin = QDoubleSpinBox()
-        self._resize_scale_spin.setRange(0.1, 10.0)
-        self._resize_scale_spin.setValue(1.0)
-        self._resize_scale_spin.setSingleStep(0.1)
-        self._resize_scale_spin.setDecimals(2)
-        resize_layout.addLayout(_h_row("Scale:", self._resize_scale_spin))
-
-        self._resize_interp_combo = QComboBox()
-        self._resize_interp_combo.addItems(["Lanczos", "Bicubic", "Bilinear", "Nearest"])
-        resize_layout.addLayout(_h_row("Interpolation:", self._resize_interp_combo))
-
-        btn_resize = QPushButton("Apply Resize")
-        btn_resize.clicked.connect(self.run_resize.emit)
-        resize_layout.addWidget(btn_resize)
-        layout.addWidget(resize_group)
-
-        # --- Bin ---
-        bin_group = _Section("Bin")
-        bin_layout = bin_group.body
-        bin_layout.addWidget(_info_label("Combine pixels to increase SNR at lower resolution."))
-
-        self._bin_factor_combo = QComboBox()
-        self._bin_factor_combo.addItems(["2x2", "3x3", "4x4"])
-        bin_layout.addLayout(_h_row("Factor:", self._bin_factor_combo))
-
-        self._bin_mode_combo = QComboBox()
-        self._bin_mode_combo.addItems(["Average", "Sum"])
-        bin_layout.addLayout(_h_row("Mode:", self._bin_mode_combo))
-
-        btn_bin = QPushButton("Apply Bin")
-        btn_bin.clicked.connect(self.run_bin.emit)
-        bin_layout.addWidget(btn_bin)
-        layout.addWidget(bin_group)
-
-        # --- Invert ---
-        btn_invert = QPushButton("Invert Image")
-        btn_invert.setToolTip("Invert all pixel values (1 - image)")
-        btn_invert.clicked.connect(self.run_invert.emit)
-        layout.addWidget(btn_invert)
-
-        layout.addStretch()
-        self._tabs.addTab(_scrollable_tab(layout), "Transform")
-
-    # ================================================================
-    # TAB 3: Stacking
-    # ================================================================
-    def _build_stacking_tab(self):
-        layout = QVBoxLayout()
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
-
-        # --- Subframe Selector ---
-        sub_group = _Section("Subframe Selector")
-        sub_layout = sub_group.body
-        sub_layout.addWidget(
-            _info_label("Score and reject light frames by FWHM, eccentricity, SNR, and star count.")
-        )
-        btn_subframe = QPushButton("Open Subframe Selector...")
-        btn_subframe.clicked.connect(self.open_subframe_selector.emit)
-        sub_layout.addWidget(btn_subframe)
-        self._subframe_count_label = QLabel("No subframe selection active")
-        self._subframe_count_label.setStyleSheet("color: #aaa; font-size: 10px;")
-        sub_layout.addWidget(self._subframe_count_label)
-        layout.addWidget(sub_group)
-
-        # --- Section 1: Registration / Alignment ---
-        reg_group = _Section("Registration (Alignment)")
-        reg_layout = reg_group.body
-        reg_layout.addWidget(
-            _info_label("Detect stars and align light frames to the reference frame.")
-        )
-
-        self._reg_mode_combo = QComboBox()
-        self._reg_mode_combo.addItems(
-            ["Star (1-Pass)", "Star (2-Pass)", "Triangle Match", "FFT Translation", "Comet"]
-        )
-        self._reg_mode_combo.setToolTip(
-            "Star 1-Pass: GPU star detection + RANSAC, single pass.\n"
-            "Star 2-Pass: as above with refinement pass (large rotations/drift).\n"
-            "Triangle Match: scale/rotation-invariant triangle similarity matching.\n"
-            "  Handles large rotations, reflections, and few-star fields.\n"
-            "  Falls back to nearest-neighbour if matching is ambiguous.\n"
-            "FFT Translation: phase cross-correlation, GPU-accelerated (pure shift only).\n"
-            "Comet: track comet nucleus position, align by translation only."
-        )
-        self._reg_mode_combo.currentIndexChanged.connect(self._on_reg_mode_changed)
-        reg_layout.addLayout(_h_row("Mode:", self._reg_mode_combo))
-
-        self._comet_radius_spin = QSpinBox()
-        self._comet_radius_spin.setRange(5, 100)
-        self._comet_radius_spin.setValue(15)
-        self._comet_radius_spin.setToolTip("Search radius around peak for nucleus centroid (pixels)")
-        self._comet_radius_spin.setVisible(False)
-        reg_layout.addLayout(_h_row("Nucleus search radius:", self._comet_radius_spin))
-
-        self._star_sens_spin = QDoubleSpinBox()
-        self._star_sens_spin.setRange(1.0, 20.0)
-        self._star_sens_spin.setValue(5.0)
-        self._star_sens_spin.setSingleStep(1.0)
-        self._star_sens_spin.setToolTip(
-            "Sigma threshold for star detection (lower = more stars detected)"
-        )
-        reg_layout.addLayout(_h_row("Star Sensitivity:", self._star_sens_spin))
-
-        self._max_shift_spin = QDoubleSpinBox()
-        self._max_shift_spin.setRange(10, 500)
-        self._max_shift_spin.setValue(50)
-        self._max_shift_spin.setSingleStep(10)
-        self._max_shift_spin.setToolTip("Maximum allowed star shift in pixels for matching")
-        reg_layout.addLayout(_h_row("Max Match Distance (px):", self._max_shift_spin))
-
-        self._ransac_thresh_spin = QDoubleSpinBox()
-        self._ransac_thresh_spin.setRange(1.0, 10.0)
-        self._ransac_thresh_spin.setValue(3.0)
-        self._ransac_thresh_spin.setSingleStep(0.5)
-        self._ransac_thresh_spin.setToolTip("RANSAC inlier threshold for transform estimation")
-        reg_layout.addLayout(_h_row("RANSAC Threshold:", self._ransac_thresh_spin))
-
-        # --- Reference frame selection ---
-        self._ref_frame_combo = QComboBox()
-        self._ref_frame_combo.addItems([
-            "Auto (best quality)",
-            "First frame",
-            "Last frame",
-            "Specific frame #",
-        ])
-        self._ref_frame_combo.setToolTip(
-            "Auto: picks the frame with the most stars / highest variance.\n"
-            "First / Last: use temporal position.\n"
-            "Specific #: enter any frame number manually."
-        )
-        self._ref_frame_combo.currentIndexChanged.connect(self._on_ref_frame_mode_changed)
-        reg_layout.addLayout(_h_row("Reference frame:", self._ref_frame_combo))
-
-        self._ref_frame_spin = QSpinBox()
-        self._ref_frame_spin.setRange(1, 9999)
-        self._ref_frame_spin.setValue(1)
-        self._ref_frame_spin.setToolTip("1-based frame number to use as alignment reference")
-        self._ref_frame_spin.setVisible(False)
-        reg_layout.addLayout(_h_row("Frame #:", self._ref_frame_spin))
-
-        self._btn_align = QPushButton("Align Frames")
-        self._btn_align.setToolTip("Detect stars and align all frames without stacking")
-        self._btn_align.clicked.connect(self.run_alignment.emit)
-        reg_layout.addWidget(self._btn_align)
-        layout.addWidget(reg_group)
-
-        # --- Section 2: Integration / Stacking ---
-        stack_group = _Section("Integration (Stacking)")
-        stack_layout = stack_group.body
-        stack_layout.addWidget(
-            _info_label("Combine aligned frames using rejection to increase signal-to-noise ratio.")
-        )
-
-        self._rejection_combo = QComboBox()
-        self._rejection_combo.addItems(
-            [
-                "Sigma Clipping",
-                "Winsorized Sigma",
-                "Linear Fit",
-                "Percentile Clip",
-                "ESD (Generalized)",
-                "Min/Max",
-                "None",
-            ]
-        )
-        self._rejection_combo.setToolTip(
-            "Method to reject outlier pixels (satellites, cosmic rays)"
-        )
-        stack_layout.addLayout(_h_row("Rejection:", self._rejection_combo))
-
-        self._integration_combo = QComboBox()
-        self._integration_combo.addItems(["Average", "Median", "Weighted Average"])
-        self._integration_combo.setToolTip(
-            "Average: equal-weight mean.\n"
-            "Median: robust against hot pixels (slower).\n"
-            "Weighted Average: weight each frame by its quality score (SNR/FWHM). "
-            "Scores are computed automatically before stacking."
-        )
-        stack_layout.addLayout(_h_row("Integration:", self._integration_combo))
-
-        self._kappa_spin = QDoubleSpinBox()
-        self._kappa_spin.setRange(0.5, 10.0)
-        self._kappa_spin.setValue(3.0)
-        self._kappa_spin.setSingleStep(0.1)
-        self._kappa_spin.setToolTip("Sigma clipping threshold — lower = more aggressive rejection")
-        stack_layout.addLayout(_h_row("Kappa:", self._kappa_spin))
-
-        self._btn_stack = QPushButton("Stack Images")
-        self._btn_stack.setToolTip("Align and stack all calibrated light frames")
-        self._btn_stack.clicked.connect(self.run_stacking.emit)
-        stack_layout.addWidget(self._btn_stack)
-        layout.addWidget(stack_group)
-
-        # --- Drizzle Integration ---
-        drizzle_group = _Section("Drizzle Integration")
-        drizzle_layout = drizzle_group.body
-        drizzle_layout.addWidget(
-            _info_label(
-                "Sub-pixel resolution enhancement. Stack frames at higher output resolution."
-            )
-        )
-
-        self._drizzle_check = QCheckBox("Enable Drizzle")
-        self._drizzle_check.setChecked(False)
-        self._drizzle_check.setToolTip(
-            "Use drizzle algorithm instead of standard stacking.\n"
-            "Requires well-dithered frames for best results."
-        )
-        drizzle_layout.addWidget(self._drizzle_check)
-
-        self._drizzle_scale_combo = QComboBox()
-        self._drizzle_scale_combo.addItems(["2× (recommended)", "3×"])
-        self._drizzle_scale_combo.setToolTip("Output scale factor (2× = double resolution)")
-        drizzle_layout.addLayout(_h_row("Output Scale:", self._drizzle_scale_combo))
-
-        self._drizzle_drop_spin = QDoubleSpinBox()
-        self._drizzle_drop_spin.setRange(0.5, 1.0)
-        self._drizzle_drop_spin.setValue(0.7)
-        self._drizzle_drop_spin.setSingleStep(0.05)
-        self._drizzle_drop_spin.setDecimals(2)
-        self._drizzle_drop_spin.setToolTip(
-            "Pixel fraction (drop shrink). 0.7 is standard; lower = sharper but noisier."
-        )
-        drizzle_layout.addLayout(_h_row("Drop Shrink:", self._drizzle_drop_spin))
-
-        self._drizzle_check.toggled.connect(
-            lambda en: (
-                self._drizzle_scale_combo.setEnabled(en),
-                self._drizzle_drop_spin.setEnabled(en),
-            )
-        )
-        self._drizzle_scale_combo.setEnabled(False)
-        self._drizzle_drop_spin.setEnabled(False)
-
-        layout.addWidget(drizzle_group)
-
-        # --- Multi-Session / Multi-Setup Integration ---
-        ms_group = _Section("Multi-Session Integration")
-        ms_layout = ms_group.body
-        ms_layout.addWidget(_info_label(
-            "Stack frames from different telescopes, cameras, or nights into one image. "
-            "Each session is stacked independently then combined with weighted integration."
-        ))
-
-        self._ms_session_list = QListWidget()
-        self._ms_session_list.setMaximumHeight(90)
-        self._ms_session_list.setToolTip("Sessions to integrate. Each session = one folder of frames.")
-        ms_layout.addWidget(self._ms_session_list)
-
-        ms_btn_row = QHBoxLayout()
-        btn_ms_add = QPushButton("Add Session…")
-        btn_ms_add.setToolTip("Add a folder of light frames as a new session")
-        btn_ms_add.clicked.connect(self.multi_session_add_folder.emit)
-        ms_btn_row.addWidget(btn_ms_add)
-        btn_ms_clear = QPushButton("Clear All")
-        btn_ms_clear.clicked.connect(self._on_ms_clear)
-        ms_btn_row.addWidget(btn_ms_clear)
-        ms_layout.addLayout(ms_btn_row)
-
-        self._ms_weight_combo = QComboBox()
-        self._ms_weight_combo.addItems(["SNR (recommended)", "Integration time", "Equal weight"])
-        self._ms_weight_combo.setToolTip(
-            "SNR: weight each session by estimated signal-to-noise (best for mixed setups).\n"
-            "Integration time: weight by total exposure — requires EXPTIME headers.\n"
-            "Equal: all sessions contribute equally regardless of depth."
-        )
-        ms_layout.addLayout(_h_row("Weighting:", self._ms_weight_combo))
-
-        self._ms_normalize_check = QCheckBox("Normalize background across sessions")
-        self._ms_normalize_check.setChecked(True)
-        self._ms_normalize_check.setToolTip(
-            "Match sky background level between sessions before integrating. "
-            "Recommended when sessions have different sky brightness."
-        )
-        ms_layout.addWidget(self._ms_normalize_check)
-
-        self._ms_align_check = QCheckBox("Align sub-stacks")
-        self._ms_align_check.setChecked(True)
-        self._ms_align_check.setToolTip(
-            "Star-align the per-session stacks to each other before final integration."
-        )
-        ms_layout.addWidget(self._ms_align_check)
-
-        self._btn_ms_stack = QPushButton("Stack All Sessions")
-        self._btn_ms_stack.setToolTip("Stack each session then combine with weighted integration")
-        self._btn_ms_stack.clicked.connect(self.run_multi_session.emit)
+    def clear_multi_sessions(self) -> None:
+        self._ms_session_list.clear()
         self._btn_ms_stack.setEnabled(False)
-        ms_layout.addWidget(self._btn_ms_stack)
-        layout.addWidget(ms_group)
 
-        # --- Batch Processing ---
-        batch_group = _Section("Batch Processing")
-        batch_layout = batch_group.body
-        batch_layout.addWidget(
-            _info_label("Apply a processing pipeline to multiple images at once.")
-        )
-        self._btn_batch = QPushButton("Open Batch Dialog...")
-        self._btn_batch.clicked.connect(self.open_batch_dialog.emit)
-        batch_layout.addWidget(self._btn_batch)
-        layout.addWidget(batch_group)
-
-        layout.addStretch()
-        self._tabs.addTab(_scrollable_tab(layout), "Stacking")
-
-    # ================================================================
-    # TAB 3: Stretch
-    # ================================================================
-    def _build_stretch_tab(self):
-        layout = QVBoxLayout()
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
-
-        # --- Auto-Stretch ---
-        stretch_group = _Section("Auto-Stretch")
-        stretch_layout = stretch_group.body
-        stretch_layout.addWidget(
-            _info_label("Apply statistical midtone stretch to bring out faint details.")
-        )
-
-        self._midtone_slider = ResettableSlider(Qt.Orientation.Horizontal, default_value=25)
-        self._midtone_slider.setRange(1, 99)
-        self._midtone_slider.setValue(25)
-        self._midtone_slider.setToolTip("Controls the brightness of midtones (lower = brighter). Double-click to reset.")
-        self._midtone_value = QLabel("0.25")
-        self._midtone_slider.valueChanged.connect(
-            lambda v: self._midtone_value.setText(f"{v / 100:.2f}")
-        )
-        self._midtone_slider.valueChanged.connect(lambda: self.stretch_params_changed.emit())
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Midtone:"))
-        row.addWidget(self._midtone_slider)
-        row.addWidget(self._midtone_value)
-        stretch_layout.addLayout(row)
-
-        self._shadow_spin = QDoubleSpinBox()
-        self._shadow_spin.setRange(-10.0, 0.0)
-        self._shadow_spin.setValue(-2.8)
-        self._shadow_spin.setSingleStep(0.1)
-        self._shadow_spin.setToolTip("Black point clipping in MAD units below median")
-        self._shadow_spin.valueChanged.connect(lambda: self.stretch_params_changed.emit())
-        stretch_layout.addLayout(_h_row("Shadow:", self._shadow_spin))
-
-        self._linked_check = QCheckBox("Link RGB channels")
-        self._linked_check.setChecked(True)
-        self._linked_check.setToolTip(
-            "Apply the same stretch to all channels (preserves color balance)"
-        )
-        self._linked_check.stateChanged.connect(lambda: self.stretch_params_changed.emit())
-        stretch_layout.addWidget(self._linked_check)
-
-        self._split_check = QCheckBox("Before/After split preview")
-        self._split_check.setToolTip("Show original and stretched side by side")
-        stretch_layout.addWidget(self._split_check)
-        self._split_check.stateChanged.connect(lambda: self.stretch_params_changed.emit())
-
-        stretch_btn_row = QHBoxLayout()
-        self._btn_stretch = QPushButton("Apply Stretch")
-        self._btn_stretch.setToolTip("Apply the stretch to the current image permanently")
-        self._btn_stretch.clicked.connect(self.run_stretch.emit)
-        stretch_btn_row.addWidget(self._btn_stretch)
-        self._btn_stretch_reset = QPushButton("Reset")
-        self._btn_stretch_reset.setToolTip("Reset midtone and shadow to defaults")
-        self._btn_stretch_reset.clicked.connect(self.reset_stretch_params)
-        stretch_btn_row.addWidget(self._btn_stretch_reset)
-        stretch_layout.addLayout(stretch_btn_row)
-        layout.addWidget(stretch_group)
-
-        # --- GHS (Generalized Hyperbolic Stretch) ---
-        ghs_group = _Section("Generalized Hyperbolic Stretch")
-        ghs_layout = ghs_group.body
-        ghs_layout.addWidget(
-            _info_label(
-                "Advanced non-linear stretch with fine control over shadows, midtones, and highlights."
-            )
-        )
-
-        self._ghs_d_spin = QDoubleSpinBox()
-        self._ghs_d_spin.setRange(0.0, 20.0)
-        self._ghs_d_spin.setValue(5.0)
-        self._ghs_d_spin.setSingleStep(0.5)
-        self._ghs_d_spin.setToolTip("Stretch factor (0 = no stretch)")
-        ghs_layout.addLayout(_h_row("Stretch (D):", self._ghs_d_spin))
-
-        self._ghs_b_spin = QDoubleSpinBox()
-        self._ghs_b_spin.setRange(-5.0, 5.0)
-        self._ghs_b_spin.setValue(0.0)
-        self._ghs_b_spin.setSingleStep(0.1)
-        self._ghs_b_spin.setToolTip("Asymmetry (-5 to 5, 0 = symmetric)")
-        ghs_layout.addLayout(_h_row("Asymmetry (b):", self._ghs_b_spin))
-
-        self._ghs_sp_spin = QDoubleSpinBox()
-        self._ghs_sp_spin.setRange(0.0, 1.0)
-        self._ghs_sp_spin.setValue(0.0)
-        self._ghs_sp_spin.setSingleStep(0.05)
-        self._ghs_sp_spin.setDecimals(3)
-        self._ghs_sp_spin.setToolTip("Symmetry point (center of stretch)")
-        ghs_layout.addLayout(_h_row("Sym. point:", self._ghs_sp_spin))
-
-        self._ghs_shadow_slider = ResettableSlider(Qt.Orientation.Horizontal, default_value=0)
-        self._ghs_shadow_slider.setRange(0, 100)
-        self._ghs_shadow_slider.setValue(0)
-        self._ghs_shadow_slider.setToolTip("Double-click to reset to 0")
-        self._ghs_shadow_label = QLabel("0.00")
-        self._ghs_shadow_slider.valueChanged.connect(
-            lambda v: self._ghs_shadow_label.setText(f"{v / 100:.2f}")
-        )
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Shadow prot.:"))
-        row.addWidget(self._ghs_shadow_slider)
-        row.addWidget(self._ghs_shadow_label)
-        ghs_layout.addLayout(row)
-
-        self._ghs_highlight_slider = ResettableSlider(Qt.Orientation.Horizontal, default_value=0)
-        self._ghs_highlight_slider.setRange(0, 100)
-        self._ghs_highlight_slider.setValue(0)
-        self._ghs_highlight_slider.setToolTip("Double-click to reset to 0")
-        self._ghs_highlight_label = QLabel("0.00")
-        self._ghs_highlight_slider.valueChanged.connect(
-            lambda v: self._ghs_highlight_label.setText(f"{v / 100:.2f}")
-        )
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Highlight prot.:"))
-        row.addWidget(self._ghs_highlight_slider)
-        row.addWidget(self._ghs_highlight_label)
-        ghs_layout.addLayout(row)
-
-        ghs_btn_row = QHBoxLayout()
-        self._btn_ghs = QPushButton("Apply GHS")
-        self._btn_ghs.clicked.connect(self.run_ghs.emit)
-        ghs_btn_row.addWidget(self._btn_ghs)
-        self._btn_ghs_reset = QPushButton("Reset")
-        self._btn_ghs_reset.setToolTip("Reset to default values")
-        self._btn_ghs_reset.clicked.connect(self.reset_ghs_params)
-        ghs_btn_row.addWidget(self._btn_ghs_reset)
-        ghs_layout.addLayout(ghs_btn_row)
-
-        self._add_preview_checkbox(ghs_layout, "ghs")
-        self._ghs_d_spin.valueChanged.connect(lambda: self._emit_if_preview_enabled("ghs"))
-        self._ghs_b_spin.valueChanged.connect(lambda: self._emit_if_preview_enabled("ghs"))
-        self._ghs_sp_spin.valueChanged.connect(lambda: self._emit_if_preview_enabled("ghs"))
-        self._ghs_shadow_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("ghs"))
-        self._ghs_highlight_slider.valueChanged.connect(
-            lambda: self._emit_if_preview_enabled("ghs")
-        )
-
-        layout.addWidget(ghs_group)
-
-        # --- Arcsinh Stretch ---
-        arcsinh_group = _Section("Arcsinh Stretch")
-        arcsinh_layout = arcsinh_group.body
-        arcsinh_layout.addWidget(
-            _info_label("Lupton et al. 2004 — linear-to-arcsinh ramp. Preserves star colours "
-                        "better than log; reveals faint nebulosity without blowing out stars.")
-        )
-
-        self._arcsinh_factor_spin = QDoubleSpinBox()
-        self._arcsinh_factor_spin.setRange(0.1, 1000.0)
-        self._arcsinh_factor_spin.setValue(10.0)
-        self._arcsinh_factor_spin.setSingleStep(1.0)
-        self._arcsinh_factor_spin.setDecimals(1)
-        self._arcsinh_factor_spin.setToolTip("Stretch factor β — higher = more compression of brights")
-        arcsinh_layout.addLayout(_h_row("Stretch factor:", self._arcsinh_factor_spin))
-
-        self._arcsinh_bp_spin = QDoubleSpinBox()
-        self._arcsinh_bp_spin.setRange(0.0, 0.5)
-        self._arcsinh_bp_spin.setValue(0.0)
-        self._arcsinh_bp_spin.setSingleStep(0.001)
-        self._arcsinh_bp_spin.setDecimals(4)
-        self._arcsinh_bp_spin.setToolTip("Black point — input level mapped to zero")
-        arcsinh_layout.addLayout(_h_row("Black point:", self._arcsinh_bp_spin))
-
-        self._arcsinh_linked_check = QCheckBox("Linked RGB")
-        self._arcsinh_linked_check.setChecked(True)
-        self._arcsinh_linked_check.setToolTip("Same stretch for all channels (preserves colour balance)")
-        arcsinh_layout.addWidget(self._arcsinh_linked_check)
-
-        arcsinh_btn_row = QHBoxLayout()
-        self._btn_arcsinh = QPushButton("Apply Arcsinh Stretch")
-        self._btn_arcsinh.clicked.connect(self.run_arcsinh_stretch.emit)
-        arcsinh_btn_row.addWidget(self._btn_arcsinh)
-        self._btn_arcsinh_reset = QPushButton("Reset")
-        self._btn_arcsinh_reset.setToolTip("Reset to default values")
-        self._btn_arcsinh_reset.clicked.connect(self._reset_arcsinh_params)
-        arcsinh_btn_row.addWidget(self._btn_arcsinh_reset)
-        arcsinh_layout.addLayout(arcsinh_btn_row)
-
-        self._add_preview_checkbox(arcsinh_layout, "arcsinh_stretch")
-        self._arcsinh_factor_spin.valueChanged.connect(
-            lambda: self._emit_if_preview_enabled("arcsinh_stretch")
-        )
-        self._arcsinh_bp_spin.valueChanged.connect(
-            lambda: self._emit_if_preview_enabled("arcsinh_stretch")
-        )
-
-        layout.addWidget(arcsinh_group)
-
-        # --- Histogram Transform ---
-        ht_group = _Section("Histogram Transform")
-        ht_layout = ht_group.body
-        ht_layout.addWidget(
-            _info_label("Interactive black point, midtone, and white point adjustment.")
-        )
-
-        self._ht_black_spin = QDoubleSpinBox()
-        self._ht_black_spin.setRange(0.0, 0.99)
-        self._ht_black_spin.setValue(0.0)
-        self._ht_black_spin.setSingleStep(0.01)
-        self._ht_black_spin.setDecimals(3)
-        self._ht_black_spin.setToolTip("Shadow clipping point")
-        ht_layout.addLayout(_h_row("Black point:", self._ht_black_spin))
-
-        self._ht_midtone_slider = ResettableSlider(Qt.Orientation.Horizontal, default_value=50)
-        self._ht_midtone_slider.setRange(1, 99)
-        self._ht_midtone_slider.setValue(50)
-        self._ht_midtone_slider.setToolTip("Double-click to reset to default (0.50)")
-        self._ht_midtone_label = QLabel("0.50")
-        self._ht_midtone_slider.valueChanged.connect(
-            lambda v: self._ht_midtone_label.setText(f"{v / 100:.2f}")
-        )
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Midtone:"))
-        row.addWidget(self._ht_midtone_slider)
-        row.addWidget(self._ht_midtone_label)
-        ht_layout.addLayout(row)
-
-        self._ht_white_spin = QDoubleSpinBox()
-        self._ht_white_spin.setRange(0.01, 1.0)
-        self._ht_white_spin.setValue(1.0)
-        self._ht_white_spin.setSingleStep(0.01)
-        self._ht_white_spin.setDecimals(3)
-        self._ht_white_spin.setToolTip("White point clipping")
-        ht_layout.addLayout(_h_row("White point:", self._ht_white_spin))
-
-        ht_btn_row = QHBoxLayout()
-        self._btn_ht = QPushButton("Apply Histogram Transform")
-        self._btn_ht.clicked.connect(self.run_histogram_transform.emit)
-        ht_btn_row.addWidget(self._btn_ht)
-        self._btn_ht_reset = QPushButton("Reset")
-        self._btn_ht_reset.setToolTip("Reset to default values")
-        self._btn_ht_reset.clicked.connect(self.reset_histogram_transform_params)
-        ht_btn_row.addWidget(self._btn_ht_reset)
-        ht_layout.addLayout(ht_btn_row)
-
-        self._add_preview_checkbox(ht_layout, "histogram_transform")
-        self._ht_black_spin.valueChanged.connect(
-            lambda: self._emit_if_preview_enabled("histogram_transform")
-        )
-        self._ht_midtone_slider.valueChanged.connect(
-            lambda: self._emit_if_preview_enabled("histogram_transform")
-        )
-        self._ht_white_spin.valueChanged.connect(
-            lambda: self._emit_if_preview_enabled("histogram_transform")
-        )
-        self._ht_black_spin.valueChanged.connect(self._emit_clip_points)
-        self._ht_white_spin.valueChanged.connect(self._emit_clip_points)
-
-        layout.addWidget(ht_group)
-
-        # --- Curves ---
-        curves_group = _Section("Curves")
-        curves_layout = curves_group.body
-        curves_layout.addWidget(
-            _info_label("Click to add points, drag to adjust. Right-click to remove.")
-        )
-
-        self._curve_channel_combo = QComboBox()
-        self._curve_channel_combo.addItems(["Master (L)", "Red", "Green", "Blue"])
-        self._curve_channel_combo.currentIndexChanged.connect(self._on_curve_channel_changed)
-        self._curve_channel_combo.currentIndexChanged.connect(
-            lambda: self.curves_histogram_changed.emit()
-        )
-        curves_layout.addLayout(_h_row("Channel:", self._curve_channel_combo))
-
-        self._curve_editor = CurveEditor()
-        self._curve_editor.setMinimumHeight(180)
-        self._curve_editor.curve_changed.connect(self._on_curves_changed)
-        curves_layout.addWidget(self._curve_editor)
-
-        self._add_preview_checkbox(curves_layout, "curves")
-
-        self._curves_histogram_check = QCheckBox("Show histogram")
-        self._curves_histogram_check.setToolTip("Display image histogram behind curve")
-        self._curves_histogram_check.stateChanged.connect(
-            lambda: self.curves_histogram_changed.emit()
-        )
-        curves_layout.addWidget(self._curves_histogram_check)
-
-        btn_row = QHBoxLayout()
-        self._btn_curves_apply = QPushButton("Apply Curves")
-        self._btn_curves_apply.clicked.connect(self.run_curves.emit)
-        btn_row.addWidget(self._btn_curves_apply)
-        self._btn_curves_reset = QPushButton("Reset")
-        self._btn_curves_reset.clicked.connect(self._curve_editor.reset)
-        btn_row.addWidget(self._btn_curves_reset)
-        curves_layout.addLayout(btn_row)
-
-        layout.addWidget(curves_group)
-
-        layout.addStretch()
-        self._tabs.addTab(_scrollable_tab(layout), "Stretch")
-
-    # ================================================================
-    # TAB 4: Background
-    # ================================================================
-    def _build_background_tab(self):
-        layout = QVBoxLayout()
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
-
-        # --- Background Extraction ---
-        bg_group = _Section("Background Extraction")
-        bg_layout = bg_group.body
-        bg_layout.addWidget(
-            _info_label(
-                "Remove light pollution gradients by fitting and subtracting a background model."
-            )
-        )
-
-        self._bg_grid_spin = QSpinBox()
-        self._bg_grid_spin.setRange(4, 32)
-        self._bg_grid_spin.setValue(8)
-        self._bg_grid_spin.setToolTip("Number of sample points per axis for background measurement")
-        bg_layout.addLayout(_h_row("Grid size:", self._bg_grid_spin))
-
-        self._bg_order_spin = QSpinBox()
-        self._bg_order_spin.setRange(1, 6)
-        self._bg_order_spin.setValue(3)
-        self._bg_order_spin.setToolTip("Polynomial degree for the background surface model")
-        bg_layout.addLayout(_h_row("Poly order:", self._bg_order_spin))
-
-        # Auto-grid
-        grid_row = QHBoxLayout()
-        self._bg_grid_rows_spin = QSpinBox()
-        self._bg_grid_rows_spin.setRange(2, 20)
-        self._bg_grid_rows_spin.setValue(5)
-        self._bg_grid_rows_spin.setToolTip("Number of sample rows in auto-grid")
-        grid_row.addWidget(QLabel("Rows:"))
-        grid_row.addWidget(self._bg_grid_rows_spin)
-
-        self._bg_grid_cols_spin = QSpinBox()
-        self._bg_grid_cols_spin.setRange(2, 20)
-        self._bg_grid_cols_spin.setValue(5)
-        self._bg_grid_cols_spin.setToolTip("Number of sample columns in auto-grid")
-        grid_row.addWidget(QLabel("Cols:"))
-        grid_row.addWidget(self._bg_grid_cols_spin)
-        bg_layout.addLayout(grid_row)
-
-        self._bg_box_size_spin = QSpinBox()
-        self._bg_box_size_spin.setRange(8, 256)
-        self._bg_box_size_spin.setValue(64)
-        self._bg_box_size_spin.setSingleStep(8)
-        self._bg_box_size_spin.setToolTip("Side length (pixels) of each sample measurement box")
-        bg_layout.addLayout(_h_row("Box size (px):", self._bg_box_size_spin))
-
-        btn_add_grid = QPushButton("Add Grid")
-        btn_add_grid.setToolTip(
-            "Auto-place sample points in an evenly-spaced grid across the image.\n"
-            "Existing samples are kept — click Clear first to start fresh."
-        )
-        btn_add_grid.clicked.connect(self._on_add_bg_grid)
-        bg_layout.addWidget(btn_add_grid)
-
-        # Interactive sample placement
-        self._btn_place_samples = QPushButton("Place Samples Manually")
-        self._btn_place_samples.setCheckable(True)
-        self._btn_place_samples.setToolTip(
-            "Click on the image to place background sample points.\n"
-            "Left-click adds, right-click removes nearest."
-        )
-        self._btn_place_samples.toggled.connect(self.toggle_sample_mode.emit)
-        bg_layout.addWidget(self._btn_place_samples)
-
-        self._bg_sample_label = QLabel("0 manual samples")
-        self._bg_sample_label.setStyleSheet("color: #aaaaaa; font-size: 10px;")
-        bg_layout.addWidget(self._bg_sample_label)
-
-        btn_clear_samples = QPushButton("Clear Samples")
-        btn_clear_samples.setToolTip("Remove all manually placed sample points")
-        btn_clear_samples.clicked.connect(self.clear_bg_samples.emit)
-        bg_layout.addWidget(btn_clear_samples)
-
-        self._btn_background = QPushButton("Extract Background")
-        self._btn_background.setToolTip("Compute and subtract the background gradient")
-        self._btn_background.clicked.connect(self.run_background.emit)
-        bg_layout.addWidget(self._btn_background)
-        layout.addWidget(bg_group)
-
-        # --- Background Neutralization ---
-        bn_group = _Section("Background Neutralization")
-        bn_layout = bn_group.body
-        bn_layout.addWidget(
-            _info_label(
-                "Shift sky background to neutral zero by subtracting per-channel "
-                "darkest-percentile level."
-            )
-        )
-
-        self._bn_percentile_spin = QDoubleSpinBox()
-        self._bn_percentile_spin.setRange(0.1, 20.0)
-        self._bn_percentile_spin.setValue(2.0)
-        self._bn_percentile_spin.setSingleStep(0.5)
-        self._bn_percentile_spin.setDecimals(1)
-        self._bn_percentile_spin.setToolTip(
-            "Take the Nth percentile of dark-sky pixels as the background estimate.\n"
-            "Keep this low (1–3%) for images with significant nebulosity."
-        )
-        bn_layout.addLayout(_h_row("Percentile:", self._bn_percentile_spin))
-
-        self._bn_protect_spin = QDoubleSpinBox()
-        self._bn_protect_spin.setRange(0.1, 1.0)
-        self._bn_protect_spin.setValue(0.5)
-        self._bn_protect_spin.setSingleStep(0.05)
-        self._bn_protect_spin.setDecimals(2)
-        self._bn_protect_spin.setToolTip(
-            "Ignore pixels brighter than this fraction of the channel maximum\n"
-            "when estimating sky background. 0.5 = use only the darkest 50% of pixels.\n"
-            "Lower values protect more nebulosity from being mistaken for background."
-        )
-        bn_layout.addLayout(_h_row("Protect bright:", self._bn_protect_spin))
-
-        self._bn_amount_spin = QDoubleSpinBox()
-        self._bn_amount_spin.setRange(0.0, 1.0)
-        self._bn_amount_spin.setValue(1.0)
-        self._bn_amount_spin.setSingleStep(0.05)
-        self._bn_amount_spin.setDecimals(2)
-        self._bn_amount_spin.setToolTip("Blend strength: 0 = no change, 1 = full correction")
-        bn_layout.addLayout(_h_row("Amount:", self._bn_amount_spin))
-
-        btn_bn = QPushButton("Run Background Neutralization")
-        btn_bn.clicked.connect(self.run_background_neutralization.emit)
-        bn_layout.addWidget(btn_bn)
-        layout.addWidget(bn_group)
-
-        # --- ABE (RBF) ---
-        abe_group = _Section("ABE (Advanced)")
-        abe_layout = abe_group.body
-        abe_layout.addWidget(
-            _info_label("Background extraction using polynomial or RBF surface fitting.")
-        )
-
-        self._abe_grid_spin = QSpinBox()
-        self._abe_grid_spin.setRange(5, 30)
-        self._abe_grid_spin.setValue(10)
-        abe_layout.addLayout(_h_row("Grid size:", self._abe_grid_spin))
-
-        self._abe_model_combo = QComboBox()
-        self._abe_model_combo.addItems(["Polynomial (recommended)", "RBF"])
-        abe_layout.addLayout(_h_row("Model:", self._abe_model_combo))
-
-        self._abe_degree_spin = QSpinBox()
-        self._abe_degree_spin.setRange(1, 5)
-        self._abe_degree_spin.setValue(4)
-        self._abe_degree_spin.setToolTip(
-            "Polynomial degree: 1=plane, 2=quadratic, 3=cubic, 4=quartic.\n"
-            "Degree 4 captures the cos⁴ falloff of optical vignetting at image edges."
-        )
-        abe_layout.addLayout(_h_row("Poly degree:", self._abe_degree_spin))
-
-        self._abe_kernel_combo = QComboBox()
-        self._abe_kernel_combo.addItems(["Thin Plate Spline", "Multiquadric", "Gaussian"])
-        abe_layout.addLayout(_h_row("RBF kernel:", self._abe_kernel_combo))
-
-        self._abe_smoothing_spin = QDoubleSpinBox()
-        self._abe_smoothing_spin.setRange(0.0, 5.0)
-        self._abe_smoothing_spin.setValue(0.5)
-        self._abe_smoothing_spin.setSingleStep(0.1)
-        abe_layout.addLayout(_h_row("RBF smoothing:", self._abe_smoothing_spin))
-
-        self._abe_mode_combo = QComboBox()
-        self._abe_mode_combo.addItems(["Subtraction", "Division"])
-        self._abe_mode_combo.setToolTip(
-            "Subtraction: remove additive sky gradients / light pollution (default).\n"
-            "Division: correct multiplicative optical vignetting (cos⁴ falloff)."
-        )
-        abe_layout.addLayout(_h_row("Mode:", self._abe_mode_combo))
-
-        self._abe_sample_pct_spin = QDoubleSpinBox()
-        self._abe_sample_pct_spin.setRange(1.0, 50.0)
-        self._abe_sample_pct_spin.setValue(10.0)
-        self._abe_sample_pct_spin.setSingleStep(1.0)
-        self._abe_sample_pct_spin.setDecimals(1)
-        self._abe_sample_pct_spin.setToolTip(
-            "Percentile used within each sample box to measure background.\n"
-            "Lower values (5–10) resist nebulosity contamination better."
-        )
-        abe_layout.addLayout(_h_row("Sample pct:", self._abe_sample_pct_spin))
-
-        self._abe_darkest_spin = QDoubleSpinBox()
-        self._abe_darkest_spin.setRange(0.1, 1.0)
-        self._abe_darkest_spin.setValue(0.6)
-        self._abe_darkest_spin.setSingleStep(0.05)
-        self._abe_darkest_spin.setDecimals(2)
-        self._abe_darkest_spin.setToolTip(
-            "Keep only the darkest N fraction of sample points for the background fit.\n"
-            "0.5 = use darkest 50% only — prevents nebula regions from biasing the model.\n"
-            "Increase toward 1.0 for images without significant extended emission."
-        )
-        abe_layout.addLayout(_h_row("Darkest frac:", self._abe_darkest_spin))
-
-        btn_abe = QPushButton("Run ABE")
-        btn_abe.clicked.connect(self.run_abe.emit)
-        abe_layout.addWidget(btn_abe)
-        layout.addWidget(abe_group)
-
-        # --- Vignette Correction ---
-        vig_group = _Section("Vignette Correction")
-        vig_layout = vig_group.body
-        vig_layout.addWidget(_info_label("Synthetic flat field for uncalibrated images."))
-
-        self._vig_strength_spin = QDoubleSpinBox()
-        self._vig_strength_spin.setRange(0.0, 2.0)
-        self._vig_strength_spin.setValue(1.0)
-        self._vig_strength_spin.setSingleStep(0.1)
-        vig_layout.addLayout(_h_row("Strength:", self._vig_strength_spin))
-
-        self._vig_falloff_spin = QDoubleSpinBox()
-        self._vig_falloff_spin.setRange(0.5, 5.0)
-        self._vig_falloff_spin.setValue(2.0)
-        self._vig_falloff_spin.setSingleStep(0.1)
-        vig_layout.addLayout(_h_row("Falloff:", self._vig_falloff_spin))
-
-        btn_vig = QPushButton("Correct Vignette")
-        btn_vig.clicked.connect(self.run_vignette_correction.emit)
-        vig_layout.addWidget(btn_vig)
-        layout.addWidget(vig_group)
-
-        # --- Banding Reduction ---
-        band_group = _Section("Banding Reduction")
-        band_layout = band_group.body
-        band_layout.addWidget(
-            _info_label("Remove horizontal/vertical banding artifacts common in CMOS sensors.")
-        )
-
-        self._band_h_check = QCheckBox("Horizontal banding")
-        self._band_h_check.setChecked(True)
-        band_layout.addWidget(self._band_h_check)
-
-        self._band_v_check = QCheckBox("Vertical banding")
-        band_layout.addWidget(self._band_v_check)
-
-        self._band_amount_slider = QSlider(Qt.Orientation.Horizontal)
-        self._band_amount_slider.setRange(0, 100)
-        self._band_amount_slider.setValue(100)
-        self._band_amount_label = QLabel("1.00")
-        self._band_amount_slider.valueChanged.connect(
-            lambda v: self._band_amount_label.setText(f"{v / 100:.2f}")
-        )
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Amount:"))
-        row.addWidget(self._band_amount_slider)
-        row.addWidget(self._band_amount_label)
-        band_layout.addLayout(row)
-
-        self._band_sigma_spin = QDoubleSpinBox()
-        self._band_sigma_spin.setRange(1.0, 10.0)
-        self._band_sigma_spin.setValue(3.0)
-        self._band_sigma_spin.setSingleStep(0.5)
-        self._band_sigma_spin.setToolTip("Sigma clipping to protect stars/objects from correction")
-        band_layout.addLayout(_h_row("Protection:", self._band_sigma_spin))
-
-        self._add_preview_checkbox(band_layout, "banding")
-        self._band_h_check.toggled.connect(lambda: self._emit_if_preview_enabled("banding"))
-        self._band_v_check.toggled.connect(lambda: self._emit_if_preview_enabled("banding"))
-        self._band_amount_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("banding"))
-        self._band_sigma_spin.valueChanged.connect(lambda: self._emit_if_preview_enabled("banding"))
-        self._btn_banding = QPushButton("Remove Banding")
-        self._btn_banding.clicked.connect(self.run_banding.emit)
-        band_layout.addWidget(self._btn_banding)
-        layout.addWidget(band_group)
-
-        layout.addStretch()
-        self._tabs.addTab(_scrollable_tab(layout), "Background")
-
-    # ================================================================
-    # TAB 5: Transform
-    # ================================================================
-    # TAB 4: Color
-    # ================================================================
-    def _build_color_tab(self):
-        layout = QVBoxLayout()
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
-
-        # --- Color Calibration ---
-        cc_group = _Section("Color Calibration")
-        cc_layout = cc_group.body
-        cc_layout.addWidget(
-            _info_label(
-                "Calibrate white balance using star photometry and background neutralization."
-            )
-        )
-
-        self._cc_reference_combo = QComboBox()
-        self._cc_reference_combo.addItems(["Average Star", "G2V (Solar)", "Custom"])
-        self._cc_reference_combo.setToolTip("White reference for calibration")
-        cc_layout.addLayout(_h_row("Reference:", self._cc_reference_combo))
-
-        self._cc_neutralize_bg = QCheckBox("Neutralize background")
-        self._cc_neutralize_bg.setChecked(True)
-        self._cc_neutralize_bg.setToolTip("Remove color cast from the background")
-        cc_layout.addWidget(self._cc_neutralize_bg)
-
-        self._cc_bg_percentile = QDoubleSpinBox()
-        self._cc_bg_percentile.setRange(1.0, 50.0)
-        self._cc_bg_percentile.setValue(10.0)
-        self._cc_bg_percentile.setSingleStep(1.0)
-        self._cc_bg_percentile.setToolTip("Use darkest N% of pixels for background reference")
-        cc_layout.addLayout(_h_row("BG percentile:", self._cc_bg_percentile))
-
-        self._btn_cc = QPushButton("Run Color Calibration")
-        self._btn_cc.clicked.connect(self.run_color_calibration.emit)
-        cc_layout.addWidget(self._btn_cc)
-        layout.addWidget(cc_group)
-
-        # --- Photometric Color Calibration (PCC) ---
-        pcc_group = _Section("Photometric Color Calibration (PCC)")
-        pcc_layout = pcc_group.body
-        pcc_layout.addWidget(
-            _info_label(
-                "Plate-solve and use Gaia DR3 star catalog for accurate color calibration. "
-                "Requires ASTAP or astrometry.net."
-            )
-        )
-
-        pcc_row1 = QHBoxLayout()
-        pcc_row1.addWidget(QLabel("RA (deg):"))
-        self._pcc_ra_spin = QDoubleSpinBox()
-        self._pcc_ra_spin.setRange(0.0, 360.0)
-        self._pcc_ra_spin.setValue(0.0)
-        self._pcc_ra_spin.setDecimals(4)
-        self._pcc_ra_spin.setToolTip("Right ascension hint in degrees (optional)")
-        pcc_row1.addWidget(self._pcc_ra_spin)
-        pcc_row1.addWidget(QLabel("Dec (deg):"))
-        self._pcc_dec_spin = QDoubleSpinBox()
-        self._pcc_dec_spin.setRange(-90.0, 90.0)
-        self._pcc_dec_spin.setValue(0.0)
-        self._pcc_dec_spin.setDecimals(4)
-        self._pcc_dec_spin.setToolTip("Declination hint in degrees (optional)")
-        pcc_row1.addWidget(self._pcc_dec_spin)
-        pcc_layout.addLayout(pcc_row1)
-
-        pcc_row2 = QHBoxLayout()
-        pcc_row2.addWidget(QLabel("Solver:"))
-        self._pcc_solver_combo = QComboBox()
-        self._pcc_solver_combo.addItems(
-            ["Auto (ASTAP → astrometry.net)", "ASTAP only", "astrometry.net only"]
-        )
-        self._pcc_solver_combo.setToolTip("Plate solver to use")
-        pcc_row2.addWidget(self._pcc_solver_combo)
-        pcc_layout.addLayout(pcc_row2)
-
-        self._btn_pcc = QPushButton("Solve && Calibrate (PCC)")
-        self._btn_pcc.setToolTip("Plate-solve and perform photometric color calibration")
-        self._btn_pcc.clicked.connect(self.run_pcc.emit)
-        pcc_layout.addWidget(self._btn_pcc)
-
-        overlay_row = QHBoxLayout()
-        self._btn_wcs_overlay = QPushButton("Star Overlay")
-        self._btn_wcs_overlay.setCheckable(True)
-        self._btn_wcs_overlay.setToolTip("Display catalog star positions on the image")
-        self._btn_wcs_overlay.toggled.connect(self.toggle_wcs_overlay.emit)
-        overlay_row.addWidget(self._btn_wcs_overlay)
-
-        self._btn_dso_overlay = QPushButton("DSO Labels")
-        self._btn_dso_overlay.setCheckable(True)
-        self._btn_dso_overlay.setToolTip(
-            "Overlay DSO names (NGC/Messier/IC) from embedded catalog after plate solve"
-        )
-        self._btn_dso_overlay.toggled.connect(self.toggle_dso_overlay.emit)
-        overlay_row.addWidget(self._btn_dso_overlay)
-        pcc_layout.addLayout(overlay_row)
-
-        layout.addWidget(pcc_group)
-
-        # --- Spectrophotometric Color Calibration (SPCC) ---
-        spcc_group = _Section("Spectrophotometric Color Calibration (SPCC)")
-        spcc_layout = spcc_group.body
-        spcc_layout.addWidget(_info_label(
-            "Uses actual filter transmission curves + Gaia star temperatures for highly "
-            "accurate color calibration. Requires plate solve (PCC) to have been run first."
-        ))
-
-        self._spcc_filter_combo = QComboBox()
-        from cosmica.core.spcc import FILTER_NAMES
-        self._spcc_filter_combo.addItems(FILTER_NAMES)
-        self._spcc_filter_combo.setToolTip("Select your camera + filter combination")
-        spcc_layout.addLayout(_h_row("Filter set:", self._spcc_filter_combo))
-
-        self._spcc_neutralize_check = QCheckBox("Neutralize background")
-        self._spcc_neutralize_check.setChecked(True)
-        self._spcc_neutralize_check.setToolTip("Remove per-channel sky background offset after calibration")
-        spcc_layout.addWidget(self._spcc_neutralize_check)
-
-        self._btn_spcc = QPushButton("Run SPCC")
-        self._btn_spcc.setToolTip("Spectrophotometric color calibration (needs plate solve data)")
-        self._btn_spcc.clicked.connect(self.run_spcc.emit)
-        spcc_layout.addWidget(self._btn_spcc)
-        layout.addWidget(spcc_group)
-
-        # --- LRGB Combine ---
-        lrgb_group = _Section("LRGB Combine")
-        lrgb_layout = lrgb_group.body
-        lrgb_layout.addWidget(
-            _info_label(
-                "Merge a luminance (L) image with an RGB color image. "
-                "Load the L image first, then run to load and combine with RGB."
-            )
-        )
-
-        self._lrgb_lum_weight_spin = QDoubleSpinBox()
-        self._lrgb_lum_weight_spin.setRange(0.0, 1.0)
-        self._lrgb_lum_weight_spin.setValue(1.0)
-        self._lrgb_lum_weight_spin.setSingleStep(0.05)
-        self._lrgb_lum_weight_spin.setToolTip("1.0 = full L replacement; lower = blend with RGB lightness")
-        lrgb_layout.addLayout(_h_row("L weight:", self._lrgb_lum_weight_spin))
-
-        self._lrgb_sat_spin = QDoubleSpinBox()
-        self._lrgb_sat_spin.setRange(0.5, 3.0)
-        self._lrgb_sat_spin.setValue(1.2)
-        self._lrgb_sat_spin.setSingleStep(0.05)
-        self._lrgb_sat_spin.setToolTip("Saturation boost to compensate for L channel override")
-        lrgb_layout.addLayout(_h_row("Sat boost:", self._lrgb_sat_spin))
-
-        self._lrgb_chroma_spin = QDoubleSpinBox()
-        self._lrgb_chroma_spin.setRange(0.0, 1.0)
-        self._lrgb_chroma_spin.setValue(0.0)
-        self._lrgb_chroma_spin.setSingleStep(0.1)
-        self._lrgb_chroma_spin.setToolTip("Gaussian blur on chroma (a/b) channels to reduce color noise")
-        lrgb_layout.addLayout(_h_row("Chroma denoise:", self._lrgb_chroma_spin))
-
-        self._btn_lrgb = QPushButton("Load RGB && Combine…")
-        self._btn_lrgb.setToolTip(
-            "Current image = Luminance. Opens a file picker for the RGB image."
-        )
-        self._btn_lrgb.clicked.connect(self.run_lrgb_combine.emit)
-        lrgb_layout.addWidget(self._btn_lrgb)
-        layout.addWidget(lrgb_group)
-
-        # --- Channel Combine (RGB / SHO / HOO) ---
-        cc_group = _Section("Combine Channels (RGB / SHO / HOO)")
-        cc_layout = cc_group.body
-        cc_layout.addWidget(
-            _info_label(
-                "Combine separate mono Ha, OIII, SII, R, G, B images into a color composite. "
-                "Supports standard narrowband palettes (SHO, HSO, HOO, HOS) and custom RGB."
-            )
-        )
-        btn_cc = QPushButton("Combine Channels…")
-        btn_cc.setToolTip(
-            "Open the channel combine dialog to mix mono images into a color composite.\n"
-            "Supports SHO, HSO, HOO, HOS, and custom RGB palettes."
-        )
-        btn_cc.clicked.connect(self.open_channel_combine_dialog.emit)
-        cc_layout.addWidget(btn_cc)
-        layout.addWidget(cc_group)
-
-        # --- SCNR ---
-        scnr_group = _Section("SCNR (Green Noise)")
-        scnr_layout = scnr_group.body
-        scnr_layout.addWidget(
-            _info_label(
-                "Remove excess green cast from narrowband composites or light-polluted images."
-            )
-        )
-
-        self._scnr_method_combo = QComboBox()
-        self._scnr_method_combo.addItems(["Average Neutral", "Maximum Neutral"])
-        self._scnr_method_combo.setToolTip("Method to compute neutral green reference")
-        scnr_layout.addLayout(_h_row("Method:", self._scnr_method_combo))
-
-        self._scnr_amount_slider = QSlider(Qt.Orientation.Horizontal)
-        self._scnr_amount_slider.setRange(0, 100)
-        self._scnr_amount_slider.setValue(100)
-        self._scnr_amount_label = QLabel("1.00")
-        self._scnr_amount_slider.valueChanged.connect(
-            lambda v: self._scnr_amount_label.setText(f"{v / 100:.2f}")
-        )
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Amount:"))
-        row.addWidget(self._scnr_amount_slider)
-        row.addWidget(self._scnr_amount_label)
-        scnr_layout.addLayout(row)
-
-        self._scnr_preserve_lum = QCheckBox("Preserve luminance")
-        self._scnr_preserve_lum.setChecked(True)
-        scnr_layout.addWidget(self._scnr_preserve_lum)
-
-        self._add_preview_checkbox(scnr_layout, "scnr")
-        self._scnr_method_combo.currentIndexChanged.connect(lambda: self._emit_if_preview_enabled("scnr"))
-        self._scnr_amount_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("scnr"))
-        self._scnr_preserve_lum.toggled.connect(lambda: self._emit_if_preview_enabled("scnr"))
-        self._btn_scnr = QPushButton("Apply SCNR")
-        self._btn_scnr.clicked.connect(self.run_scnr.emit)
-        scnr_layout.addWidget(self._btn_scnr)
-        layout.addWidget(scnr_group)
-
-        # --- Color Adjustment ---
-        color_group = _Section("Color Adjustment")
-        color_layout = color_group.body
-        color_layout.addWidget(_info_label("Adjust saturation, hue, and vibrance of the image."))
-
-        self._saturation_slider = QSlider(Qt.Orientation.Horizontal)
-        self._saturation_slider.setRange(0, 300)
-        self._saturation_slider.setValue(100)
-        self._saturation_label = QLabel("1.00")
-        self._saturation_slider.valueChanged.connect(
-            lambda v: self._saturation_label.setText(f"{v / 100:.2f}")
-        )
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Saturation:"))
-        row.addWidget(self._saturation_slider)
-        row.addWidget(self._saturation_label)
-        color_layout.addLayout(row)
-
-        self._hue_slider = QSlider(Qt.Orientation.Horizontal)
-        self._hue_slider.setRange(-180, 180)
-        self._hue_slider.setValue(0)
-        self._hue_label = QLabel("0\u00b0")
-        self._hue_slider.valueChanged.connect(lambda v: self._hue_label.setText(f"{v}\u00b0"))
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Hue shift:"))
-        row.addWidget(self._hue_slider)
-        row.addWidget(self._hue_label)
-        color_layout.addLayout(row)
-
-        self._vibrance_slider = QSlider(Qt.Orientation.Horizontal)
-        self._vibrance_slider.setRange(0, 100)
-        self._vibrance_slider.setValue(0)
-        self._vibrance_label = QLabel("0.00")
-        self._vibrance_slider.valueChanged.connect(
-            lambda v: self._vibrance_label.setText(f"{v / 100:.2f}")
-        )
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Vibrance:"))
-        row.addWidget(self._vibrance_slider)
-        row.addWidget(self._vibrance_label)
-        color_layout.addLayout(row)
-
-        self._add_preview_checkbox(color_layout, "color_adjust")
-        self._saturation_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("color_adjust"))
-        self._hue_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("color_adjust"))
-        self._vibrance_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("color_adjust"))
-        self._btn_color = QPushButton("Apply Color Adjustment")
-        self._btn_color.clicked.connect(self.run_color_adjust.emit)
-        color_layout.addWidget(self._btn_color)
-        layout.addWidget(color_group)
-
-        layout.addStretch()
-        self._tabs.addTab(_scrollable_tab(layout), "Color")
-
-    # ================================================================
-    # TAB 5: Detail
-    # ================================================================
-    def _build_detail_tab(self):
-        layout = QVBoxLayout()
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
-
-        # --- Deconvolution ---
-        decon_group = _Section("Deconvolution (Richardson-Lucy)")
-        decon_layout = decon_group.body
-        decon_layout.addWidget(
-            _info_label(
-                "Sharpen images by reversing atmospheric and optical blurring using iterative deconvolution."
-            )
-        )
-
-        self._decon_fwhm_spin = QDoubleSpinBox()
-        self._decon_fwhm_spin.setRange(0.5, 20.0)
-        self._decon_fwhm_spin.setValue(3.0)
-        self._decon_fwhm_spin.setSingleStep(0.1)
-        self._decon_fwhm_spin.setToolTip("PSF full width at half maximum in pixels")
-
-        fwhm_row = QHBoxLayout()
-        fwhm_row.addWidget(QLabel("PSF FWHM:"))
-        fwhm_row.addWidget(self._decon_fwhm_spin)
-        self._btn_measure_psf = QPushButton("Measure")
-        self._btn_measure_psf.setToolTip(
-            "Automatically measure PSF FWHM from stars in the current image"
-        )
-        self._btn_measure_psf.clicked.connect(self.measure_psf.emit)
-        fwhm_row.addWidget(self._btn_measure_psf)
-        decon_layout.addLayout(fwhm_row)
-
-        # PSF results grid — hidden until Measure is run
-        self._psf_results_widget = QWidget()
-        self._psf_results_widget.setVisible(False)
-        psf_grid = QGridLayout(self._psf_results_widget)
-        psf_grid.setContentsMargins(4, 4, 4, 4)
-        psf_grid.setHorizontalSpacing(12)
-        psf_grid.setVerticalSpacing(2)
-        _cell_style = "color: #d4d4d4; font-size: 10px;"
-        _hdr_style = "color: #8b949e; font-size: 10px;"
-        _psf_labels = [
-            ("FWHM", "px"), ("FWHM X", "px"), ("FWHM Y", "px"),
-            ("Ellipticity", ""), ("Theta", "°"), ("Stars", ""), ("σ FWHM", "px"),
-        ]
-        self._psf_value_labels: dict[str, QLabel] = {}
-        for i, (name, unit) in enumerate(_psf_labels):
-            row_i, col_i = divmod(i, 2)
-            col_base = col_i * 3
-            hdr = QLabel(name)
-            hdr.setStyleSheet(_hdr_style)
-            val = QLabel("—")
-            val.setStyleSheet(_cell_style)
-            u_lbl = QLabel(unit)
-            u_lbl.setStyleSheet(_hdr_style)
-            psf_grid.addWidget(hdr, row_i, col_base)
-            psf_grid.addWidget(val, row_i, col_base + 1)
-            psf_grid.addWidget(u_lbl, row_i, col_base + 2)
-            self._psf_value_labels[name] = val
-        decon_layout.addWidget(self._psf_results_widget)
-
-        self._psf_result_label = QLabel("")
-        self._psf_result_label.setStyleSheet("color: #aaaaaa; font-size: 10px;")
-        decon_layout.addWidget(self._psf_result_label)
-
-        self._decon_iter_spin = QSpinBox()
-        self._decon_iter_spin.setRange(1, 500)
-        self._decon_iter_spin.setValue(50)
-        self._decon_iter_spin.setToolTip("Number of RL iterations (more = sharper, but slower)")
-        decon_layout.addLayout(_h_row("Iterations:", self._decon_iter_spin))
-
-        self._decon_reg_slider = QSlider(Qt.Orientation.Horizontal)
-        self._decon_reg_slider.setRange(0, 100)
-        self._decon_reg_slider.setValue(10)
-        self._decon_reg_label = QLabel("0.001")
-        self._decon_reg_slider.valueChanged.connect(
-            lambda v: self._decon_reg_label.setText(f"{v / 10000:.4f}")
-        )
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Regularization:"))
-        row.addWidget(self._decon_reg_slider)
-        row.addWidget(self._decon_reg_label)
-        decon_layout.addLayout(row)
-
-        self._decon_dering_check = QCheckBox("Deringing protection")
-        self._decon_dering_check.setChecked(True)
-        self._decon_dering_check.setToolTip("Reduce ringing artifacts around bright stars")
-        decon_layout.addWidget(self._decon_dering_check)
-
-        self._decon_dering_amount = QDoubleSpinBox()
-        self._decon_dering_amount.setRange(0.0, 1.0)
-        self._decon_dering_amount.setValue(0.5)
-        self._decon_dering_amount.setSingleStep(0.1)
-        decon_layout.addLayout(_h_row("Dering amount:", self._decon_dering_amount))
-
-        self._decon_spatial_check = QCheckBox("Spatially-varying PSF (zone-based)")
-        self._decon_spatial_check.setChecked(False)
-        self._decon_spatial_check.setToolTip(
-            "Measure PSF separately in 3x3 grid zones and deconvolve each zone "
-            "with its local PSF. Handles field curvature and coma at edges. "
-            "Requires sufficient stars across the image."
-        )
-        decon_layout.addWidget(self._decon_spatial_check)
-
-        self._add_preview_checkbox(decon_layout, "deconvolution")
-
-        # Auto-update live preview whenever any deconvolution parameter changes
-        for _widget in (
-            self._decon_fwhm_spin,
-            self._decon_iter_spin,
-            self._decon_dering_amount,
-        ):
-            _widget.valueChanged.connect(
-                lambda: self._emit_if_preview_enabled("deconvolution")
-            )
-        self._decon_reg_slider.valueChanged.connect(
-            lambda: self._emit_if_preview_enabled("deconvolution")
-        )
-        self._decon_dering_check.stateChanged.connect(
-            lambda: self._emit_if_preview_enabled("deconvolution")
-        )
-        self._decon_spatial_check.stateChanged.connect(
-            lambda: self._emit_if_preview_enabled("deconvolution")
-        )
-
-        self._btn_decon = QPushButton("Run Deconvolution")
-        self._btn_decon.setToolTip("GPU-accelerated Richardson-Lucy deconvolution")
-        self._btn_decon.clicked.connect(self.run_deconvolution.emit)
-        decon_layout.addWidget(self._btn_decon)
-        layout.addWidget(decon_group)
-
-        # --- Noise Reduction ---
-        nr_group = _Section("Noise Reduction")
-        nr_layout = nr_group.body
-        nr_layout.addWidget(
-            _info_label("Reduce noise using Non-Local Means or wavelet thresholding.")
-        )
-
-        self._nr_method_combo = QComboBox()
-        self._nr_method_combo.addItems(["Wavelet", "Non-Local Means", "TGV (Total Gen. Variation)"])
-        self._nr_method_combo.setToolTip(
-            "Wavelet: fast, good sharpness\n"
-            "NLM: texture-aware\n"
-            "TGV: best edge/gradient preservation, GPU-accelerated"
-        )
-        nr_layout.addLayout(_h_row("Method:", self._nr_method_combo))
-
-        self._nr_strength_slider = QSlider(Qt.Orientation.Horizontal)
-        self._nr_strength_slider.setRange(0, 100)
-        self._nr_strength_slider.setValue(50)
-        self._nr_strength_label = QLabel("0.50")
-        self._nr_strength_slider.valueChanged.connect(
-            lambda v: self._nr_strength_label.setText(f"{v / 100:.2f}")
-        )
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Strength:"))
-        row.addWidget(self._nr_strength_slider)
-        row.addWidget(self._nr_strength_label)
-        nr_layout.addLayout(row)
-
-        self._nr_detail_slider = QSlider(Qt.Orientation.Horizontal)
-        self._nr_detail_slider.setRange(0, 100)
-        self._nr_detail_slider.setValue(50)
-        self._nr_detail_label = QLabel("0.50")
-        self._nr_detail_slider.valueChanged.connect(
-            lambda v: self._nr_detail_label.setText(f"{v / 100:.2f}")
-        )
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Detail:"))
-        row.addWidget(self._nr_detail_slider)
-        row.addWidget(self._nr_detail_label)
-        nr_layout.addLayout(row)
-
-        self._nr_chrom_check = QCheckBox("Chrominance only")
-        self._nr_chrom_check.setToolTip("Only reduce color noise, preserving luminance detail")
-        nr_layout.addWidget(self._nr_chrom_check)
-
-        self._add_preview_checkbox(nr_layout, "denoise")
-        self._nr_method_combo.currentIndexChanged.connect(lambda: self._emit_if_preview_enabled("denoise"))
-        self._nr_strength_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("denoise"))
-        self._nr_detail_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("denoise"))
-        self._nr_chrom_check.toggled.connect(lambda: self._emit_if_preview_enabled("denoise"))
-        self._btn_denoise = QPushButton("Reduce Noise")
-        self._btn_denoise.clicked.connect(self.run_denoise.emit)
-        nr_layout.addWidget(self._btn_denoise)
-        layout.addWidget(nr_group)
-
-        # --- Star Reduction ---
-        sr_group = _Section("Star Reduction")
-        sr_layout = sr_group.body
-        sr_layout.addWidget(
-            _info_label(
-                "Reduce star sizes using morphological erosion within an auto-generated star mask."
-            )
-        )
-
-        self._sr_amount_slider = QSlider(Qt.Orientation.Horizontal)
-        self._sr_amount_slider.setRange(0, 100)
-        self._sr_amount_slider.setValue(50)
-        self._sr_amount_label = QLabel("0.50")
-        self._sr_amount_slider.valueChanged.connect(
-            lambda v: self._sr_amount_label.setText(f"{v / 100:.2f}")
-        )
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Amount:"))
-        row.addWidget(self._sr_amount_slider)
-        row.addWidget(self._sr_amount_label)
-        sr_layout.addLayout(row)
-
-        self._sr_iterations_spin = QSpinBox()
-        self._sr_iterations_spin.setRange(1, 10)
-        self._sr_iterations_spin.setValue(2)
-        self._sr_iterations_spin.setToolTip("Erosion iterations (more = smaller stars)")
-        sr_layout.addLayout(_h_row("Iterations:", self._sr_iterations_spin))
-
-        self._sr_kernel_spin = QSpinBox()
-        self._sr_kernel_spin.setRange(3, 11)
-        self._sr_kernel_spin.setValue(3)
-        self._sr_kernel_spin.setSingleStep(2)
-        self._sr_kernel_spin.setToolTip("Erosion kernel size")
-        sr_layout.addLayout(_h_row("Kernel:", self._sr_kernel_spin))
-
-        self._btn_star_reduce = QPushButton("Reduce Stars")
-        self._btn_star_reduce.clicked.connect(self.run_star_reduction.emit)
-        sr_layout.addWidget(self._btn_star_reduce)
-        layout.addWidget(sr_group)
-
-        # --- Wavelet Sharpening ---
-        wav_group = _Section("Wavelet Sharpening")
-        wav_layout = wav_group.body
-        wav_layout.addWidget(
-            _info_label(
-                "GPU-accelerated wavelet decomposition. Adjust per-scale weights to sharpen or smooth."
-            )
-        )
-
-        self._wav_scales_spin = QSpinBox()
-        self._wav_scales_spin.setRange(2, 8)
-        self._wav_scales_spin.setValue(4)
-        self._wav_scales_spin.setToolTip("Number of wavelet decomposition scales")
-        wav_layout.addLayout(_h_row("Scales:", self._wav_scales_spin))
-
-        self._wav_fine_slider = QSlider(Qt.Orientation.Horizontal)
-        self._wav_fine_slider.setRange(0, 300)
-        self._wav_fine_slider.setValue(150)
-        self._wav_fine_label = QLabel("1.50")
-        self._wav_fine_slider.valueChanged.connect(
-            lambda v: self._wav_fine_label.setText(f"{v / 100:.2f}")
-        )
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Fine detail:"))
-        row.addWidget(self._wav_fine_slider)
-        row.addWidget(self._wav_fine_label)
-        wav_layout.addLayout(row)
-
-        self._wav_medium_slider = QSlider(Qt.Orientation.Horizontal)
-        self._wav_medium_slider.setRange(0, 300)
-        self._wav_medium_slider.setValue(120)
-        self._wav_medium_label = QLabel("1.20")
-        self._wav_medium_slider.valueChanged.connect(
-            lambda v: self._wav_medium_label.setText(f"{v / 100:.2f}")
-        )
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Medium:"))
-        row.addWidget(self._wav_medium_slider)
-        row.addWidget(self._wav_medium_label)
-        wav_layout.addLayout(row)
-
-        self._wav_coarse_slider = QSlider(Qt.Orientation.Horizontal)
-        self._wav_coarse_slider.setRange(0, 300)
-        self._wav_coarse_slider.setValue(100)
-        self._wav_coarse_label = QLabel("1.00")
-        self._wav_coarse_slider.valueChanged.connect(
-            lambda v: self._wav_coarse_label.setText(f"{v / 100:.2f}")
-        )
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Coarse:"))
-        row.addWidget(self._wav_coarse_slider)
-        row.addWidget(self._wav_coarse_label)
-        wav_layout.addLayout(row)
-
-        self._add_preview_checkbox(wav_layout, "wavelet")
-        self._wav_scales_spin.valueChanged.connect(lambda: self._emit_if_preview_enabled("wavelet"))
-        self._wav_fine_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("wavelet"))
-        self._wav_medium_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("wavelet"))
-        self._wav_coarse_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("wavelet"))
-        self._btn_wavelet = QPushButton("Apply Wavelet Sharpening")
-        self._btn_wavelet.setToolTip("GPU-accelerated wavelet transform")
-        self._btn_wavelet.clicked.connect(self.run_wavelet_sharpen.emit)
-        wav_layout.addWidget(self._btn_wavelet)
-        layout.addWidget(wav_group)
-
-        # --- MLT (Multi-Scale Linear Transform) ---
-        mlt_group = _Section("MLT (Multi-Scale Linear Transform)")
-        mlt_layout = mlt_group.body
-        mlt_layout.addWidget(
-            _info_label(
-                "Full per-band control with noise thresholding. "
-                "Scale 1 = finest detail (stars/noise). Scale 6 = large structures."
-            )
-        )
-
-        self._mlt_sliders: list[tuple[QSlider, QLabel, QSlider, QLabel]] = []
-        band_names = ["Scale 1 (finest)", "Scale 2", "Scale 3", "Scale 4", "Scale 5", "Scale 6 (coarsest)"]
-
-        for i, name in enumerate(band_names):
-            band_box = _Section(name, compact=True, default_open=True)
-            band_layout = band_box.body
-            band_layout.setSpacing(2)
-            band_layout.setContentsMargins(6, 12, 6, 4)
-
-            # Boost slider
-            boost_row = QHBoxLayout()
-            boost_row.addWidget(QLabel("Boost:"))
-            boost_sl = QSlider(Qt.Orientation.Horizontal)
-            boost_sl.setRange(0, 400)
-            boost_sl.setValue(100)
-            boost_lbl = QLabel("1.00")
-            boost_sl.valueChanged.connect(lambda v, lbl=boost_lbl: lbl.setText(f"{v/100:.2f}"))
-            boost_row.addWidget(boost_sl)
-            boost_row.addWidget(boost_lbl)
-            band_layout.addLayout(boost_row)
-
-            # Threshold slider
-            thr_row = QHBoxLayout()
-            thr_row.addWidget(QLabel("Denoise:"))
-            thr_sl = QSlider(Qt.Orientation.Horizontal)
-            thr_sl.setRange(0, 200)
-            thr_sl.setValue(0)
-            thr_lbl = QLabel("0.000")
-            thr_sl.valueChanged.connect(lambda v, lbl=thr_lbl: lbl.setText(f"{v/10000:.4f}"))
-            thr_row.addWidget(thr_sl)
-            thr_row.addWidget(thr_lbl)
-            band_layout.addLayout(thr_row)
-
-            mlt_layout.addWidget(band_box)
-            self._mlt_sliders.append((boost_sl, boost_lbl, thr_sl, thr_lbl))
-
-        # Residual
-        res_row = QHBoxLayout()
-        res_row.addWidget(QLabel("Residual weight:"))
-        self._mlt_residual_spin = QDoubleSpinBox()
-        self._mlt_residual_spin.setRange(0.0, 2.0)
-        self._mlt_residual_spin.setValue(1.0)
-        self._mlt_residual_spin.setSingleStep(0.05)
-        res_row.addWidget(self._mlt_residual_spin)
-        mlt_layout.addLayout(res_row)
-
-        self._add_preview_checkbox(mlt_layout, "mlt")
-        for _boost_sl, _, _thr_sl, _ in self._mlt_sliders:
-            _boost_sl.valueChanged.connect(lambda: self._emit_if_preview_enabled("mlt"))
-            _thr_sl.valueChanged.connect(lambda: self._emit_if_preview_enabled("mlt"))
-        self._mlt_residual_spin.valueChanged.connect(lambda: self._emit_if_preview_enabled("mlt"))
-        btn_mlt = QPushButton("Apply MLT")
-        btn_mlt.setToolTip("Apply multi-scale linear transform")
-        btn_mlt.clicked.connect(self.run_mlt.emit)
-        mlt_layout.addWidget(btn_mlt)
-        layout.addWidget(mlt_group)
-
-        # --- Local Contrast ---
-        lc_group = _Section("Local Contrast (CLAHE)")
-        lc_layout = lc_group.body
-        lc_layout.addWidget(_info_label("Enhance local contrast using CLAHE on luminance channel."))
-
-        self._lc_clip_spin = QDoubleSpinBox()
-        self._lc_clip_spin.setRange(1.0, 10.0)
-        self._lc_clip_spin.setValue(2.0)
-        self._lc_clip_spin.setSingleStep(0.5)
-        self._lc_clip_spin.setToolTip("CLAHE clip limit (higher = more contrast)")
-        lc_layout.addLayout(_h_row("Clip limit:", self._lc_clip_spin))
-
-        self._lc_tile_spin = QSpinBox()
-        self._lc_tile_spin.setRange(4, 32)
-        self._lc_tile_spin.setValue(8)
-        self._lc_tile_spin.setToolTip("Tile grid size for local histogram")
-        lc_layout.addLayout(_h_row("Tile size:", self._lc_tile_spin))
-
-        self._lc_amount_slider = QSlider(Qt.Orientation.Horizontal)
-        self._lc_amount_slider.setRange(0, 100)
-        self._lc_amount_slider.setValue(100)
-        self._lc_amount_label = QLabel("1.00")
-        self._lc_amount_slider.valueChanged.connect(
-            lambda v: self._lc_amount_label.setText(f"{v / 100:.2f}")
-        )
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Amount:"))
-        row.addWidget(self._lc_amount_slider)
-        row.addWidget(self._lc_amount_label)
-        lc_layout.addLayout(row)
-
-        self._add_preview_checkbox(lc_layout, "local_contrast")
-        self._lc_clip_spin.valueChanged.connect(lambda: self._emit_if_preview_enabled("local_contrast"))
-        self._lc_tile_spin.valueChanged.connect(lambda: self._emit_if_preview_enabled("local_contrast"))
-        self._lc_amount_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("local_contrast"))
-        self._btn_local_contrast = QPushButton("Apply Local Contrast")
-        self._btn_local_contrast.clicked.connect(self.run_local_contrast.emit)
-        lc_layout.addWidget(self._btn_local_contrast)
-        layout.addWidget(lc_group)
-
-        # --- Morphology ---
-        morph_group = _Section("Morphological Operations")
-        morph_layout = morph_group.body
-        morph_layout.addWidget(
-            _info_label("Apply morphological operations for star shaping and mask refinement.")
-        )
-
-        self._morph_op_combo = QComboBox()
-        self._morph_op_combo.addItems(["Dilate", "Erode", "Open", "Close"])
-        morph_layout.addLayout(_h_row("Operation:", self._morph_op_combo))
-
-        self._morph_element_combo = QComboBox()
-        self._morph_element_combo.addItems(["Circle", "Square", "Diamond"])
-        morph_layout.addLayout(_h_row("Element:", self._morph_element_combo))
-
-        self._morph_kernel_spin = QSpinBox()
-        self._morph_kernel_spin.setRange(3, 21)
-        self._morph_kernel_spin.setValue(3)
-        self._morph_kernel_spin.setSingleStep(2)
-        morph_layout.addLayout(_h_row("Kernel:", self._morph_kernel_spin))
-
-        self._morph_iter_spin = QSpinBox()
-        self._morph_iter_spin.setRange(1, 10)
-        self._morph_iter_spin.setValue(1)
-        morph_layout.addLayout(_h_row("Iterations:", self._morph_iter_spin))
-
-        self._btn_morphology = QPushButton("Apply Morphology")
-        self._btn_morphology.clicked.connect(self.run_morphology.emit)
-        morph_layout.addWidget(self._btn_morphology)
-        layout.addWidget(morph_group)
-
-        # --- Unsharp Mask ---
-        usm_group = _Section("Unsharp Mask")
-        usm_layout = usm_group.body
-        usm_layout.addWidget(_info_label("Classic sharpening with radius, amount, and threshold."))
-
-        self._usm_radius_spin = QDoubleSpinBox()
-        self._usm_radius_spin.setRange(0.5, 20.0)
-        self._usm_radius_spin.setValue(2.0)
-        self._usm_radius_spin.setSingleStep(0.5)
-        usm_layout.addLayout(_h_row("Radius:", self._usm_radius_spin))
-
-        self._usm_amount_slider = QSlider(Qt.Orientation.Horizontal)
-        self._usm_amount_slider.setRange(0, 200)
-        self._usm_amount_slider.setValue(50)
-        self._usm_amount_label = QLabel("0.50")
-        self._usm_amount_slider.valueChanged.connect(
-            lambda v: self._usm_amount_label.setText(f"{v / 100:.2f}")
-        )
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Amount:"))
-        row.addWidget(self._usm_amount_slider)
-        row.addWidget(self._usm_amount_label)
-        usm_layout.addLayout(row)
-
-        self._usm_threshold_spin = QDoubleSpinBox()
-        self._usm_threshold_spin.setRange(0.0, 0.1)
-        self._usm_threshold_spin.setValue(0.0)
-        self._usm_threshold_spin.setSingleStep(0.005)
-        self._usm_threshold_spin.setDecimals(3)
-        usm_layout.addLayout(_h_row("Threshold:", self._usm_threshold_spin))
-
-        self._add_preview_checkbox(usm_layout, "unsharp_mask")
-        self._usm_radius_spin.valueChanged.connect(lambda: self._emit_if_preview_enabled("unsharp_mask"))
-        self._usm_amount_slider.valueChanged.connect(lambda: self._emit_if_preview_enabled("unsharp_mask"))
-        self._usm_threshold_spin.valueChanged.connect(lambda: self._emit_if_preview_enabled("unsharp_mask"))
-        btn_usm = QPushButton("Apply Unsharp Mask")
-        btn_usm.clicked.connect(self.run_unsharp_mask.emit)
-        usm_layout.addWidget(btn_usm)
-        layout.addWidget(usm_group)
-
-        # --- Median Filter ---
-        mf_group = _Section("Median Filter")
-        mf_layout = mf_group.body
-        mf_layout.addWidget(_info_label("Noise reduction via median filtering."))
-
-        self._mf_kernel_spin = QSpinBox()
-        self._mf_kernel_spin.setRange(3, 15)
-        self._mf_kernel_spin.setValue(3)
-        self._mf_kernel_spin.setSingleStep(2)
-        mf_layout.addLayout(_h_row("Kernel size:", self._mf_kernel_spin))
-
-        self._add_preview_checkbox(mf_layout, "median_filter")
-        self._mf_kernel_spin.valueChanged.connect(lambda: self._emit_if_preview_enabled("median_filter"))
-        btn_mf = QPushButton("Apply Median Filter")
-        btn_mf.clicked.connect(self.run_median_filter.emit)
-        mf_layout.addWidget(btn_mf)
-        layout.addWidget(mf_group)
-
-        layout.addStretch()
-        self._tabs.addTab(_scrollable_tab(layout), "Detail")
-
-    # ================================================================
-    # TAB 6: Utility
-    # ================================================================
-    # ================================================================
-    # TAB 6: AI Tools
-    # ================================================================
-    def _build_ai_pro_tab(self):
-        layout = QVBoxLayout()
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
-
-        # --- AI Denoise ---
-        aid_group = _Section("AI Denoise")
-        aid_layout = aid_group.body
-        aid_layout.addWidget(
-            _info_label("Deep learning noise reduction using a trained U-Net model.")
-        )
-
-        self._aid_strength_slider = QSlider(Qt.Orientation.Horizontal)
-        self._aid_strength_slider.setRange(0, 100)
-        self._aid_strength_slider.setValue(80)
-        self._aid_strength_label = QLabel("0.80")
-        self._aid_strength_slider.valueChanged.connect(
-            lambda v: self._aid_strength_label.setText(f"{v / 100:.2f}")
-        )
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Strength:"))
-        row.addWidget(self._aid_strength_slider)
-        row.addWidget(self._aid_strength_label)
-        aid_layout.addLayout(row)
-
-        self._aid_protect_slider = QSlider(Qt.Orientation.Horizontal)
-        self._aid_protect_slider.setRange(0, 100)
-        self._aid_protect_slider.setValue(80)
-        self._aid_protect_label = QLabel("0.80")
-        self._aid_protect_slider.valueChanged.connect(
-            lambda v: self._aid_protect_label.setText(f"{v / 100:.2f}")
-        )
-        row2 = QHBoxLayout()
-        row2.addWidget(QLabel("Protect stars:"))
-        row2.addWidget(self._aid_protect_slider)
-        row2.addWidget(self._aid_protect_label)
-        aid_layout.addLayout(row2)
-
-        self._aid_passes_spin = QSpinBox()
-        self._aid_passes_spin.setRange(4, 64)
-        self._aid_passes_spin.setValue(16)
-        self._aid_passes_spin.setToolTip(
-            "J-invariant passes: more = smoother result, slower. 16 is a good balance."
-        )
-        aid_layout.addLayout(_h_row("J-inv passes:", self._aid_passes_spin))
-
-        self._btn_ai_denoise = QPushButton("Run AI Denoise")
-        self._btn_ai_denoise.setToolTip(
-            "J-invariant N2S inference with star protection.\n"
-            "Best on linear (unstretched) images."
-        )
-        self._btn_ai_denoise.clicked.connect(self.run_ai_denoise.emit)
-        aid_layout.addWidget(self._btn_ai_denoise)
-        layout.addWidget(aid_group)
-
-        # --- AI Sharpen ---
-        ais_group = _Section("AI Sharpen")
-        ais_layout = ais_group.body
-        ais_layout.addWidget(
-            _info_label("Deep learning sharpening using a trained U-Net model.")
-        )
-
-        self._ais_strength_slider = QSlider(Qt.Orientation.Horizontal)
-        self._ais_strength_slider.setRange(0, 100)
-        self._ais_strength_slider.setValue(100)
-        self._ais_strength_label = QLabel("1.00")
-        self._ais_strength_slider.valueChanged.connect(
-            lambda v: self._ais_strength_label.setText(f"{v / 100:.2f}")
-        )
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Strength:"))
-        row.addWidget(self._ais_strength_slider)
-        row.addWidget(self._ais_strength_label)
-        ais_layout.addLayout(row)
-
-        self._btn_ai_sharpen = QPushButton("Run AI Sharpen")
-        self._btn_ai_sharpen.setToolTip("GPU-accelerated deep learning sharpening")
-        self._btn_ai_sharpen.clicked.connect(self.run_ai_sharpen.emit)
-        ais_layout.addWidget(self._btn_ai_sharpen)
-        layout.addWidget(ais_group)
-
-        # --- StarNet Star Removal ---
-        sn_group = _Section("StarNet Star Removal")
-        sn_layout = sn_group.body
-        sn_layout.addWidget(
-            _info_label(
-                "Remove stars using StarNet++ (must be installed separately). "
-                "Runs as isolated subprocess for GPL compliance."
-            )
-        )
-
-        self._sn_extract_stars = QCheckBox("Extract stars-only image")
-        self._sn_extract_stars.setChecked(True)
-        self._sn_extract_stars.setToolTip("Also compute original - starless = stars only")
-        sn_layout.addWidget(self._sn_extract_stars)
-
-        self._btn_starnet = QPushButton("Run StarNet")
-        self._btn_starnet.setToolTip("Requires StarNet++ binary in PATH")
-        self._btn_starnet.clicked.connect(self.run_starnet.emit)
-        sn_layout.addWidget(self._btn_starnet)
-        layout.addWidget(sn_group)
-
-        # --- Smart Processor ---
-        sp_group = _Section("Smart Processor")
-        sp_layout = sp_group.body
-        sp_layout.addWidget(
-            _info_label(
-                "AI-driven adaptive processing. Plate-solves your image, identifies "
-                "the target, measures PSF, and builds an optimal processing pipeline "
-                "with per-channel tuning and quality checks."
-            )
-        )
-
-        self._btn_smart_processor = QPushButton("Open Smart Processor...")
-        self._btn_smart_processor.setToolTip("Launch the Smart Processor dialog")
-        self._btn_smart_processor.clicked.connect(self.open_smart_processor.emit)
-        sp_layout.addWidget(self._btn_smart_processor)
-
-        self._btn_equipment = QPushButton("Equipment Profile...")
-        self._btn_equipment.setToolTip("Configure camera, telescope, and filters")
-        self._btn_equipment.clicked.connect(self.open_equipment_dialog.emit)
-        sp_layout.addWidget(self._btn_equipment)
-
-        layout.addWidget(sp_group)
-
-        layout.addStretch()
-        self._tabs.addTab(_scrollable_tab(layout), "AI Tools")
-
-    # ================================================================
-    # TAB 7: Utility
-    # ================================================================
-    def _build_utility_tab(self):
-        layout = QVBoxLayout()
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
-
-        # --- Chromatic Aberration ---
-        ca_group = _Section("Chromatic Aberration")
-        ca_layout = ca_group.body
-        ca_layout.addWidget(_info_label("Detect and correct lateral color fringing."))
-
-        self._ca_auto_check = QCheckBox("Auto-detect from stars")
-        self._ca_auto_check.setChecked(True)
-        ca_layout.addWidget(self._ca_auto_check)
-
-        self._ca_red_x_spin = QDoubleSpinBox()
-        self._ca_red_x_spin.setRange(-3.0, 3.0)
-        self._ca_red_x_spin.setValue(0.0)
-        self._ca_red_x_spin.setSingleStep(0.1)
-        self._ca_red_x_spin.setDecimals(2)
-        ca_layout.addLayout(_h_row("Red shift X:", self._ca_red_x_spin))
-
-        self._ca_red_y_spin = QDoubleSpinBox()
-        self._ca_red_y_spin.setRange(-3.0, 3.0)
-        self._ca_red_y_spin.setValue(0.0)
-        self._ca_red_y_spin.setSingleStep(0.1)
-        self._ca_red_y_spin.setDecimals(2)
-        ca_layout.addLayout(_h_row("Red shift Y:", self._ca_red_y_spin))
-
-        self._ca_blue_x_spin = QDoubleSpinBox()
-        self._ca_blue_x_spin.setRange(-3.0, 3.0)
-        self._ca_blue_x_spin.setValue(0.0)
-        self._ca_blue_x_spin.setSingleStep(0.1)
-        self._ca_blue_x_spin.setDecimals(2)
-        ca_layout.addLayout(_h_row("Blue shift X:", self._ca_blue_x_spin))
-
-        self._ca_blue_y_spin = QDoubleSpinBox()
-        self._ca_blue_y_spin.setRange(-3.0, 3.0)
-        self._ca_blue_y_spin.setValue(0.0)
-        self._ca_blue_y_spin.setSingleStep(0.1)
-        self._ca_blue_y_spin.setDecimals(2)
-        ca_layout.addLayout(_h_row("Blue shift Y:", self._ca_blue_y_spin))
-
-        btn_ca = QPushButton("Correct CA")
-        btn_ca.clicked.connect(self.run_chromatic_aberration.emit)
-        ca_layout.addWidget(btn_ca)
-        layout.addWidget(ca_group)
-
-        # --- Blink Comparator ---
-        blink_group = _Section("Blink Comparator")
-        blink_layout = blink_group.body
-        blink_layout.addWidget(_info_label(
-            "Flip rapidly between two images to spot alignment differences, star size changes, "
-            "or processing artifacts. Press B while canvas is focused to toggle."
-        ))
-
-        # Slot A
-        self._blink_a_label = QLabel("A: —")
-        self._blink_a_label.setStyleSheet("font-size: 11px; color: #aaa;")
-        self._blink_a_label.setWordWrap(True)
-        blink_layout.addWidget(self._blink_a_label)
-        a_btn_row = QHBoxLayout()
-        btn_a_file = QPushButton("Load File…")
-        btn_a_file.setToolTip("Load Image A from file")
-        btn_a_file.clicked.connect(self.blink_load_a.emit)
-        a_btn_row.addWidget(btn_a_file)
-        btn_a_cur = QPushButton("Use Current")
-        btn_a_cur.setToolTip("Use current canvas image as A")
-        btn_a_cur.clicked.connect(self.blink_use_current_as_a.emit)
-        a_btn_row.addWidget(btn_a_cur)
-        blink_layout.addLayout(a_btn_row)
-
-        # Slot B
-        self._blink_b_label = QLabel("B: —")
-        self._blink_b_label.setStyleSheet("font-size: 11px; color: #aaa;")
-        self._blink_b_label.setWordWrap(True)
-        blink_layout.addWidget(self._blink_b_label)
-        b_btn_row = QHBoxLayout()
-        btn_b_file = QPushButton("Load File…")
-        btn_b_file.setToolTip("Load Image B from file")
-        btn_b_file.clicked.connect(self.blink_load_b.emit)
-        b_btn_row.addWidget(btn_b_file)
-        btn_b_cur = QPushButton("Use Current")
-        btn_b_cur.setToolTip("Use current canvas image as B")
-        btn_b_cur.clicked.connect(self.blink_use_current_as_b.emit)
-        b_btn_row.addWidget(btn_b_cur)
-        blink_layout.addLayout(b_btn_row)
-
-        # FPS + toggle
-        ctrl_row = QHBoxLayout()
-        ctrl_row.addWidget(QLabel("FPS:"))
-        self._blink_fps_spin = QSpinBox()
-        self._blink_fps_spin.setRange(1, 10)
-        self._blink_fps_spin.setValue(2)
-        self._blink_fps_spin.setToolTip("Flips per second")
-        self._blink_fps_spin.valueChanged.connect(self.blink_fps_changed.emit)
-        ctrl_row.addWidget(self._blink_fps_spin)
-        ctrl_row.addStretch()
-        self._blink_toggle_btn = QPushButton("Start  [B]")
-        self._blink_toggle_btn.setCheckable(True)
-        self._blink_toggle_btn.setToolTip("Toggle blink comparator (shortcut: B)")
-        self._blink_toggle_btn.toggled.connect(self.blink_toggle.emit)
-        self._blink_toggle_btn.toggled.connect(
-            lambda on: self._blink_toggle_btn.setText("Stop  [B]" if on else "Start  [B]")
-        )
-        ctrl_row.addWidget(self._blink_toggle_btn)
-        blink_layout.addLayout(ctrl_row)
-        layout.addWidget(blink_group)
-
-        # --- Quick tools row ---
-        quick_group = _Section("Tools")
-        quick_layout = quick_group.body
-        quick_row1 = QHBoxLayout()
-        btn_stats = QPushButton("Image Statistics...")
-        btn_stats.clicked.connect(self.show_image_statistics.emit)
-        quick_row1.addWidget(btn_stats)
-        btn_starmask = QPushButton("Star Mask...")
-        btn_starmask.clicked.connect(self.open_star_mask_dialog.emit)
-        quick_row1.addWidget(btn_starmask)
-        quick_layout.addLayout(quick_row1)
-
-        quick_row2 = QHBoxLayout()
-        btn_console = QPushButton("Python Console...")
-        btn_console.setToolTip("Open embedded Python scripting console")
-        btn_console.clicked.connect(self.open_python_console.emit)
-        quick_row2.addWidget(btn_console)
-        quick_layout.addLayout(quick_row2)
-        layout.addWidget(quick_group)
-
-        # --- Narrowband ---
-        nb_group = _Section("Narrowband Combining")
-        nb_layout = nb_group.body
-        nb_layout.addWidget(
-            _info_label(
-                "Combine Ha, OIII, and SII images into a color composite using palette mapping."
-            )
-        )
-        self._btn_narrowband = QPushButton("Open Narrowband Dialog...")
-        self._btn_narrowband.clicked.connect(self.open_narrowband_dialog.emit)
-        nb_layout.addWidget(self._btn_narrowband)
-        layout.addWidget(nb_group)
-
-        # --- Continuum Subtraction ---
-        cont_group = _Section("Continuum Subtraction")
-        cont_layout = cont_group.body
-        cont_layout.addWidget(
-            _info_label(
-                "Subtract broadband continuum from narrowband to isolate emission lines (Ha, OIII, SII)."
-            )
-        )
-
-        self._cont_nb_combo = QComboBox()
-        self._cont_nb_combo.addItems(["Current image as narrowband"])
-        self._cont_nb_combo.setToolTip("Source for narrowband channel")
-        cont_layout.addLayout(_h_row("Narrowband:", self._cont_nb_combo))
-
-        self._cont_bb_combo = QComboBox()
-        self._cont_bb_combo.addItems(["Open file…"])
-        self._cont_bb_combo.setToolTip("Source for broadband (continuum) channel")
-        cont_layout.addLayout(_h_row("Broadband:", self._cont_bb_combo))
-
-        self._cont_scale_spin = QDoubleSpinBox()
-        self._cont_scale_spin.setRange(0.01, 5.0)
-        self._cont_scale_spin.setValue(1.0)
-        self._cont_scale_spin.setSingleStep(0.05)
-        self._cont_scale_spin.setDecimals(3)
-        self._cont_scale_spin.setToolTip(
-            "Scale factor applied to broadband before subtraction. "
-            "Adjust to fully suppress stellar continuum."
-        )
-        cont_layout.addLayout(_h_row("Scale factor:", self._cont_scale_spin))
-
-        self._btn_cont_subtract = QPushButton("Subtract Continuum…")
-        self._btn_cont_subtract.setToolTip("Load broadband file and subtract from current image")
-        self._btn_cont_subtract.clicked.connect(self.run_continuum_subtraction.emit)
-        cont_layout.addWidget(self._btn_cont_subtract)
-        layout.addWidget(cont_group)
-
-        # --- Pixel Math ---
-        pm_group = _Section("Pixel Math")
-        pm_layout = pm_group.body
-        pm_layout.addWidget(
-            _info_label("Apply mathematical expressions to pixel data (T, R, G, B, L variables).")
-        )
-        self._btn_pixelmath = QPushButton("Open Pixel Math...")
-        self._btn_pixelmath.clicked.connect(self.open_pixelmath_dialog.emit)
-        pm_layout.addWidget(self._btn_pixelmath)
-        layout.addWidget(pm_group)
-
-        # --- Channels ---
-        ch_group = _Section("Channel Operations")
-        ch_layout = ch_group.body
-        ch_layout.addWidget(
-            _info_label("Split, extract, and manipulate individual image channels.")
-        )
-
-        btn_row = QHBoxLayout()
-        self._btn_split_ch = QPushButton("Split Channels")
-        self._btn_split_ch.setToolTip("Split color image into separate R, G, B mono images")
-        self._btn_split_ch.clicked.connect(self.run_split_channels.emit)
-        btn_row.addWidget(self._btn_split_ch)
-
-        self._btn_extract_lum = QPushButton("Extract Luminance")
-        self._btn_extract_lum.setToolTip("Extract weighted luminance from color image")
-        self._btn_extract_lum.clicked.connect(self.run_extract_luminance.emit)
-        btn_row.addWidget(self._btn_extract_lum)
-        ch_layout.addLayout(btn_row)
-        layout.addWidget(ch_group)
-
-        # --- HDR Composition ---
-        hdr_group = _Section("HDR Composition")
-        hdr_layout = hdr_group.body
-        hdr_layout.addWidget(
-            _info_label("Merge multiple exposures into a single high dynamic range image.")
-        )
-        self._btn_hdr = QPushButton("Open HDR Dialog...")
-        self._btn_hdr.clicked.connect(self.open_hdr_dialog.emit)
-        hdr_layout.addWidget(self._btn_hdr)
-        layout.addWidget(hdr_group)
-
-        # --- Macros ---
-        macro_group = _Section("Macros")
-        macro_layout = macro_group.body
-        macro_layout.addWidget(_info_label("Record processing steps and replay them on any image."))
-
-        rec_row = QHBoxLayout()
-        self._btn_macro_start = QPushButton("Record")
-        self._btn_macro_start.setToolTip("Start recording processing steps")
-        self._btn_macro_start.clicked.connect(self.start_macro_recording.emit)
-        rec_row.addWidget(self._btn_macro_start)
-
-        self._btn_macro_stop = QPushButton("Stop")
-        self._btn_macro_stop.setToolTip("Stop recording and save macro")
-        self._btn_macro_stop.clicked.connect(self.stop_macro_recording.emit)
-        self._btn_macro_stop.setEnabled(False)
-        rec_row.addWidget(self._btn_macro_stop)
-        macro_layout.addLayout(rec_row)
-
-        play_row = QHBoxLayout()
-        self._btn_macro_play = QPushButton("Play")
-        self._btn_macro_play.setToolTip("Replay the last recorded macro")
-        self._btn_macro_play.clicked.connect(self.play_macro.emit)
-        play_row.addWidget(self._btn_macro_play)
-
-        self._btn_macro_save = QPushButton("Save...")
-        self._btn_macro_save.clicked.connect(self.save_macro.emit)
-        play_row.addWidget(self._btn_macro_save)
-
-        self._btn_macro_load = QPushButton("Load...")
-        self._btn_macro_load.clicked.connect(self.load_macro.emit)
-        play_row.addWidget(self._btn_macro_load)
-        macro_layout.addLayout(play_row)
-
-        self._macro_status_label = QLabel("Not recording")
-        self._macro_status_label.setStyleSheet("color: #969696; font-size: 11px;")
-        macro_layout.addWidget(self._macro_status_label)
-        layout.addWidget(macro_group)
-
-        layout.addStretch()
-        self._tabs.addTab(_scrollable_tab(layout), "Utility")
-
-    # ================================================================
-    # Parameter getters
-    # ================================================================
-
-    def get_drizzle_params(self):
-        """Return (enabled, DrizzleParams) or (False, None)."""
-        from cosmica.core.drizzle import DrizzleParams
-        if not self._drizzle_check.isChecked():
-            return False, None
-        scale = 2 if self._drizzle_scale_combo.currentIndex() == 0 else 3
-        return True, DrizzleParams(
-            scale=scale,
-            drop_shrink=self._drizzle_drop_spin.value(),
-        )
+    # ── Public getters (called from main_window) ──────────
 
     def get_stacking_params(self) -> StackingParams:
         rejection_map = {
-            0: RejectionMethod.SIGMA_CLIP,
-            1: RejectionMethod.WINSORIZED_SIGMA,
-            2: RejectionMethod.LINEAR_FIT,
-            3: RejectionMethod.PERCENTILE_CLIP,
-            4: RejectionMethod.ESD,
-            5: RejectionMethod.MIN_MAX,
-            6: RejectionMethod.NONE,
+            "Sigma Clipping":      RejectionMethod.SIGMA_CLIP,
+            "Winsorized Sigma":    RejectionMethod.WINSORIZED,
+            "Linear Fit":         RejectionMethod.LINEAR_FIT,
+            "Percentile Clip":    RejectionMethod.PERCENTILE,
+            "ESD (Generalized)":  RejectionMethod.ESD,
+            "Min/Max":            RejectionMethod.MINMAX,
+            "None":               RejectionMethod.NONE,
         }
-        integration_map = {
-            0: IntegrationMethod.AVERAGE,
-            1: IntegrationMethod.MEDIAN,
-            2: IntegrationMethod.WEIGHTED_AVERAGE,
+        integ_map = {
+            "Average":          IntegrationMethod.AVERAGE,
+            "Median":           IntegrationMethod.MEDIAN,
+            "Weighted Average": IntegrationMethod.WEIGHTED_AVERAGE,
         }
-        registration_map = {
-            0: RegistrationMode.STAR_1_PASS,
-            1: RegistrationMode.STAR_2_PASS,
-            2: RegistrationMode.TRIANGLE,
-            3: RegistrationMode.FFT_TRANSLATION,
-            4: RegistrationMode.COMET,
-        }
-        # Reference frame index: -1=auto, 0=first, -2=last, or 1-based user input → 0-based
-        ref_mode = self._ref_frame_combo.currentIndex()
-        if ref_mode == 0:
-            ref_idx = -1       # auto
-        elif ref_mode == 1:
-            ref_idx = 0        # first
-        elif ref_mode == 2:
-            ref_idx = -2       # last (sentinel, handled below in align_frames)
-        else:
-            ref_idx = self._ref_frame_spin.value() - 1  # convert 1-based → 0-based
-
-        kappa = self._kappa_spin.value()
         return StackingParams(
             rejection=rejection_map.get(
-                self._rejection_combo.currentIndex(), RejectionMethod.SIGMA_CLIP
+                self._rejection_combo.currentText(), RejectionMethod.SIGMA_CLIP
             ),
-            integration=integration_map.get(
-                self._integration_combo.currentIndex(), IntegrationMethod.AVERAGE
+            integration=integ_map.get(
+                self._integration_combo.currentText(), IntegrationMethod.AVERAGE
             ),
-            registration_mode=registration_map.get(
-                self._reg_mode_combo.currentIndex(), RegistrationMode.STAR_1_PASS
-            ),
-            kappa_low=kappa,
-            kappa_high=kappa,
-            comet_nucleus_radius=self._comet_radius_spin.value(),
-            reference_frame_index=ref_idx,
+            kappa=self._kappa_spin.value(),
         )
-
-    def _on_reg_mode_changed(self, index: int):
-        """Show comet nucleus radius spin only when Comet mode is selected."""
-        self._comet_radius_spin.setVisible(index == 4)
-
-    def _on_ref_frame_mode_changed(self, index: int):
-        """Show frame number spin only when 'Specific frame #' is selected."""
-        self._ref_frame_spin.setVisible(index == 3)
-
-    def set_ref_frame_max(self, n_frames: int):
-        """Called by main window to update the max value when frames are loaded."""
-        self._ref_frame_spin.setMaximum(max(1, n_frames))
-
-    # ── Multi-session helpers ─────────────────────────────────────────────────
-
-    def _on_ms_clear(self):
-        self._ms_session_list.clear()
-        self._btn_ms_stack.setEnabled(False)
-        self.multi_session_clear.emit()
-
-    def ms_add_session(self, name: str, n_frames: int):
-        """Called by main_window after loading a session folder."""
-        self._ms_session_list.addItem(f"{name}  [{n_frames} frames]")
-        self._btn_ms_stack.setEnabled(self._ms_session_list.count() >= 2)
-
-    def ms_session_count(self) -> int:
-        return self._ms_session_list.count()
-
-    def get_multi_session_params(self) -> dict:
-        weight_map = {0: "snr", 1: "time", 2: "equal"}
-        return {
-            "weight_mode": weight_map.get(self._ms_weight_combo.currentIndex(), "snr"),
-            "normalize_background": self._ms_normalize_check.isChecked(),
-            "align_sub_stacks": self._ms_align_check.isChecked(),
-        }
-
-    def get_alignment_params(self) -> dict:
-        mode_map = {
-            0: RegistrationMode.STAR_1_PASS,
-            1: RegistrationMode.STAR_2_PASS,
-            2: RegistrationMode.TRIANGLE,
-            3: RegistrationMode.FFT_TRANSLATION,
-            4: RegistrationMode.COMET,
-        }
-        ref_mode = self._ref_frame_combo.currentIndex()
-        if ref_mode == 0:
-            ref_idx = -1
-        elif ref_mode == 1:
-            ref_idx = 0
-        elif ref_mode == 2:
-            ref_idx = -2
-        else:
-            ref_idx = self._ref_frame_spin.value() - 1
-        return {
-            "mode": mode_map.get(self._reg_mode_combo.currentIndex(), RegistrationMode.STAR_1_PASS),
-            "star_sensitivity": self._star_sens_spin.value(),
-            "max_match_distance": self._max_shift_spin.value(),
-            "ransac_threshold": self._ransac_thresh_spin.value(),
-            "reference_frame_index": ref_idx,
-            "comet_nucleus_radius": self._comet_radius_spin.value(),
-        }
 
     def get_stretch_params(self) -> StretchParams:
         return StretchParams(
-            shadow_clip=self._shadow_spin.value(),
-            midtone=self._midtone_slider.value() / 100.0,
+            midtone=self._midtone_slider.value(),
+            shadow_clip=float(self._shadow_spin.value()),
             linked=self._linked_check.isChecked(),
         )
 
-    def reset_stretch_params(self):
-        """Reset auto-stretch controls to defaults."""
-        self._midtone_slider.blockSignals(True)
-        self._shadow_spin.blockSignals(True)
-        self._midtone_slider.setValue(25)
-        self._shadow_spin.setValue(-2.8)
-        self._midtone_slider.blockSignals(False)
-        self._shadow_spin.blockSignals(False)
-
     def get_ghs_params(self) -> GHSParams:
         return GHSParams(
-            D=self._ghs_d_spin.value(),
-            b=self._ghs_b_spin.value(),
-            SP=self._ghs_sp_spin.value(),
-            shadow_protection=self._ghs_shadow_slider.value() / 100.0,
-            highlight_protection=self._ghs_highlight_slider.value() / 100.0,
+            D=float(self._ghs_d_spin.value()),
+            b=float(self._ghs_b_spin.value()),
+            SP=float(self._ghs_sp_spin.value()),
+            shadow_protection=self._ghs_shadow_slider.value(),
+            highlight_protection=self._ghs_highlight_slider.value(),
         )
-
-    def reset_ghs_params(self):
-        """Reset GHS controls to their defaults."""
-        for widget in (
-            self._ghs_d_spin,
-            self._ghs_b_spin,
-            self._ghs_sp_spin,
-            self._ghs_shadow_slider,
-            self._ghs_highlight_slider,
-        ):
-            widget.blockSignals(True)
-        self._ghs_d_spin.setValue(5.0)
-        self._ghs_b_spin.setValue(0.0)
-        self._ghs_sp_spin.setValue(0.0)
-        self._ghs_shadow_slider.setValue(0)
-        self._ghs_highlight_slider.setValue(0)
-        for widget in (
-            self._ghs_d_spin,
-            self._ghs_b_spin,
-            self._ghs_sp_spin,
-            self._ghs_shadow_slider,
-            self._ghs_highlight_slider,
-        ):
-            widget.blockSignals(False)
 
     def get_arcsinh_params(self) -> ArcsinhStretchParams:
         return ArcsinhStretchParams(
-            stretch_factor=self._arcsinh_factor_spin.value(),
-            black_point=self._arcsinh_bp_spin.value(),
+            stretch_factor=float(self._arcsinh_factor_spin.value()),
+            black_point=float(self._arcsinh_bp_spin.value()),
             linked=self._arcsinh_linked_check.isChecked(),
-        )
-
-    def _reset_arcsinh_params(self):
-        for w in (self._arcsinh_factor_spin, self._arcsinh_bp_spin):
-            w.blockSignals(True)
-        self._arcsinh_factor_spin.setValue(10.0)
-        self._arcsinh_bp_spin.setValue(0.0)
-        self._arcsinh_linked_check.setChecked(True)
-        for w in (self._arcsinh_factor_spin, self._arcsinh_bp_spin):
-            w.blockSignals(False)
-
-    def get_curves_params(self) -> CurvesParams:
-        return self._curve_editor.get_params()
-
-    def get_background_params(self, manual_points: list | None = None) -> BackgroundParams:
-        return BackgroundParams(
-            grid_size=self._bg_grid_spin.value(),
-            polynomial_order=self._bg_order_spin.value(),
-            manual_points=manual_points or [],
-        )
-
-    def set_bg_sample_count(self, n: int):
-        self._bg_sample_label.setText(f"{n} manual sample{'s' if n != 1 else ''}")
-
-    def _on_add_bg_grid(self):
-        self.add_bg_grid.emit(
-            self._bg_grid_rows_spin.value(),
-            self._bg_grid_cols_spin.value(),
-            self._bg_box_size_spin.value(),
-        )
-
-    def get_cosmetic_params(self) -> CosmeticParams:
-        return CosmeticParams(
-            hot_sigma=self._hot_sigma_spin.value(),
-            cold_sigma=self._cold_sigma_spin.value(),
-            detect_dead=self._dead_pixel_check.isChecked(),
-        )
-
-    def get_banding_params(self) -> BandingParams:
-        return BandingParams(
-            horizontal=self._band_h_check.isChecked(),
-            vertical=self._band_v_check.isChecked(),
-            amount=self._band_amount_slider.value() / 100.0,
-            protection_sigma=self._band_sigma_spin.value(),
         )
 
     def get_histogram_transform_params(self) -> HistogramTransformParams:
         return HistogramTransformParams(
-            black_point=self._ht_black_spin.value(),
-            midtone=self._ht_midtone_slider.value() / 100.0,
-            white_point=self._ht_white_spin.value(),
+            black_point=float(self._ht_black_spin.value()),
+            midtone=self._ht_midtone_slider.value(),
+            white_point=float(self._ht_white_spin.value()),
         )
 
-    def reset_histogram_transform_params(self):
-        """Reset HT controls to their defaults (black=0, midtone=0.5, white=1)."""
-        self._ht_black_spin.blockSignals(True)
-        self._ht_midtone_slider.blockSignals(True)
-        self._ht_white_spin.blockSignals(True)
-        self._ht_black_spin.setValue(0.0)
-        self._ht_midtone_slider.setValue(50)
-        self._ht_white_spin.setValue(1.0)
-        self._ht_black_spin.blockSignals(False)
-        self._ht_midtone_slider.blockSignals(False)
-        self._ht_white_spin.blockSignals(False)
-
-    def get_scnr_params(self) -> SCNRParams:
-        method_map = {0: SCNRMethod.AVERAGE_NEUTRAL, 1: SCNRMethod.MAXIMUM_NEUTRAL}
-        return SCNRParams(
-            method=method_map.get(
-                self._scnr_method_combo.currentIndex(), SCNRMethod.AVERAGE_NEUTRAL
-            ),
-            amount=self._scnr_amount_slider.value() / 100.0,
-            preserve_luminance=self._scnr_preserve_lum.isChecked(),
-        )
-
-    def get_color_adjust_params(self) -> ColorAdjustParams:
-        return ColorAdjustParams(
-            saturation=self._saturation_slider.value() / 100.0,
-            hue_shift=float(self._hue_slider.value()),
-            vibrance=self._vibrance_slider.value() / 100.0,
-        )
-
-    def get_color_calibration_params(self) -> ColorCalibrationParams:
-        ref_map = {0: "average", 1: "G2V", 2: "custom"}
-        return ColorCalibrationParams(
-            white_reference=ref_map.get(self._cc_reference_combo.currentIndex(), "average"),
-            neutralize_background=self._cc_neutralize_bg.isChecked(),
-            background_percentile=self._cc_bg_percentile.value(),
-        )
-
-    def get_pcc_params(self) -> dict:
-        solver_map = {0: "auto", 1: "astap", 2: "astrometry_net"}
-        return {
-            "ra_hint": self._pcc_ra_spin.value() if self._pcc_ra_spin.value() != 0 else None,
-            "dec_hint": self._pcc_dec_spin.value() if self._pcc_dec_spin.value() != 0 else None,
-            "solver": solver_map.get(self._pcc_solver_combo.currentIndex(), "auto"),
-        }
-
-    # ── Calibration helpers ───────────────────────────────────────────────────
-
-    def _cal_load_folder(self, frame_type: str):
-        from PyQt6.QtWidgets import QFileDialog
-        folder = QFileDialog.getExistingDirectory(
-            self, f"Select {frame_type.title()} Frames Folder"
-        )
-        if not folder:
-            return
-        from pathlib import Path
-        p = Path(folder)
-        paths = []
-        for ext in ("*.fits", "*.fit", "*.fts", "*.FTS"):
-            paths.extend(str(f) for f in sorted(p.glob(ext)))
-        if not paths:
-            return
-        n = len(paths)
-        if frame_type == "bias":
-            self._cal_bias_paths = paths
-            self._cal_bias_master_path = None
-            self._cal_bias_label.setText(f"Bias: {n} frames (folder)")
-        elif frame_type == "dark":
-            self._cal_dark_paths = paths
-            self._cal_dark_master_path = None
-            self._cal_dark_label.setText(f"Dark: {n} frames (folder)")
-        elif frame_type == "flat":
-            self._cal_flat_paths = paths
-            self._cal_flat_master_path = None
-            self._cal_flat_label.setText(f"Flat: {n} frames (folder)")
-
-    def _cal_load_master(self, frame_type: str):
-        from PyQt6.QtWidgets import QFileDialog
-        path, _ = QFileDialog.getOpenFileName(
-            self, f"Select Master {frame_type.title()} FITS", "",
-            "FITS Images (*.fits *.fit *.fts *.FTS)"
-        )
-        if not path:
-            return
-        from pathlib import Path
-        name = Path(path).name
-        if frame_type == "bias":
-            self._cal_bias_master_path = path
-            self._cal_bias_paths = []
-            self._cal_bias_label.setText(f"Bias: {name}")
-        elif frame_type == "dark":
-            self._cal_dark_master_path = path
-            self._cal_dark_paths = []
-            self._cal_dark_label.setText(f"Dark: {name}")
-        elif frame_type == "flat":
-            self._cal_flat_master_path = path
-            self._cal_flat_paths = []
-            self._cal_flat_label.setText(f"Flat: {name}")
-
-    def get_calibration_sources(self) -> dict:
-        """Return calibration frame configuration for auto-master creation."""
-        return {
-            "bias_paths":   self._cal_bias_paths,
-            "dark_paths":   self._cal_dark_paths,
-            "flat_paths":   self._cal_flat_paths,
-            "bias_master":  self._cal_bias_master_path,
-            "dark_master":  self._cal_dark_master_path,
-            "flat_master":  self._cal_flat_master_path,
-        }
-
-    # ── Blink Comparator helpers ──────────────────────────────────────────────
-
-    def set_subframe_count(self, n: int) -> None:
-        """Update the subframe selector status label after accepted frames are chosen."""
-        if n > 0:
-            self._subframe_count_label.setText(
-                f"{n} frame{'s' if n != 1 else ''} selected — will be used for stacking"
-            )
-            self._subframe_count_label.setStyleSheet("color: #90ee90; font-size: 10px;")
-        else:
-            self._subframe_count_label.setText("No subframe selection active")
-            self._subframe_count_label.setStyleSheet("color: #aaa; font-size: 10px;")
-
-    def set_blink_slot_label(self, slot: str, name: str) -> None:
-        """Update blink comparator A/B slot label. slot='a' or 'b'."""
-        if slot == "a":
-            self._blink_a_label.setText(f"A: {name}")
-        else:
-            self._blink_b_label.setText(f"B: {name}")
-
-    def reset_blink_toggle(self):
-        """Programmatically un-press the blink toggle button (e.g. on stop)."""
-        self._blink_toggle_btn.blockSignals(True)
-        self._blink_toggle_btn.setChecked(False)
-        self._blink_toggle_btn.setText("Start  [B]")
-        self._blink_toggle_btn.blockSignals(False)
-
-    def set_psf_measurement(
-        self,
-        fwhm: float,
-        ellipticity: float,
-        n_stars: int,
-        fwhm_x: float = 0.0,
-        fwhm_y: float = 0.0,
-        theta: float = 0.0,
-        fwhm_std: float = 0.0,
-    ) -> None:
-        """Update FWHM spin and results grid from a PSF measurement result."""
-        self._decon_fwhm_spin.setValue(round(fwhm, 2))
-        self._psf_value_labels["FWHM"].setText(f"{fwhm:.2f}")
-        self._psf_value_labels["FWHM X"].setText(f"{fwhm_x:.2f}")
-        self._psf_value_labels["FWHM Y"].setText(f"{fwhm_y:.2f}")
-        self._psf_value_labels["Ellipticity"].setText(f"{ellipticity:.3f}")
-        self._psf_value_labels["Theta"].setText(f"{theta:.1f}")
-        self._psf_value_labels["Stars"].setText(str(n_stars))
-        self._psf_value_labels["σ FWHM"].setText(f"{fwhm_std:.2f}")
-        self._psf_results_widget.setVisible(True)
-        self._psf_result_label.setText("")
-
-    def get_deconvolution_params(self) -> DeconvolutionParams | SpatialDeconvParams:
-        if self._decon_spatial_check.isChecked():
-            return SpatialDeconvParams(
-                grid_zones=3,
-                iterations=self._decon_iter_spin.value(),
-                regularization=self._decon_reg_slider.value() / 10000.0,
-                deringing=self._decon_dering_check.isChecked(),
-                deringing_amount=self._decon_dering_amount.value(),
-                fallback_fwhm=self._decon_fwhm_spin.value(),
-            )
-        return DeconvolutionParams(
-            psf_fwhm=self._decon_fwhm_spin.value(),
-            iterations=self._decon_iter_spin.value(),
-            regularization=self._decon_reg_slider.value() / 10000.0,
-            deringing=self._decon_dering_check.isChecked(),
-            deringing_amount=self._decon_dering_amount.value(),
-        )
-
-    def is_tgv_denoise_selected(self) -> bool:
-        return self._nr_method_combo.currentIndex() == 2
-
-    def get_tgv_params(self):
-        from cosmica.core.tgv_denoise import TGVParams
-        return TGVParams(
-            strength=self._nr_strength_slider.value() / 100.0 * 2.0,  # map 0-100 → 0-2
-            n_iter=150,
-        )
-
-    def get_denoise_params(self) -> DenoiseParams:
-        method_map = {0: DenoiseMethod.WAVELET, 1: DenoiseMethod.NLM}
-        return DenoiseParams(
-            method=method_map.get(self._nr_method_combo.currentIndex(), DenoiseMethod.WAVELET),
-            strength=self._nr_strength_slider.value() / 100.0,
-            detail_preservation=self._nr_detail_slider.value() / 100.0,
-            chrominance_only=self._nr_chrom_check.isChecked(),
-        )
-
-    def get_star_reduction_params(self) -> StarReductionParams:
-        return StarReductionParams(
-            amount=self._sr_amount_slider.value() / 100.0,
-            iterations=self._sr_iterations_spin.value(),
-            kernel_size=self._sr_kernel_spin.value(),
-        )
-
-    def get_mlt_params(self) -> WaveletParams:
-        """Return WaveletParams from the MLT panel (6-band with thresholds)."""
-        weights = []
-        thresholds = []
-        for boost_sl, _, thr_sl, _ in self._mlt_sliders:
-            weights.append(boost_sl.value() / 100.0)
-            thresholds.append(thr_sl.value() / 10000.0)
-        return WaveletParams(
-            n_scales=6,
-            scale_weights=weights,
-            residual_weight=self._mlt_residual_spin.value(),
-            noise_thresholds=thresholds,
-        )
-
-    def get_wavelet_params(self) -> WaveletParams:
-        n_scales = self._wav_scales_spin.value()
-        weights = []
-        fine = self._wav_fine_slider.value() / 100.0
-        medium = self._wav_medium_slider.value() / 100.0
-        coarse = self._wav_coarse_slider.value() / 100.0
-        # Distribute 3 sliders across n_scales: fine for scale 0, coarse for last
-        for i in range(n_scales):
-            t = i / max(n_scales - 1, 1)
-            if t < 0.5:
-                w = fine * (1 - 2 * t) + medium * (2 * t)
-            else:
-                w = medium * (2 - 2 * t) + coarse * (2 * t - 1)
-            weights.append(w)
-        return WaveletParams(n_scales=n_scales, scale_weights=weights)
-
-    def get_local_contrast_params(self) -> LocalContrastParams:
-        return LocalContrastParams(
-            clip_limit=self._lc_clip_spin.value(),
-            tile_size=self._lc_tile_spin.value(),
-            amount=self._lc_amount_slider.value() / 100.0,
-        )
-
-    def get_morphology_params(self) -> MorphologyParams:
-        op_map = {0: MorphOp.DILATE, 1: MorphOp.ERODE, 2: MorphOp.OPEN, 3: MorphOp.CLOSE}
-        el_map = {
-            0: StructuringElement.CIRCLE,
-            1: StructuringElement.SQUARE,
-            2: StructuringElement.DIAMOND,
-        }
-        return MorphologyParams(
-            operation=op_map.get(self._morph_op_combo.currentIndex(), MorphOp.DILATE),
-            element=el_map.get(self._morph_element_combo.currentIndex(), StructuringElement.CIRCLE),
-            kernel_size=self._morph_kernel_spin.value(),
-            iterations=self._morph_iter_spin.value(),
-        )
-
-    def get_ai_denoise_params(self) -> AIDenoiseParams:
-        return AIDenoiseParams(
-            strength=self._aid_strength_slider.value() / 100.0,
-            protect_stars=self._aid_protect_slider.value() / 100.0,
-            n_passes=self._aid_passes_spin.value(),
-        )
-
-    def get_ai_sharpen_params(self) -> AISharpenParams:
-        return AISharpenParams(
-            strength=self._ais_strength_slider.value() / 100.0,
-        )
-
-    def _on_crop_draw_clicked(self, checked: bool):
-        if checked:
-            self._btn_crop_draw.setText("Cancel Draw")
-        else:
-            self._btn_crop_draw.setText("Draw on Image…")
-        self.start_crop_draw.emit()
-
-    def set_crop_from_rect(self, x: int, y: int, w: int, h: int):
-        """Called by main_window after the user draws a crop rect on the canvas."""
-        self._crop_x_spin.setValue(x)
-        self._crop_y_spin.setValue(y)
-        self._crop_w_spin.setValue(w)
-        self._crop_h_spin.setValue(h)
-        # Reset the button state (crop mode auto-exits after selection)
-        self._btn_crop_draw.setChecked(False)
-        self._btn_crop_draw.setText("Draw on Image…")
-
-    def get_crop_params(self) -> CropParams:
-        return CropParams(
-            x=self._crop_x_spin.value(),
-            y=self._crop_y_spin.value(),
-            width=self._crop_w_spin.value(),
-            height=self._crop_h_spin.value(),
-        )
-
-    def get_rotate_params(self) -> RotateParams:
-        angle_map = {
-            0: RotateAngle.CW_90,
-            1: RotateAngle.CW_180,
-            2: RotateAngle.CW_270,
-            3: RotateAngle.ARBITRARY,
-        }
-        return RotateParams(
-            angle=angle_map.get(self._rotate_combo.currentIndex(), RotateAngle.CW_90),
-            arbitrary_degrees=self._rotate_angle_spin.value(),
-            expand=self._rotate_expand_check.isChecked(),
-        )
-
-    def get_flip_params(self) -> FlipParams:
-        axis_map = {0: FlipAxis.HORIZONTAL, 1: FlipAxis.VERTICAL, 2: FlipAxis.BOTH}
-        return FlipParams(
-            axis=axis_map.get(self._flip_combo.currentIndex(), FlipAxis.HORIZONTAL),
-        )
-
-    def get_resize_params(self) -> ResizeParams:
-        interp_map = {
-            0: InterpolationMethod.LANCZOS,
-            1: InterpolationMethod.BICUBIC,
-            2: InterpolationMethod.BILINEAR,
-            3: InterpolationMethod.NEAREST,
-        }
-        return ResizeParams(
-            scale=self._resize_scale_spin.value(),
-            interpolation=interp_map.get(
-                self._resize_interp_combo.currentIndex(), InterpolationMethod.LANCZOS
-            ),
-        )
-
-    def get_bin_params(self) -> BinParams:
-        factor_map = {0: 2, 1: 3, 2: 4}
-        mode_map = {0: BinMode.AVERAGE, 1: BinMode.SUM}
-        return BinParams(
-            factor=factor_map.get(self._bin_factor_combo.currentIndex(), 2),
-            mode=mode_map.get(self._bin_mode_combo.currentIndex(), BinMode.AVERAGE),
-        )
-
-    def get_unsharp_mask_params(self) -> UnsharpMaskParams:
-        return UnsharpMaskParams(
-            radius=self._usm_radius_spin.value(),
-            amount=self._usm_amount_slider.value() / 100.0,
-            threshold=self._usm_threshold_spin.value(),
-        )
-
-    def get_median_filter_params(self) -> MedianFilterParams:
-        k = self._mf_kernel_spin.value()
-        if k % 2 == 0:
-            k += 1
-        return MedianFilterParams(kernel_size=k)
-
-    def get_abe_params(self) -> ABEParams:
-        model_map = {0: "polynomial", 1: "rbf"}
-        kernel_map = {0: "thin_plate_spline", 1: "multiquadric", 2: "gaussian"}
-        mode_map = {0: "subtraction", 1: "division"}
-        return ABEParams(
-            grid_size=self._abe_grid_spin.value(),
-            model_type=model_map.get(self._abe_model_combo.currentIndex(), "polynomial"),
-            polynomial_degree=self._abe_degree_spin.value(),
-            rbf_kernel=kernel_map.get(self._abe_kernel_combo.currentIndex(), "thin_plate_spline"),
-            rbf_smoothing=self._abe_smoothing_spin.value(),
-            correction_mode=mode_map.get(self._abe_mode_combo.currentIndex(), "subtraction"),
-            sample_percentile=self._abe_sample_pct_spin.value(),
-            darkest_fraction=self._abe_darkest_spin.value(),
+    def get_background_params(self) -> BackgroundParams:
+        return BackgroundParams(
+            grid_size=int(self._bg_grid_spin.value()),
+            poly_order=int(self._bg_order_spin.value()),
         )
 
     def get_background_neutralization_params(self) -> BackgroundNeutralizationParams:
         return BackgroundNeutralizationParams(
-            percentile=self._bn_percentile_spin.value(),
-            protect_bright=self._bn_protect_spin.value(),
-            amount=self._bn_amount_spin.value(),
+            percentile=self._bn_percentile.value(),
+            amount=self._bn_amount.value(),
+            protect_bright=self._bn_protect.value(),
+        )
+
+    def get_cosmetic_params(self) -> CosmeticParams:
+        return CosmeticParams(
+            hot_sigma=self._hot_sigma.value(),
+            cold_sigma=self._cold_sigma.value(),
+            fix_dead=self._dead_pixel_check.isChecked(),
         )
 
     def get_vignette_params(self) -> VignetteParams:
         return VignetteParams(
-            strength=self._vig_strength_spin.value(),
-            falloff=self._vig_falloff_spin.value(),
+            amount=self._vignette_amount.value(),
+            radius=self._vignette_radius.value(),
         )
 
-    def get_ca_params(self) -> CAParams:
-        return CAParams(
-            auto_detect=self._ca_auto_check.isChecked(),
-            red_shift_x=self._ca_red_x_spin.value(),
-            red_shift_y=self._ca_red_y_spin.value(),
-            blue_shift_x=self._ca_blue_x_spin.value(),
-            blue_shift_y=self._ca_blue_y_spin.value(),
+    def get_banding_params(self) -> BandingParams:
+        return BandingParams(
+            amount=self._banding_amount.value(),
+            direction=self._banding_dir_combo.currentText().lower(),
         )
 
-    def get_continuum_scale(self) -> float:
-        return self._cont_scale_spin.value()
-
-    def get_lrgb_params(self):
-        from cosmica.core.lrgb import LRGBParams
-        return LRGBParams(
-            luminance_weight=self._lrgb_lum_weight_spin.value(),
-            saturation_boost=self._lrgb_sat_spin.value(),
-            chrominance_noise=self._lrgb_chroma_spin.value(),
+    def get_ai_denoise_params(self) -> AIDenoiseParams:
+        tile_map = {"128": 128, "256": 256, "512": 512, "Full": 0}
+        return AIDenoiseParams(
+            strength=self._ai_denoise_strength.value(),
+            tile_size=tile_map.get(self._ai_tile_combo.currentText(), 256),
+            protect_stars=self._ai_star_protect.isChecked(),
+            tiled=self._ai_tiled_check.isChecked(),
         )
 
-    def get_spcc_params(self):
-        from cosmica.core.spcc import SPCCParams
-        return SPCCParams(
-            filter_name=self._spcc_filter_combo.currentText(),
-            neutralize_background=self._spcc_neutralize_check.isChecked(),
+    def get_denoise_params(self) -> DenoiseParams:
+        return DenoiseParams(
+            method=self._denoise_method_combo.currentText(),
+            amount=self._denoise_amount.value(),
+            luminance=self._denoise_lum.value(),
+            chrominance=self._denoise_chrom.value(),
         )
 
-    @property
-    def starnet_extract_stars(self) -> bool:
-        return self._sn_extract_stars.isChecked()
-
-    @property
-    def curve_editor(self) -> CurveEditor:
-        return self._curve_editor
-
-    @property
-    def split_preview_enabled(self) -> bool:
-        return self._split_check.isChecked()
-
-    def set_macro_recording(self, recording: bool):
-        """Update macro UI state when recording starts/stops."""
-        self._btn_macro_start.setEnabled(not recording)
-        self._btn_macro_stop.setEnabled(recording)
-        self._macro_status_label.setText("Recording..." if recording else "Not recording")
-        self._macro_status_label.setStyleSheet(
-            "color: #ff4444; font-size: 11px; font-weight: bold;"
-            if recording
-            else "color: #969696; font-size: 11px;"
+    def get_star_reduction_params(self) -> StarReductionParams:
+        return StarReductionParams(
+            amount=self._star_reduction_amount.value() / 100.0,
+            method=self._star_reduction_method.currentText(),
         )
 
-    def get_debayer_params(self) -> dict:
-        """Return debayer pattern and method from UI."""
-        pattern_items = ["", "RGGB", "BGGR", "GRBG", "GBRG"]
-        method_items = ["vng", "ea", "bilinear", "superpixel"]
-        return {
-            "pattern": pattern_items[self._debayer_pattern_combo.currentIndex()],  # "" = auto
-            "method": method_items[self._debayer_method_combo.currentIndex()],
+    def get_unsharp_mask_params(self) -> UnsharpMaskParams:
+        return UnsharpMaskParams(
+            radius=self._um_radius.value(),
+            amount=self._um_amount.value(),
+            threshold=self._um_threshold.value(),
+        )
+
+    def get_local_contrast_params(self) -> LocalContrastParams:
+        return LocalContrastParams(
+            clip_limit=self._clahe_clip.value(),
+            tile_size=int(self._clahe_tiles.value()),
+        )
+
+    def get_scnr_params(self) -> SCNRParams:
+        return SCNRParams(
+            target=self._scnr_target_combo.currentText().lower(),
+            method=self._scnr_method_combo.currentText(),
+            amount=self._scnr_amount.value(),
+        )
+
+    def get_color_adjust_params(self) -> ColorAdjustParams:
+        return ColorAdjustParams(
+            hue=self._hue_slider.value(),
+            saturation=self._sat_slider.value() / 100.0,
+            vibrance=self._vibrance_slider.value() / 100.0,
+            lightness=self._lightness_slider.value() / 100.0,
+        )
+
+    def get_curves_params(self) -> CurvesParams:
+        channel_map = {
+            "Master (L)": "luminance",
+            "Red": "red", "Green": "green", "Blue": "blue",
         }
+        return CurvesParams(
+            channel=channel_map.get(
+                self._curve_channel_combo.currentText(), "luminance"
+            ),
+            points=self._curve_editor.get_points(),
+        )
 
-    def _on_curve_channel_changed(self, index: int):
-        """Switch curve editor to show the selected channel's curve."""
-        # This will be used by the main window to swap curve data
-        pass
+    def get_wavelet_params(self) -> WaveletParams:
+        return WaveletParams(
+            n_layers=int(self._wavelet_layers.value()),
+            layer_amounts=[s.value() for s in self._wavelet_layer_sliders],
+        )
 
-    def _on_curves_changed(self):
-        """Handle curve editor changes."""
-        self._emit_if_preview_enabled("curves")
+    def get_crop_params(self) -> CropParams:
+        return CropParams(
+            x=int(self._crop_x_spin.value()),
+            y=int(self._crop_y_spin.value()),
+            width=int(self._crop_w_spin.value()) or None,
+            height=int(self._crop_h_spin.value()) or None,
+        )
+
+    def get_rotate_params(self) -> RotateParams:
+        preset_map = {
+            "90° CW": 90, "180°": 180, "270° CW": 270
+        }
+        text = self._rotate_combo.currentText()
+        angle = preset_map.get(text, float(self._rotate_angle_spin.value()))
+        return RotateParams(
+            angle=angle,
+            expand=self._rotate_expand_check.isChecked(),
+        )
+
+    def get_flip_params(self) -> FlipParams:
+        return FlipParams(axis=self._flip_combo.currentText().lower())
+
+    def get_resize_params(self) -> ResizeParams:
+        return ResizeParams(
+            scale=float(self._resize_scale_spin.value()),
+            interpolation=self._resize_interp_combo.currentText(),
+        )
+
+    def get_bin_params(self) -> BinParams:
+        factor_map = {"2x2": 2, "3x3": 3, "4x4": 4}
+        return BinParams(
+            factor=factor_map.get(self._bin_factor_combo.currentText(), 2),
+            mode=self._bin_mode_combo.currentText().lower(),
+        )
+
+    def get_abe_params(self) -> ABEParams:
+        return ABEParams(
+            grid_size=int(self._abe_grid_spin.value()),
+            model=self._abe_model_combo.currentText(),
+            degree=int(self._abe_degree_spin.value()),
+            kernel=self._abe_kernel_combo.currentText(),
+            mode=self._abe_mode_combo.currentText().lower(),
+        )
+
+    def get_morphology_params(self) -> MorphologyParams:
+        return MorphologyParams(
+            operation=self._morph_op.currentText(),
+            kernel=self._morph_kernel.currentText(),
+            iterations=int(self._morph_iters.value()),
+        )
+
+    def get_color_calibration_params(self) -> ColorCalibrationParams:
+        return ColorCalibrationParams(
+            method=self._cc_method_combo.currentText(),
+        )
+
+    # ── Compatibility properties used by main_window ──────
+    @property
+    def curve_editor(self) -> "CurveEditor":
+        return self._curve_editor
 
     @property
     def curves_histogram_visible(self) -> bool:

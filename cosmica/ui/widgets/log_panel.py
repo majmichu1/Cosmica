@@ -7,7 +7,13 @@ from datetime import datetime
 
 from PyQt6.QtCore import QObject, Qt, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import (
-    QHBoxLayout, QLabel, QProgressBar, QPushButton, QTextEdit, QVBoxLayout, QWidget,
+    QHBoxLayout,
+    QLabel,
+    QProgressBar,
+    QPushButton,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
 )
 
 
@@ -21,6 +27,28 @@ class LogPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
+
+        # Header row: title + live GPU status + clear button
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(8, 4, 8, 2)
+        _title = QLabel("Processing Log")
+        _title.setStyleSheet("color: #e6edf3; font-size: 11px; font-weight: 700;")
+        self._log_header_gpu = QLabel("")
+        self._log_header_gpu.setStyleSheet("color: #8b949e; font-size: 11px;")
+        _clear_btn = QPushButton("Clear")
+        _clear_btn.setMaximumWidth(52)
+        _clear_btn.setMaximumHeight(18)
+        _clear_btn.setStyleSheet(
+            "QPushButton { color: #8b949e; font-size: 10px; border: 1px solid #30363d;"
+            " border-radius: 3px; padding: 0 4px; background: transparent; }"
+            " QPushButton:hover { color: #e6edf3; border-color: #8b949e; }"
+        )
+        _clear_btn.clicked.connect(self.clear_log)
+        header_row.addWidget(_title)
+        header_row.addStretch()
+        header_row.addWidget(self._log_header_gpu)
+        header_row.addWidget(_clear_btn)
+        layout.addLayout(header_row)
 
         # Progress bar row
         progress_row = QHBoxLayout()
@@ -69,10 +97,17 @@ class LogPanel(QWidget):
             "error": "#e06c75",
             "success": "#98c379",
         }
+        icons = {
+            "info": "·",
+            "warning": "⚠",
+            "error": "✕",
+            "success": "✓",
+        }
         color = colors.get(level, "#d4d4d4")
+        icon = icons.get(level, "·")
         self._log_text.append(
             f'<span style="color:#6e6e6e">[{timestamp}]</span> '
-            f'<span style="color:{color}">{message}</span>'
+            f'<span style="color:{color}">{icon} {message}</span>'
         )
         self._log_text.verticalScrollBar().setValue(
             self._log_text.verticalScrollBar().maximum()
@@ -80,6 +115,10 @@ class LogPanel(QWidget):
 
     def clear_log(self):
         self._log_text.clear()
+
+    def update_gpu_status(self, text: str):
+        """Update the live GPU/VRAM label in the log panel header."""
+        self._log_header_gpu.setText(text)
 
     def reset_progress(self):
         self._progress_bar.setValue(0)

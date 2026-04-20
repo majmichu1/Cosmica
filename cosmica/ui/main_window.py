@@ -11,13 +11,23 @@ from pathlib import Path
 from PyQt6.QtCore import QSettings, Qt, QThread, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QAction, QDragEnterEvent, QDropEvent
 from PyQt6.QtWidgets import (
+    QApplication,
+    QButtonGroup,
     QCheckBox,
     QDialog,
     QFileDialog,
+    QFrame,
+    QHBoxLayout,
     QInputDialog,
+    QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QSizePolicy,
     QSplitter,
+    QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -95,6 +105,8 @@ from cosmica.ui.panels.tools_panel import ToolsPanel
 from cosmica.ui.widgets.histogram import HistogramWidget
 from cosmica.ui.widgets.image_canvas import ImageCanvas
 from cosmica.ui.widgets.log_panel import LogPanel, QtLogHandler
+from cosmica.ui.widgets.tweaks_panel import TweaksPanel
+from cosmica.ui.widgets.workflow_bar import StepState, WorkflowBar
 
 log = logging.getLogger(__name__)
 
@@ -321,6 +333,7 @@ class MainWindow(QMainWindow):
 
         self.setAcceptDrops(True)
         self._setup_menu()
+        self._setup_toolbar()
         self._setup_ui()
         self._setup_logging()
         self._setup_statusbar()
@@ -328,7 +341,52 @@ class MainWindow(QMainWindow):
     def _setup_menu(self):
         menu = self.menuBar()
 
-        # File menu
+        # ── Left corner widget: logo + version badge ──────────────────────────
+        left_corner = QWidget()
+        left_layout = QHBoxLayout(left_corner)
+        left_layout.setContentsMargins(8, 0, 8, 0)
+        left_layout.setSpacing(6)
+        logo_label = QLabel("✦ Cosmica")
+        logo_label.setStyleSheet(
+            "color: #e6edf3; font-size: 13px; font-weight: 700; letter-spacing: 0.5px;"
+        )
+        version_badge = QLabel(f"v{cosmica.__version__}")
+        version_badge.setStyleSheet(
+            "color: #8b949e; font-size: 10px; background: #21262d; border: 1px solid #30363d;"
+            " border-radius: 4px; padding: 1px 5px;"
+        )
+        left_layout.addWidget(logo_label)
+        left_layout.addWidget(version_badge)
+        menu.setCornerWidget(left_corner, Qt.Corner.TopLeftCorner)
+
+        # ── Right corner widget: GPU chip + RAM chip + Export ─────────────────
+        right_corner = QWidget()
+        right_layout = QHBoxLayout(right_corner)
+        right_layout.setContentsMargins(4, 0, 8, 0)
+        right_layout.setSpacing(6)
+        self._gpu_chip_label = QLabel("")
+        self._gpu_chip_label.setStyleSheet(
+            "color: #8b949e; font-size: 11px; background: #21262d; border: 1px solid #30363d;"
+            " border-radius: 4px; padding: 1px 7px;"
+        )
+        self._ram_chip_label = QLabel("")
+        self._ram_chip_label.setStyleSheet(
+            "color: #8b949e; font-size: 11px; background: #21262d; border: 1px solid #30363d;"
+            " border-radius: 4px; padding: 1px 7px;"
+        )
+        export_btn = QPushButton("⬆ Export Image…")
+        export_btn.setStyleSheet(
+            "QPushButton { color: #ffffff; background: #2ea043; border: none; border-radius: 4px;"
+            " font-size: 11px; font-weight: 600; padding: 3px 10px; }"
+            " QPushButton:hover { background: #3fb950; }"
+        )
+        export_btn.clicked.connect(self._save_image)
+        right_layout.addWidget(self._gpu_chip_label)
+        right_layout.addWidget(self._ram_chip_label)
+        right_layout.addWidget(export_btn)
+        menu.setCornerWidget(right_corner, Qt.Corner.TopRightCorner)
+
+        # ── File menu ─────────────────────────────────────────────────────────
         file_menu = menu.addMenu("&File")
 
         new_proj = QAction("&New Project...", self)
@@ -346,22 +404,44 @@ class MainWindow(QMainWindow):
         save_proj.triggered.connect(self._save_project)
         file_menu.addAction(save_proj)
 
+        save_as_act = QAction("Save Project &As...", self)
+        save_as_act.setShortcut("Ctrl+Shift+A")
+        save_as_act.triggered.connect(self._save_project_as)
+        file_menu.addAction(save_as_act)
+
         file_menu.addSeparator()
 
         open_img = QAction("Open &Image...", self)
-        open_img.setShortcut("Ctrl+I")
+        open_img.setShortcut("Ctrl+Shift+I")
         open_img.triggered.connect(self._open_image)
         file_menu.addAction(open_img)
 
-        save_img = QAction("Save Image &As...", self)
-        save_img.setShortcut("Ctrl+Shift+S")
-        save_img.triggered.connect(self._save_image)
-        file_menu.addAction(save_img)
+        import_lights = QAction("Import &Lights...", self)
+        import_lights.triggered.connect(self._on_import_lights)
+        file_menu.addAction(import_lights)
 
-        fits_hdr = QAction("Edit FITS &Header...", self)
-        fits_hdr.setShortcut("Ctrl+H")
-        fits_hdr.triggered.connect(self._show_fits_header)
-        file_menu.addAction(fits_hdr)
+        import_cal = QAction("Import &Calibration Frames...", self)
+        import_cal.triggered.connect(self._on_import_calibration)
+        file_menu.addAction(import_cal)
+
+        file_menu.addSeparator()
+
+        export_fits = QAction("Export as &FITS...", self)
+        export_fits.triggered.connect(self._on_export_fits)
+        file_menu.addAction(export_fits)
+
+        export_tiff = QAction("Export as &TIFF...", self)
+        export_tiff.triggered.connect(self._on_export_tiff)
+        file_menu.addAction(export_tiff)
+
+        export_png = QAction("Export as &PNG...", self)
+        export_png.triggered.connect(self._on_export_png)
+        file_menu.addAction(export_png)
+
+        export_full = QAction("Export Image &As...", self)
+        export_full.setShortcut("Ctrl+Shift+S")
+        export_full.triggered.connect(self._save_image)
+        file_menu.addAction(export_full)
 
         file_menu.addSeparator()
 
@@ -377,25 +457,7 @@ class MainWindow(QMainWindow):
         quit_act.triggered.connect(self.close)
         file_menu.addAction(quit_act)
 
-        # View menu
-        view_menu = menu.addMenu("&View")
-
-        fit_act = QAction("&Fit to Window", self)
-        fit_act.setShortcut("Ctrl+0")
-        fit_act.triggered.connect(lambda: self._canvas.fit_to_window())
-        view_menu.addAction(fit_act)
-
-        zoom100 = QAction("Zoom &100%", self)
-        zoom100.setShortcut("Ctrl+1")
-        zoom100.triggered.connect(lambda: self._canvas.zoom_to(1.0))
-        view_menu.addAction(zoom100)
-
-        zoom200 = QAction("Zoom &200%", self)
-        zoom200.setShortcut("Ctrl+2")
-        zoom200.triggered.connect(lambda: self._canvas.zoom_to(2.0))
-        view_menu.addAction(zoom200)
-
-        # Edit menu
+        # ── Edit menu ─────────────────────────────────────────────────────────
         edit_menu = menu.addMenu("&Edit")
 
         self._undo_act = QAction("&Undo", self)
@@ -416,61 +478,168 @@ class MainWindow(QMainWindow):
         clear_undo.triggered.connect(self._clear_undo_history)
         edit_menu.addAction(clear_undo)
 
-        # Process menu
-        process_menu = menu.addMenu("&Process")
+        edit_menu.addSeparator()
 
-        pm_act = QAction("&Pixel Math...", self)
-        pm_act.setShortcut("Ctrl+P")
-        pm_act.triggered.connect(self._show_pixelmath_dialog)
-        process_menu.addAction(pm_act)
+        stats_act = QAction("Image &Statistics...", self)
+        stats_act.setShortcut("Ctrl+I")
+        stats_act.triggered.connect(self._on_show_statistics)
+        edit_menu.addAction(stats_act)
 
-        nb_act = QAction("&Narrowband Combine...", self)
-        nb_act.triggered.connect(self._show_narrowband_dialog)
-        process_menu.addAction(nb_act)
+        fits_hdr = QAction("Edit FITS &Header...", self)
+        fits_hdr.setShortcut("Ctrl+H")
+        fits_hdr.triggered.connect(self._show_fits_header)
+        edit_menu.addAction(fits_hdr)
 
-        hdr_act = QAction("&HDR Composition...", self)
-        hdr_act.triggered.connect(self._show_hdr_dialog)
-        process_menu.addAction(hdr_act)
+        # ── View menu ─────────────────────────────────────────────────────────
+        view_menu = menu.addMenu("&View")
 
-        batch_act = QAction("&Batch Processing...", self)
-        batch_act.setShortcut("Ctrl+B")
-        batch_act.triggered.connect(self._show_batch_dialog)
-        process_menu.addAction(batch_act)
+        zoom_in_act = QAction("Zoom &In", self)
+        zoom_in_act.setShortcut("+")
+        zoom_in_act.triggered.connect(lambda: self._canvas.zoom_in())
+        view_menu.addAction(zoom_in_act)
+        self._zoom_in_act = zoom_in_act
 
-        process_menu.addSeparator()
+        zoom_out_act = QAction("Zoom &Out", self)
+        zoom_out_act.setShortcut("-")
+        zoom_out_act.triggered.connect(lambda: self._canvas.zoom_out())
+        view_menu.addAction(zoom_out_act)
+        self._zoom_out_act = zoom_out_act
+
+        fit_act = QAction("&Fit to Window", self)
+        fit_act.setShortcut("F")
+        fit_act.triggered.connect(lambda: self._canvas.fit_to_window())
+        view_menu.addAction(fit_act)
+        self._fit_act = fit_act
+
+        zoom100 = QAction("Zoom &100%", self)
+        zoom100.setShortcut("1")
+        zoom100.triggered.connect(lambda: self._canvas.zoom_to(1.0))
+        view_menu.addAction(zoom100)
+
+        zoom200 = QAction("Zoom &200%", self)
+        zoom200.setShortcut("2")
+        zoom200.triggered.connect(lambda: self._canvas.zoom_to(2.0))
+        view_menu.addAction(zoom200)
+
+        view_menu.addSeparator()
+
+        split_act = QAction("&Before/After Split", self)
+        split_act.setShortcut("B")
+        split_act.setCheckable(True)
+        split_act.toggled.connect(self._on_split_view_toggled)
+        view_menu.addAction(split_act)
+        self._split_act = split_act
+
+        toggle_hist = QAction("Toggle &Histogram", self)
+        toggle_hist.setShortcut("H")
+        toggle_hist.triggered.connect(self._on_toggle_histogram)
+        view_menu.addAction(toggle_hist)
+
+        fullscreen_act = QAction("Full &Screen", self)
+        fullscreen_act.setShortcut("F11")
+        fullscreen_act.triggered.connect(self._on_fullscreen)
+        view_menu.addAction(fullscreen_act)
+
+        # ── Tools menu ────────────────────────────────────────────────────────
+        tools_menu = menu.addMenu("&Tools")
 
         smart_act = QAction("&Smart Processor...", self)
         smart_act.setShortcut("Ctrl+Shift+P")
         smart_act.triggered.connect(self._show_smart_processor_dialog)
-        process_menu.addAction(smart_act)
+        tools_menu.addAction(smart_act)
 
-        equip_act = QAction("&Equipment Profile...", self)
-        equip_act.triggered.connect(self._show_equipment_dialog)
-        process_menu.addAction(equip_act)
+        batch_act = QAction("&Batch Processing...", self)
+        batch_act.setShortcut("Ctrl+B")
+        batch_act.triggered.connect(self._show_batch_dialog)
+        tools_menu.addAction(batch_act)
 
-        process_menu.addSeparator()
+        subframe_act = QAction("Su&bframe Selector...", self)
+        subframe_act.triggered.connect(self._on_open_subframe_selector)
+        tools_menu.addAction(subframe_act)
 
-        macro_start = QAction("Start &Recording", self)
-        macro_start.triggered.connect(self._on_start_macro)
-        process_menu.addAction(macro_start)
+        blink_act = QAction("Blin&k Comparator", self)
+        blink_act.triggered.connect(
+            lambda: self._tools_panel._tab_widget.setCurrentIndex(
+                self._tools_panel._tab_widget.count() - 1
+            )
+        )
+        tools_menu.addAction(blink_act)
 
-        macro_stop = QAction("Sto&p Recording", self)
-        macro_stop.triggered.connect(self._on_stop_macro)
-        process_menu.addAction(macro_stop)
+        tools_menu.addSeparator()
 
-        macro_play = QAction("P&lay Macro", self)
-        macro_play.triggered.connect(self._on_play_macro)
-        process_menu.addAction(macro_play)
+        plate_act = QAction("&Plate Solve...", self)
+        plate_act.triggered.connect(self._on_plate_solve_from_menu)
+        tools_menu.addAction(plate_act)
 
-        # Masks menu
-        masks_menu = menu.addMenu("&Masks")
+        dso_act = QAction("&DSO Annotation", self)
+        dso_act.triggered.connect(lambda: self._on_toggle_dso_overlay(True))
+        tools_menu.addAction(dso_act)
+
+        wcs_act = QAction("&WCS Overlay", self)
+        wcs_act.triggered.connect(lambda: self._on_toggle_wcs_overlay(True))
+        tools_menu.addAction(wcs_act)
+
+        tools_menu.addSeparator()
+
+        pm_act = QAction("&Pixel Math...", self)
+        pm_act.setShortcut("Ctrl+P")
+        pm_act.triggered.connect(self._show_pixelmath_dialog)
+        tools_menu.addAction(pm_act)
+
+        nb_act = QAction("&Narrowband Combine...", self)
+        nb_act.triggered.connect(self._show_narrowband_dialog)
+        tools_menu.addAction(nb_act)
+
+        hdr_act = QAction("&HDR Composition...", self)
+        hdr_act.triggered.connect(self._show_hdr_dialog)
+        tools_menu.addAction(hdr_act)
 
         create_mask = QAction("Create &Mask...", self)
         create_mask.triggered.connect(self._show_mask_dialog)
-        masks_menu.addAction(create_mask)
+        tools_menu.addAction(create_mask)
 
-        # Help menu
+        tools_menu.addSeparator()
+
+        equip_act = QAction("&Equipment Profile...", self)
+        equip_act.triggered.connect(self._show_equipment_dialog)
+        tools_menu.addAction(equip_act)
+
+        tools_menu.addSeparator()
+
+        macro_start = QAction("Start &Recording", self)
+        macro_start.triggered.connect(self._on_start_macro)
+        tools_menu.addAction(macro_start)
+
+        macro_stop = QAction("Sto&p Recording", self)
+        macro_stop.triggered.connect(self._on_stop_macro)
+        tools_menu.addAction(macro_stop)
+
+        macro_play = QAction("P&lay Macro", self)
+        macro_play.triggered.connect(self._on_play_macro)
+        tools_menu.addAction(macro_play)
+
+        tools_menu.addSeparator()
+
+        console_act = QAction("Python &Console", self)
+        console_act.triggered.connect(self._on_open_python_console)
+        tools_menu.addAction(console_act)
+
+        # ── Help menu ─────────────────────────────────────────────────────────
         help_menu = menu.addMenu("&Help")
+
+        docs_act = QAction("&Documentation", self)
+        docs_act.triggered.connect(self._on_open_docs)
+        help_menu.addAction(docs_act)
+
+        getting_started = QAction("&Getting Started Guide", self)
+        getting_started.triggered.connect(self._on_open_docs)
+        help_menu.addAction(getting_started)
+
+        workflow_act = QAction("Processing &Workflow", self)
+        workflow_act.triggered.connect(self._on_open_docs)
+        help_menu.addAction(workflow_act)
+
+        help_menu.addSeparator()
 
         about_act = QAction("&About Cosmica", self)
         about_act.triggered.connect(self._show_about)
@@ -481,6 +650,106 @@ class MainWindow(QMainWindow):
         device_act.setEnabled(False)
         help_menu.addAction(device_act)
 
+        help_menu.addSeparator()
+
+        coffee_act = QAction("Buy Me a Coffee ☕", self)
+        coffee_act.triggered.connect(self._on_buy_coffee)
+        help_menu.addAction(coffee_act)
+
+    def _setup_toolbar(self):
+        """Quick-action toolbar below the menu bar."""
+        tb = QToolBar("Quick Actions")
+        tb.setMovable(False)
+        tb.setFloatable(False)
+        tb.setObjectName("QuickActionToolbar")
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, tb)
+
+        def _tbtn(symbol: str, tip: str, shortcut: str = "") -> QToolButton:
+            btn = QToolButton()
+            btn.setText(symbol)
+            btn.setToolTip(tip)
+            if shortcut:
+                btn.setShortcut(shortcut)
+            return btn
+
+        undo_btn = _tbtn("⎌", "Undo  Ctrl+Z", "Ctrl+Z")
+        undo_btn.clicked.connect(self._undo)
+        tb.addWidget(undo_btn)
+        self._tb_undo_btn = undo_btn
+
+        redo_btn = _tbtn("↷", "Redo  Ctrl+Shift+Z", "Ctrl+Shift+Z")
+        redo_btn.clicked.connect(self._redo)
+        tb.addWidget(redo_btn)
+
+        tb.addSeparator()
+
+        zoom_in_btn = _tbtn("⊕", "Zoom In  +")
+        zoom_in_btn.clicked.connect(lambda: self._canvas.zoom_in())
+        tb.addWidget(zoom_in_btn)
+
+        zoom_out_btn = _tbtn("⊖", "Zoom Out  −")
+        zoom_out_btn.clicked.connect(lambda: self._canvas.zoom_out())
+        tb.addWidget(zoom_out_btn)
+
+        fit_btn = _tbtn("⊡", "Fit to Window  F")
+        fit_btn.clicked.connect(lambda: self._canvas.fit_to_window())
+        tb.addWidget(fit_btn)
+
+        tb.addSeparator()
+
+        split_btn = _tbtn("⟺", "Before/After Split  B")
+        split_btn.setCheckable(True)
+        split_btn.toggled.connect(self._on_split_view_toggled)
+        tb.addWidget(split_btn)
+        self._tb_split_btn = split_btn
+
+        tb.addSeparator()
+
+        smart_btn = _tbtn("⚡ Smart", "Smart Processor  Ctrl+Shift+P", "Ctrl+Shift+P")
+        smart_btn.clicked.connect(self._show_smart_processor_dialog)
+        tb.addWidget(smart_btn)
+
+        batch_btn = _tbtn("⊞ Batch", "Batch Processing  Ctrl+B", "Ctrl+B")
+        batch_btn.clicked.connect(self._show_batch_dialog)
+        tb.addWidget(batch_btn)
+
+        # Stretch to push status + Tweaks to right
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        tb.addWidget(spacer)
+
+        # Operation status: "Ready" label + thin 4px progress bar
+        self._tb_status_label = QLabel("Ready")
+        self._tb_status_label.setStyleSheet(
+            "color: #2ea043; font-size: 10px; font-family: monospace; padding: 0 4px;"
+        )
+        tb.addWidget(self._tb_status_label)
+
+        self._tb_progress_bar = QProgressBar()
+        self._tb_progress_bar.setFixedSize(120, 4)
+        self._tb_progress_bar.setRange(0, 1000)
+        self._tb_progress_bar.setValue(0)
+        self._tb_progress_bar.setTextVisible(False)
+        self._tb_progress_bar.setStyleSheet(
+            "QProgressBar { background: #21262d; border: none; border-radius: 2px; }"
+            " QProgressBar::chunk { background: #2ea043; border-radius: 2px; }"
+        )
+        tb.addWidget(self._tb_progress_bar)
+
+        tb.addSeparator()
+
+        tweaks_btn = _tbtn("⚙ Tweaks", "UI Tweaks")
+        tweaks_btn.clicked.connect(self._on_toggle_tweaks)
+        tb.addWidget(tweaks_btn)
+
+        # Tweaks panel (created here, shown/hidden on demand)
+        self._tweaks_panel = TweaksPanel(self)
+        self._tweaks_panel.hide()
+        self._tweaks_panel.accent_changed.connect(self._on_tweaks_accent_changed)
+        self._tweaks_panel.workflow_visible.connect(self._on_tweaks_workflow_visible)
+        self._tweaks_panel.log_visible.connect(self._on_tweaks_log_visible)
+        self._tweaks_panel.log_height_changed.connect(self._on_tweaks_log_height)
+
     def _setup_ui(self):
         # Central widget with splitters
         central = QWidget()
@@ -489,6 +758,12 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
+        # Workflow pipeline bar
+        self._workflow_bar = WorkflowBar()
+        self._workflow_bar.step_clicked.connect(self._on_workflow_step_clicked)
+        # TweaksPanel checkbox defaults to checked=True, so show by default
+        main_layout.addWidget(self._workflow_bar)
+
         # Top: horizontal splitter (project | canvas | tools)
         top_splitter = QSplitter(Qt.Orientation.Horizontal)
 
@@ -496,20 +771,161 @@ class MainWindow(QMainWindow):
         self._project_panel = ProjectPanel()
         self._project_panel.frame_selected.connect(self._load_frame)
         self._project_panel.frames_imported.connect(self._on_frames_imported)
+        self._project_panel.plate_solve_clicked.connect(self._on_plate_solve_from_menu)
+        self._project_panel.dso_overlay_clicked.connect(self._on_toggle_dso_overlay)
         top_splitter.addWidget(self._project_panel)
 
-        # Center: Canvas + histogram
+        # Center: Canvas toolbar + Canvas + histogram
         center_widget = QWidget()
         center_layout = QVBoxLayout(center_widget)
         center_layout.setContentsMargins(0, 0, 0, 0)
         center_layout.setSpacing(0)
 
+        # ── Canvas toolbar ──────────────────────────────────────────────────
+        canvas_tb = QFrame()
+        canvas_tb.setFixedHeight(32)
+        canvas_tb.setObjectName("CanvasToolbar")
+        canvas_tb.setStyleSheet(
+            "#CanvasToolbar { background: #161b22; border-bottom: 1px solid #30363d; }"
+        )
+        tb_layout = QHBoxLayout(canvas_tb)
+        tb_layout.setContentsMargins(6, 0, 6, 0)
+        tb_layout.setSpacing(2)
+
+        def _ctb(text: str, tip: str = "", checkable: bool = False) -> QToolButton:
+            b = QToolButton()
+            b.setText(text)
+            b.setToolTip(tip)
+            b.setCheckable(checkable)
+            return b
+
+        zoom_out_tb = _ctb("−", "Zoom Out")
+        self._canvas_zoom_label = QLabel("100%")
+        self._canvas_zoom_label.setFixedWidth(44)
+        self._canvas_zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._canvas_zoom_label.setStyleSheet("color: #8b949e; font-size: 11px;")
+        zoom_in_tb = _ctb("+", "Zoom In")
+        fit_tb = _ctb("Fit", "Fit to Window")
+        one_to_one_tb = _ctb("1:1", "100% Zoom")
+        tb_layout.addWidget(zoom_out_tb)
+        tb_layout.addWidget(self._canvas_zoom_label)
+        tb_layout.addWidget(zoom_in_tb)
+        tb_layout.addWidget(fit_tb)
+        tb_layout.addWidget(one_to_one_tb)
+
+        _sep1 = QFrame()
+        _sep1.setFrameShape(QFrame.Shape.VLine)
+        _sep1.setStyleSheet("color: #30363d;")
+        tb_layout.addWidget(_sep1)
+
+        # After / Before / Split — manually exclusive
+        self._view_btn_group = QButtonGroup(canvas_tb)
+        self._view_btn_group.setExclusive(False)
+        after_tb = _ctb("After", "Show processed image", checkable=True)
+        before_tb = _ctb("Before", "Show original image", checkable=True)
+        split_tb = _ctb("⟺ Split", "Before/After split view", checkable=True)
+        after_tb.setChecked(True)
+        for _b in (after_tb, before_tb, split_tb):
+            self._view_btn_group.addButton(_b)
+            tb_layout.addWidget(_b)
+
+        _sep2 = QFrame()
+        _sep2.setFrameShape(QFrame.Shape.VLine)
+        _sep2.setStyleSheet("color: #30363d;")
+        tb_layout.addWidget(_sep2)
+
+        self._grid_tb = _ctb("Grid", "Toggle grid overlay", checkable=True)
+        self._wcs_tb = _ctb("WCS", "Toggle WCS star overlay", checkable=True)
+        tb_layout.addWidget(self._grid_tb)
+        tb_layout.addWidget(self._wcs_tb)
+
+        spacer_tb = QWidget()
+        spacer_tb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        tb_layout.addWidget(spacer_tb)
+
+        self._canvas_coord_label = QLabel("")
+        self._canvas_coord_label.setStyleSheet(
+            "color: #8b949e; font-size: 11px; font-family: monospace;"
+        )
+        tb_layout.addWidget(self._canvas_coord_label)
+
+        self._hist_toggle_tb = _ctb("▾ Histogram", "Show/hide histogram", checkable=True)
+        self._hist_toggle_tb.setChecked(True)
+        tb_layout.addWidget(self._hist_toggle_tb)
+
+        center_layout.addWidget(canvas_tb)
+
+        # ── Canvas ─────────────────────────────────────────────────────────
         self._canvas = ImageCanvas()
         self._canvas.cursor_position.connect(self._update_pixel_readout)
+        self._canvas.cursor_position.connect(self._update_canvas_coord_label)
         center_layout.addWidget(self._canvas, 1)
 
+        # ── Histogram container ─────────────────────────────────────────────
+        self._hist_container = QWidget()
+        hist_v = QVBoxLayout(self._hist_container)
+        hist_v.setContentsMargins(4, 2, 4, 2)
+        hist_v.setSpacing(2)
+
+        hist_header = QWidget()
+        hist_header_layout = QHBoxLayout(hist_header)
+        hist_header_layout.setContentsMargins(0, 0, 0, 0)
+        hist_header_layout.setSpacing(4)
+
+        self._hist_channel_group = QButtonGroup(hist_header)
+        for _ch in ("RGB", "R", "G", "B", "L"):
+            ch_btn = QPushButton(_ch)
+            ch_btn.setCheckable(True)
+            ch_btn.setFixedWidth(32)
+            ch_btn.setStyleSheet(
+                "QPushButton { background: transparent; border: none;"
+                " border-bottom: 2px solid transparent;"
+                " color: #8b949e; font-size: 11px; padding: 2px 0; }"
+                " QPushButton:checked { color: #e6edf3; border-bottom-color: #2ea043; }"
+            )
+            self._hist_channel_group.addButton(ch_btn)
+            hist_header_layout.addWidget(ch_btn)
+        self._hist_channel_group.buttons()[0].setChecked(True)
+
+        hist_header_layout.addStretch()
+
+        self._hist_stats_label = QLabel("")
+        self._hist_stats_label.setStyleSheet(
+            "color: #8b949e; font-size: 11px; font-family: monospace;"
+        )
+        hist_header_layout.addWidget(self._hist_stats_label)
+
+        hist_v.addWidget(hist_header)
+
         self._histogram = HistogramWidget()
-        center_layout.addWidget(self._histogram)
+        hist_v.addWidget(self._histogram)
+
+        center_layout.addWidget(self._hist_container)
+
+        # ── Wire canvas toolbar signals ────────────────────────────────────
+        zoom_out_tb.clicked.connect(self._canvas.zoom_out)
+        zoom_in_tb.clicked.connect(self._canvas.zoom_in)
+        fit_tb.clicked.connect(self._canvas.fit_to_window)
+        one_to_one_tb.clicked.connect(lambda: self._canvas.zoom_to(1.0))
+        self._canvas.zoom_changed.connect(
+            lambda z: self._canvas_zoom_label.setText(f"{int(z * 100)}%")
+        )
+
+        def _on_view_mode_toggled(toggled_btn: QToolButton, checked: bool):
+            if checked:
+                for _b in self._view_btn_group.buttons():
+                    if _b is not toggled_btn:
+                        _b.setChecked(False)
+            self._canvas.set_split_mode(split_tb.isChecked())
+
+        after_tb.toggled.connect(lambda c: _on_view_mode_toggled(after_tb, c))
+        before_tb.toggled.connect(lambda c: _on_view_mode_toggled(before_tb, c))
+        split_tb.toggled.connect(lambda c: _on_view_mode_toggled(split_tb, c))
+
+        self._grid_tb.toggled.connect(self._canvas.set_grid_visible)
+        self._wcs_tb.toggled.connect(self._canvas.set_wcs_overlay_visible)
+        self._hist_toggle_tb.toggled.connect(self._hist_container.setVisible)
+        self._hist_channel_group.buttonClicked.connect(self._on_hist_channel_clicked)
 
         top_splitter.addWidget(center_widget)
 
@@ -522,18 +938,23 @@ class MainWindow(QMainWindow):
         top_splitter.setSizes([250, 900, 320])
 
         # Vertical splitter (top panels | bottom log)
-        v_splitter = QSplitter(Qt.Orientation.Vertical)
-        v_splitter.addWidget(top_splitter)
+        self._v_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._v_splitter.addWidget(top_splitter)
 
         self._log_panel = LogPanel()
-        v_splitter.addWidget(self._log_panel)
-        v_splitter.setSizes([750, 120])
+        self._v_splitter.addWidget(self._log_panel)
+        self._v_splitter.setSizes([750, 120])
 
-        main_layout.addWidget(v_splitter)
+        main_layout.addWidget(self._v_splitter)
 
     def _connect_tool_signals(self):
         """Wire all tool panel signals to processing handlers."""
         tp = self._tools_panel
+
+        # Canvas overlay signals
+        self._canvas.undo_requested.connect(self._undo)
+        self._canvas.redo_requested.connect(self._redo)
+        self._canvas.export_requested.connect(self._save_image)
 
         # Existing signals
         tp.run_calibration.connect(self._on_run_calibration)
@@ -653,17 +1074,40 @@ class MainWindow(QMainWindow):
         self._log_panel.log(f"Device: {dm.info.name} ({dm.backend.name})", "info")
 
     def _setup_statusbar(self):
-        from PyQt6.QtWidgets import QLabel as _QLabel
-        self._pixel_label = self.statusBar()
-        self._preview_indicator = _QLabel("")
+        sb = self.statusBar()
+
+        # Left-side image info labels
+        def _sb_label(text="") -> QLabel:
+            lbl = QLabel(text)
+            lbl.setStyleSheet("color: #8b949e; font-size: 11px; padding: 0 6px;")
+            return lbl
+
+        self._status_filename = _sb_label()
+        self._status_size = _sb_label()
+        self._status_depth = _sb_label()
+        self._status_channels = _sb_label()
+        self._status_history = _sb_label()
+        for lbl in (
+            self._status_filename, self._status_size,
+            self._status_depth, self._status_channels, self._status_history,
+        ):
+            sb.addWidget(lbl)
+
+        self._preview_indicator = QLabel("")
         self._preview_indicator.setStyleSheet(
             "color: #00cc44; font-weight: bold; padding: 0 8px;"
         )
-        self._vram_label = _QLabel("")
-        self._vram_label.setStyleSheet("color: #969696; font-size: 11px; padding: 0 8px;")
-        self.statusBar().addPermanentWidget(self._vram_label)
-        self.statusBar().addPermanentWidget(self._preview_indicator)
-        self.statusBar().showMessage("Ready")
+        self._vram_label = QLabel("")
+        self._vram_label.setStyleSheet("color: #8b949e; font-size: 11px; padding: 0 8px;")
+        self._cuda_badge = QLabel("")
+        self._cuda_badge.setStyleSheet(
+            "color: #2ea043; font-size: 10px; background: #1a4d2e; border: 1px solid #2ea043;"
+            " border-radius: 3px; padding: 1px 5px;"
+        )
+        sb.addPermanentWidget(self._cuda_badge)
+        sb.addPermanentWidget(self._vram_label)
+        sb.addPermanentWidget(self._preview_indicator)
+        sb.showMessage("Ready")
 
         self._vram_timer = QTimer(self)
         self._vram_timer.timeout.connect(self._update_vram_label)
@@ -672,17 +1116,36 @@ class MainWindow(QMainWindow):
 
     def _update_vram_label(self):
         try:
-            from cosmica.core.device_manager import get_device_manager
+            import psutil as _psutil
+            ram_gb = _psutil.virtual_memory().used / 1024**3
+            self._ram_chip_label.setText(f"RAM {ram_gb:.1f} GB")
+        except Exception:
+            pass
+
+        try:
             dm = get_device_manager()
             if dm.device.type == "cuda":
                 import torch as _torch
                 alloc = _torch.cuda.memory_allocated(dm.device) / 1024**3
                 total = _torch.cuda.get_device_properties(dm.device).total_memory / 1024**3
-                self._vram_label.setText(f"VRAM {alloc:.1f}/{total:.1f} GB")
+                vram_text = f"VRAM {alloc:.1f}/{total:.1f} GB"
+                self._vram_label.setText(vram_text)
+                gpu_text = f"● {dm.info.name[:20]}"
+                self._gpu_chip_label.setText(gpu_text)
+                self._cuda_badge.setText("CUDA active")
+                self._cuda_badge.show()
+                self._log_panel.update_gpu_status(f"{gpu_text} · {vram_text}")
             elif dm.device.type == "mps":
                 self._vram_label.setText("GPU: MPS")
+                self._gpu_chip_label.setText("● Apple MPS")
+                self._cuda_badge.setText("MPS")
+                self._cuda_badge.show()
+                self._log_panel.update_gpu_status("Apple MPS")
             else:
                 self._vram_label.setText("CPU mode")
+                self._gpu_chip_label.setText("CPU")
+                self._cuda_badge.hide()
+                self._log_panel.update_gpu_status("CPU mode")
         except Exception:
             self._vram_label.setText("")
 
@@ -845,6 +1308,167 @@ class MainWindow(QMainWindow):
             f"<p>&copy; 2024 Cosmica Team</p>",
         )
 
+    # ---------- New menu / toolbar handlers ----------
+
+    def _save_project_as(self):
+        """Save current project to a new location."""
+        if self._project is None:
+            QMessageBox.warning(self, "No Project", "No project is currently open.")
+            return
+        directory = QFileDialog.getExistingDirectory(self, "Choose New Project Location")
+        if directory:
+            self._project.path = Path(directory) / self._project.name
+            self._project.save()
+            self._log_panel.log(f"Project saved to: {directory}", "success")
+
+    def _on_import_lights(self):
+        """Import light frames into current or new project."""
+        if self._project is None:
+            name, ok = QInputDialog.getText(self, "New Project", "Project name:")
+            if not ok or not name.strip():
+                return
+            directory = QFileDialog.getExistingDirectory(self, "Choose Project Location")
+            if not directory:
+                return
+            self._project = Project.create(name.strip(), Path(directory))
+            self._project_panel.set_project(self._project)
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Import Light Frames",
+            "",
+            "Images (*.fit *.fits *.fts *.xisf *.tif *.tiff *.png);;All (*)",
+        )
+        if paths:
+            for p in paths:
+                self._project.add_frame(p, FrameType.LIGHT)
+            self._project.save()
+            self._project_panel.set_project(self._project)
+            self._log_panel.log(f"Imported {len(paths)} light frames", "success")
+
+    def _on_import_calibration(self):
+        """Import calibration frames (bias/dark/flat) into current project."""
+        if self._project is None:
+            QMessageBox.warning(self, "No Project", "Open or create a project first.")
+            return
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Import Calibration Frames",
+            "",
+            "Images (*.fit *.fits *.fts *.xisf *.tif *.tiff);;All (*)",
+        )
+        if paths:
+            for p in paths:
+                self._project.add_frame(p, FrameType.FLAT)
+            self._project.save()
+            self._project_panel.set_project(self._project)
+            self._log_panel.log(f"Imported {len(paths)} calibration frames", "success")
+
+    def _on_export_fits(self):
+        if self._current_image is None:
+            self._log_panel.log("No image to export", "warning")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export as FITS", "", "FITS (*.fits *.fit)"
+        )
+        if path:
+            save_image(self._current_image, path=path)
+            self._log_panel.log(f"Exported FITS: {Path(path).name}", "success")
+
+    def _on_export_tiff(self):
+        if self._current_image is None:
+            self._log_panel.log("No image to export", "warning")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export as TIFF", "", "TIFF (*.tiff *.tif)"
+        )
+        if path:
+            save_image(self._current_image, path=path)
+            self._log_panel.log(f"Exported TIFF: {Path(path).name}", "success")
+
+    def _on_export_png(self):
+        if self._current_image is None:
+            self._log_panel.log("No image to export", "warning")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export as PNG", "", "PNG (*.png)"
+        )
+        if path:
+            save_image(self._current_image, path=path)
+            self._log_panel.log(f"Exported PNG: {Path(path).name}", "success")
+
+    def _on_toggle_histogram(self):
+        self._histogram.setVisible(not self._histogram.isVisible())
+
+    def _on_fullscreen(self):
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+
+    def _on_open_docs(self):
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+        QDesktopServices.openUrl(QUrl("https://github.com/cosmica-app/cosmica"))
+
+    def _on_buy_coffee(self):
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+        QDesktopServices.openUrl(QUrl("https://ko-fi.com/cosmica"))
+
+    def _on_plate_solve_from_menu(self):
+        """Trigger plate solve via the tools panel."""
+        tp = self._tools_panel
+        if hasattr(tp, "_on_plate_solve"):
+            tp._on_plate_solve()
+
+    # ---------- Toolbar / TweaksPanel handlers ----------
+
+    def _on_split_view_toggled(self, checked: bool):
+        """Toggle before/after split view on the canvas."""
+        self._canvas.set_split_mode(checked)
+
+    def _on_toggle_tweaks(self):
+        if self._tweaks_panel.isVisible():
+            self._tweaks_panel.hide()
+        else:
+            self._tweaks_panel.position_near(self)
+            self._tweaks_panel.show()
+            self._tweaks_panel.raise_()
+
+    def _on_tweaks_accent_changed(self, color_name: str):
+        from cosmica.ui import theme
+        new_qss = theme.set_accent(color_name)
+        QApplication.instance().setStyleSheet(new_qss)
+
+    def _on_tweaks_workflow_visible(self, visible: bool):
+        self._workflow_bar.setVisible(visible)
+
+    def _on_tweaks_log_visible(self, visible: bool):
+        self._log_panel.setVisible(visible)
+
+    def _on_tweaks_log_height(self, height: int):
+        sizes = self._v_splitter.sizes()
+        if len(sizes) >= 2:
+            total = sum(sizes)
+            self._v_splitter.setSizes([total - height, height])
+
+    # ---------- Workflow bar ----------
+
+    def _on_workflow_step_clicked(self, idx: int):
+        """Switch to the tools panel tab corresponding to the workflow step."""
+        tab_map = {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6}
+        tab_idx = tab_map.get(idx, 0)
+        tp = self._tools_panel
+        if hasattr(tp, "_tab_widget"):
+            tp._tab_widget.setCurrentIndex(min(tab_idx, tp._tab_widget.count() - 1))
+
+    def _advance_workflow(self, completed_step: int):
+        """Mark a step done and activate the next."""
+        self._workflow_bar.set_step_state(completed_step, StepState.DONE)
+        next_step = completed_step + 1
+        if next_step <= 6:
+            self._workflow_bar.set_step_state(next_step, StepState.ACTIVE)
+
     # ---------- Image display ----------
 
     @pyqtSlot(str)
@@ -893,9 +1517,12 @@ class MainWindow(QMainWindow):
             rgb = small_img.to_display(stretch=True)
 
         self._canvas.set_image(rgb, image.data, display_scale=_scale)  # full-res data + scale for coord mapping
+        fname = image.file_path.name if image.file_path else "Untitled"
+        self._canvas.set_image_info(fname, image.shape_str)
 
         hist_data = compute_histogram(image.data)
         self._histogram.set_histogram_data(hist_data)
+        self._update_hist_stats()
         self._update_curves_histogram(hist_data)
         self._sync_console_image()
 
@@ -978,6 +1605,30 @@ class MainWindow(QMainWindow):
             self._push_undo(before, image, desc)
         self._display_image(image, display_ref=display_ref)
         self._log_panel.log(message, "success")
+        self._update_image_status()
+
+    def _update_image_status(self):
+        """Refresh the status bar image info labels."""
+        img = self._current_image
+        if img is None:
+            for lbl in (
+                self._status_filename, self._status_size,
+                self._status_depth, self._status_channels, self._status_history,
+            ):
+                lbl.setText("")
+            return
+        fp = getattr(img, "file_path", None)
+        name = Path(fp).name if fp else "unsaved"
+        self._status_filename.setText(name)
+        h, w = (img.data.shape[-2], img.data.shape[-1]) if img.data.ndim >= 2 else (0, 0)
+        self._status_size.setText(f"{w} × {h}")
+        depth = "32-bit float" if img.data.dtype == "float32" else str(img.data.dtype)
+        self._status_depth.setText(depth)
+        ch = "RGB" if img.data.ndim == 3 and img.data.shape[0] == 3 else "Mono"
+        self._status_channels.setText(ch)
+        idx = self._undo_stack.current_index()
+        cap = self._undo_stack.capacity()
+        self._status_history.setText(f"{idx} / {cap}")
 
     @pyqtSlot(int, int, list)
     def _update_pixel_readout(self, x: int, y: int, values: list):
@@ -986,6 +1637,43 @@ class MainWindow(QMainWindow):
         elif len(values) >= 3:
             self.statusBar().showMessage(
                 f"x={x} y={y}  |  R={values[0]:.5f}  G={values[1]:.5f}  B={values[2]:.5f}"
+            )
+
+    def _update_tb_progress(self, fraction: float, message: str):
+        self._tb_progress_bar.setValue(int(fraction * 1000))
+        self._tb_status_label.setText(message[:30] if message else "Working…")
+        self._tb_status_label.setStyleSheet(
+            "color: #d29922; font-size: 10px; font-family: monospace; padding: 0 4px;"
+        )
+
+    def _reset_tb_progress(self):
+        self._tb_progress_bar.setValue(0)
+        self._tb_status_label.setText("Ready")
+        self._tb_status_label.setStyleSheet(
+            "color: #2ea043; font-size: 10px; font-family: monospace; padding: 0 4px;"
+        )
+
+    def _update_canvas_coord_label(self, x: int, y: int, values: list):
+        if len(values) == 1:
+            self._canvas_coord_label.setText(f"x={x} y={y}  L={values[0]:.4f}")
+        elif len(values) >= 3:
+            self._canvas_coord_label.setText(
+                f"x={x} y={y}  R={values[0]:.3f} G={values[1]:.3f} B={values[2]:.3f}"
+            )
+
+    def _on_hist_channel_clicked(self, btn):
+        ch = btn.text()
+        self._histogram.set_active_channel(ch)
+        self._update_hist_stats()
+
+    def _update_hist_stats(self):
+        stats = self._histogram._get_stats()
+        if stats is None:
+            self._hist_stats_label.setText("")
+        else:
+            mean, median, sd, clip = stats
+            self._hist_stats_label.setText(
+                f"Mean {mean:.3f}  Med {median:.3f}  SD {sd:.3f}  Clip {clip:.1f}%"
             )
 
     # ---------- Drag and drop ----------
@@ -1034,6 +1722,9 @@ class MainWindow(QMainWindow):
         self._worker.progress.connect(
             self._log_panel.update_progress, _Qt.ConnectionType.QueuedConnection
         )
+        self._worker.progress.connect(
+            self._update_tb_progress, _Qt.ConnectionType.QueuedConnection
+        )
         self._worker.error.connect(
             lambda msg: self._log_panel.log(f"Error: {msg}", "error"),
             _Qt.ConnectionType.QueuedConnection,
@@ -1066,6 +1757,15 @@ class MainWindow(QMainWindow):
         )
         self._worker.finished.connect(
             lambda: self._log_panel.set_cancel_visible(False), _Qt.ConnectionType.QueuedConnection
+        )
+        self._worker.finished.connect(
+            lambda _=None: self._reset_tb_progress(), _Qt.ConnectionType.QueuedConnection
+        )
+        self._worker.cancelled.connect(
+            lambda: self._reset_tb_progress(), _Qt.ConnectionType.QueuedConnection
+        )
+        self._worker.error.connect(
+            lambda _=None: self._reset_tb_progress(), _Qt.ConnectionType.QueuedConnection
         )
         self._log_panel.set_cancel_visible(True)
         self._log_panel.cancel_requested.connect(self._worker.cancel, _Qt.ConnectionType.UniqueConnection)
@@ -2130,7 +2830,9 @@ class MainWindow(QMainWindow):
                 self._log_panel.log("PSF measurement failed: no stars found", "warning")
                 return
             self._tools_panel.set_psf_measurement(
-                result.fwhm, result.ellipticity, result.n_stars_used
+                result.fwhm, result.ellipticity, result.n_stars_used,
+                fwhm_x=result.fwhm_x, fwhm_y=result.fwhm_y,
+                theta=result.theta, fwhm_std=result.fwhm_std,
             )
             self._log_panel.log(
                 f"PSF: FWHM={result.fwhm:.2f}px  ellipticity={result.ellipticity:.2f}"

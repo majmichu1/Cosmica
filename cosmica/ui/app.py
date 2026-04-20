@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import sys
 
-from PyQt6.QtGui import QFont, QPixmap
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import QApplication, QSplashScreen
 
 import cosmica
@@ -31,10 +31,11 @@ def run_application(argv: list[str] | None = None) -> int:
     app.setApplicationVersion(cosmica.__version__)
     app.setOrganizationName("Cosmica")
 
-    # Set default font
-    font = QFont("Inter", 13)
-    if not font.exactMatch():
-        font = QFont("Segoe UI", 13)
+    # Set default font — Space Grotesk first, then fallbacks
+    for family in ("Space Grotesk", "Inter", "Segoe UI", "Roboto", "Ubuntu"):
+        font = QFont(family, 13)
+        if font.exactMatch():
+            break
     app.setFont(font)
 
     # Apply dark theme

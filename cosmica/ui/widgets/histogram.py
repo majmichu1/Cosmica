@@ -25,6 +25,7 @@ class HistogramWidget(QWidget):
         self.setMaximumHeight(160)
         self._data: dict | None = None
         self._log_scale = True
+        self._active_channel: str = "RGB"
         # Clip point markers: {"shadow": 0.0, "highlight": 1.0} — normalized [0,1]
         self._clip_shadow: float | None = None
         self._clip_highlight: float | None = None
@@ -41,6 +42,34 @@ class HistogramWidget(QWidget):
     def set_log_scale(self, enabled: bool):
         self._log_scale = enabled
         self.update()
+
+    def set_active_channel(self, name: str):
+        self._active_channel = name
+        self.update()
+
+    def _get_stats(self) -> tuple[float, float, float, float] | None:
+        """Return (mean, median, sd, clip_pct) derived from the active channel histogram bins."""
+        if self._data is None:
+            return None
+        channel_map = {"RGB": "luminance", "R": "red", "G": "green", "B": "blue", "L": "luminance"}
+        key = channel_map.get(self._active_channel, "luminance")
+        counts = self._data.get(key) or self._data.get("gray")
+        if counts is None:
+            return None
+        counts = counts.astype(np.float64)
+        total = counts.sum()
+        if total == 0:
+            return None
+        n = len(counts)
+        centers = (np.arange(n) + 0.5) / n
+        mean = float(np.dot(counts, centers) / total)
+        cumsum = np.cumsum(counts)
+        median_idx = int(np.searchsorted(cumsum, total * 0.5))
+        median = float(centers[min(median_idx, n - 1)])
+        variance = float(np.dot(counts, (centers - mean) ** 2) / total)
+        sd = float(variance ** 0.5)
+        clip_pct = float((counts[0] + counts[-1]) / total * 100)
+        return mean, median, sd, clip_pct
 
     def set_clip_points(self, shadow: float | None, highlight: float | None):
         """Set shadow/highlight clip indicator positions in normalized [0, 1] space."""
@@ -63,8 +92,14 @@ class HistogramWidget(QWidget):
         w = self.width() - 2 * margin
         h = self.height() - 2 * margin
 
-        # Draw order: luminance first (behind), then R, G, B
-        draw_order = ["luminance", "gray", "red", "green", "blue"]
+        _channel_map = {
+            "RGB": ["luminance", "gray", "red", "green", "blue"],
+            "R":   ["red"],
+            "G":   ["green"],
+            "B":   ["blue"],
+            "L":   ["luminance", "gray"],
+        }
+        draw_order = _channel_map.get(self._active_channel, ["luminance", "gray", "red", "green", "blue"])
 
         for channel_name in draw_order:
             if channel_name not in self._data:

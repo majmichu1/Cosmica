@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
-    QGroupBox,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -110,6 +110,81 @@ def _scrollable_tab(layout: QVBoxLayout) -> QScrollArea:
     scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     scroll.setWidget(container)
     return scroll
+
+
+from cosmica.ui.theme import (  # noqa: E402
+    ACCENT, BG_HOVER, BG_SECONDARY, BORDER, TEXT_PRIMARY, TEXT_SECONDARY,
+)
+
+
+class _Section(QWidget):
+    """Collapsible section panel — replaces QGroupBox with the new design language."""
+
+    def __init__(self, title: str, accent: bool = False, default_open: bool = True,
+                 compact: bool = False, parent=None):
+        super().__init__(parent)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 2, 0, 2)
+        outer.setSpacing(0)
+
+        self._open = default_open
+        self._accent = accent
+
+        # ── Header ────────────────────────────────────────────────────────────
+        self._hdr = QWidget()
+        self._hdr.setCursor(Qt.CursorShape.PointingHandCursor)
+        hdr_layout = QHBoxLayout(self._hdr)
+        hdr_layout.setContentsMargins(10, 6, 10, 6)
+        hdr_layout.setSpacing(4)
+
+        lbl_text = title if compact else title.upper()
+        self._title_lbl = QLabel(lbl_text)
+        self._title_lbl.setStyleSheet(
+            f"color: {TEXT_PRIMARY}; font-size: {'10' if compact else '11'}px; font-weight: 700;"
+            "background: transparent; border: none;"
+        )
+        self._arrow = QLabel("▾" if default_open else "▸")
+        self._arrow.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; font-size: 12px; background: transparent; border: none;"
+        )
+        hdr_layout.addWidget(self._title_lbl)
+        hdr_layout.addStretch()
+        hdr_layout.addWidget(self._arrow)
+        self._apply_header_style()
+        self._hdr.mousePressEvent = lambda _e: self._toggle()
+
+        # ── Body ──────────────────────────────────────────────────────────────
+        self._body_widget = QWidget()
+        self._body_widget.setStyleSheet(f"background-color: {BG_SECONDARY};")
+        self._body_layout = QVBoxLayout(self._body_widget)
+        pad = 4 if compact else 8
+        self._body_layout.setContentsMargins(10, pad, 10, pad)
+        self._body_layout.setSpacing(3 if compact else 6)
+        self._body_widget.setVisible(default_open)
+
+        outer.addWidget(self._hdr)
+        outer.addWidget(self._body_widget)
+
+    def _apply_header_style(self):
+        border = (
+            f"2px solid {ACCENT}" if (self._accent and self._open)
+            else f"1px solid {BORDER}"
+        )
+        self._hdr.setStyleSheet(
+            f"QWidget {{ background-color: {BG_SECONDARY}; border-bottom: {border}; }}"
+            f"QWidget:hover {{ background-color: {BG_HOVER}; }}"
+        )
+
+    def _toggle(self):
+        self._open = not self._open
+        self._body_widget.setVisible(self._open)
+        self._arrow.setText("▾" if self._open else "▸")
+        self._apply_header_style()
+
+    @property
+    def body(self) -> QVBoxLayout:
+        """Return the body layout for adding child widgets."""
+        return self._body_layout
 
 
 class ToolsPanel(QWidget):
@@ -286,8 +361,8 @@ class ToolsPanel(QWidget):
         layout.setSpacing(8)
 
         # --- Calibration ---
-        cal_group = QGroupBox("Calibration")
-        cal_layout = QVBoxLayout(cal_group)
+        cal_group = _Section("Calibration")
+        cal_layout = cal_group.body
         cal_layout.addWidget(
             _info_label(
                 "Create masters from raw frame folders or use pre-made masters. "
@@ -337,8 +412,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(cal_group)
 
         # --- Cosmetic Correction ---
-        cos_group = QGroupBox("Cosmetic Correction")
-        cos_layout = QVBoxLayout(cos_group)
+        cos_group = _Section("Cosmetic Correction")
+        cos_layout = cos_group.body
         cos_layout.addWidget(
             _info_label("Detect and remove hot, cold, and dead pixels from sensor defects.")
         )
@@ -371,8 +446,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(cos_group)
 
         # --- Debayer (OSC / One-Shot Color) ---
-        debayer_group = QGroupBox("Debayer (OSC / Color Camera)")
-        debayer_layout = QVBoxLayout(debayer_group)
+        debayer_group = _Section("Debayer (OSC / Color Camera)")
+        debayer_layout = debayer_group.body
         debayer_layout.addWidget(
             _info_label(
                 "Convert raw Bayer mosaic to color image. Applied automatically after stacking "
@@ -421,8 +496,8 @@ class ToolsPanel(QWidget):
         layout.setSpacing(8)
 
         # --- Crop ---
-        crop_group = QGroupBox("Crop")
-        crop_layout = QVBoxLayout(crop_group)
+        crop_group = _Section("Crop")
+        crop_layout = crop_group.body
         crop_layout.addWidget(_info_label("Crop image to a rectangular region."))
 
         self._btn_crop_draw = QPushButton("Draw on Image…")
@@ -457,8 +532,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(crop_group)
 
         # --- Rotate ---
-        rot_group = QGroupBox("Rotate")
-        rot_layout = QVBoxLayout(rot_group)
+        rot_group = _Section("Rotate")
+        rot_layout = rot_group.body
 
         self._rotate_combo = QComboBox()
         self._rotate_combo.addItems(["90\u00b0 CW", "180\u00b0", "270\u00b0 CW", "Custom angle"])
@@ -481,8 +556,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(rot_group)
 
         # --- Flip ---
-        flip_group = QGroupBox("Flip")
-        flip_layout = QVBoxLayout(flip_group)
+        flip_group = _Section("Flip")
+        flip_layout = flip_group.body
 
         self._flip_combo = QComboBox()
         self._flip_combo.addItems(["Horizontal", "Vertical", "Both"])
@@ -494,8 +569,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(flip_group)
 
         # --- Resize ---
-        resize_group = QGroupBox("Resize / Resample")
-        resize_layout = QVBoxLayout(resize_group)
+        resize_group = _Section("Resize / Resample")
+        resize_layout = resize_group.body
 
         self._resize_scale_spin = QDoubleSpinBox()
         self._resize_scale_spin.setRange(0.1, 10.0)
@@ -514,8 +589,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(resize_group)
 
         # --- Bin ---
-        bin_group = QGroupBox("Bin")
-        bin_layout = QVBoxLayout(bin_group)
+        bin_group = _Section("Bin")
+        bin_layout = bin_group.body
         bin_layout.addWidget(_info_label("Combine pixels to increase SNR at lower resolution."))
 
         self._bin_factor_combo = QComboBox()
@@ -549,8 +624,8 @@ class ToolsPanel(QWidget):
         layout.setSpacing(8)
 
         # --- Subframe Selector ---
-        sub_group = QGroupBox("Subframe Selector")
-        sub_layout = QVBoxLayout(sub_group)
+        sub_group = _Section("Subframe Selector")
+        sub_layout = sub_group.body
         sub_layout.addWidget(
             _info_label("Score and reject light frames by FWHM, eccentricity, SNR, and star count.")
         )
@@ -563,8 +638,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(sub_group)
 
         # --- Section 1: Registration / Alignment ---
-        reg_group = QGroupBox("Registration (Alignment)")
-        reg_layout = QVBoxLayout(reg_group)
+        reg_group = _Section("Registration (Alignment)")
+        reg_layout = reg_group.body
         reg_layout.addWidget(
             _info_label("Detect stars and align light frames to the reference frame.")
         )
@@ -645,8 +720,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(reg_group)
 
         # --- Section 2: Integration / Stacking ---
-        stack_group = QGroupBox("Integration (Stacking)")
-        stack_layout = QVBoxLayout(stack_group)
+        stack_group = _Section("Integration (Stacking)")
+        stack_layout = stack_group.body
         stack_layout.addWidget(
             _info_label("Combine aligned frames using rejection to increase signal-to-noise ratio.")
         )
@@ -692,8 +767,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(stack_group)
 
         # --- Drizzle Integration ---
-        drizzle_group = QGroupBox("Drizzle Integration")
-        drizzle_layout = QVBoxLayout(drizzle_group)
+        drizzle_group = _Section("Drizzle Integration")
+        drizzle_layout = drizzle_group.body
         drizzle_layout.addWidget(
             _info_label(
                 "Sub-pixel resolution enhancement. Stack frames at higher output resolution."
@@ -735,8 +810,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(drizzle_group)
 
         # --- Multi-Session / Multi-Setup Integration ---
-        ms_group = QGroupBox("Multi-Session Integration")
-        ms_layout = QVBoxLayout(ms_group)
+        ms_group = _Section("Multi-Session Integration")
+        ms_layout = ms_group.body
         ms_layout.addWidget(_info_label(
             "Stack frames from different telescopes, cameras, or nights into one image. "
             "Each session is stacked independently then combined with weighted integration."
@@ -789,8 +864,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(ms_group)
 
         # --- Batch Processing ---
-        batch_group = QGroupBox("Batch Processing")
-        batch_layout = QVBoxLayout(batch_group)
+        batch_group = _Section("Batch Processing")
+        batch_layout = batch_group.body
         batch_layout.addWidget(
             _info_label("Apply a processing pipeline to multiple images at once.")
         )
@@ -811,8 +886,8 @@ class ToolsPanel(QWidget):
         layout.setSpacing(8)
 
         # --- Auto-Stretch ---
-        stretch_group = QGroupBox("Auto-Stretch")
-        stretch_layout = QVBoxLayout(stretch_group)
+        stretch_group = _Section("Auto-Stretch")
+        stretch_layout = stretch_group.body
         stretch_layout.addWidget(
             _info_label("Apply statistical midtone stretch to bring out faint details.")
         )
@@ -866,8 +941,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(stretch_group)
 
         # --- GHS (Generalized Hyperbolic Stretch) ---
-        ghs_group = QGroupBox("Generalized Hyperbolic Stretch")
-        ghs_layout = QVBoxLayout(ghs_group)
+        ghs_group = _Section("Generalized Hyperbolic Stretch")
+        ghs_layout = ghs_group.body
         ghs_layout.addWidget(
             _info_label(
                 "Advanced non-linear stretch with fine control over shadows, midtones, and highlights."
@@ -946,8 +1021,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(ghs_group)
 
         # --- Arcsinh Stretch ---
-        arcsinh_group = QGroupBox("Arcsinh Stretch")
-        arcsinh_layout = QVBoxLayout(arcsinh_group)
+        arcsinh_group = _Section("Arcsinh Stretch")
+        arcsinh_layout = arcsinh_group.body
         arcsinh_layout.addWidget(
             _info_label("Lupton et al. 2004 — linear-to-arcsinh ramp. Preserves star colours "
                         "better than log; reveals faint nebulosity without blowing out stars.")
@@ -995,8 +1070,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(arcsinh_group)
 
         # --- Histogram Transform ---
-        ht_group = QGroupBox("Histogram Transform")
-        ht_layout = QVBoxLayout(ht_group)
+        ht_group = _Section("Histogram Transform")
+        ht_layout = ht_group.body
         ht_layout.addWidget(
             _info_label("Interactive black point, midtone, and white point adjustment.")
         )
@@ -1057,8 +1132,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(ht_group)
 
         # --- Curves ---
-        curves_group = QGroupBox("Curves")
-        curves_layout = QVBoxLayout(curves_group)
+        curves_group = _Section("Curves")
+        curves_layout = curves_group.body
         curves_layout.addWidget(
             _info_label("Click to add points, drag to adjust. Right-click to remove.")
         )
@@ -1108,8 +1183,8 @@ class ToolsPanel(QWidget):
         layout.setSpacing(8)
 
         # --- Background Extraction ---
-        bg_group = QGroupBox("Background Extraction")
-        bg_layout = QVBoxLayout(bg_group)
+        bg_group = _Section("Background Extraction")
+        bg_layout = bg_group.body
         bg_layout.addWidget(
             _info_label(
                 "Remove light pollution gradients by fitting and subtracting a background model."
@@ -1186,8 +1261,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(bg_group)
 
         # --- Background Neutralization ---
-        bn_group = QGroupBox("Background Neutralization")
-        bn_layout = QVBoxLayout(bn_group)
+        bn_group = _Section("Background Neutralization")
+        bn_layout = bn_group.body
         bn_layout.addWidget(
             _info_label(
                 "Shift sky background to neutral zero by subtracting per-channel "
@@ -1232,8 +1307,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(bn_group)
 
         # --- ABE (RBF) ---
-        abe_group = QGroupBox("ABE (Advanced)")
-        abe_layout = QVBoxLayout(abe_group)
+        abe_group = _Section("ABE (Advanced)")
+        abe_layout = abe_group.body
         abe_layout.addWidget(
             _info_label("Background extraction using polynomial or RBF surface fitting.")
         )
@@ -1303,8 +1378,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(abe_group)
 
         # --- Vignette Correction ---
-        vig_group = QGroupBox("Vignette Correction")
-        vig_layout = QVBoxLayout(vig_group)
+        vig_group = _Section("Vignette Correction")
+        vig_layout = vig_group.body
         vig_layout.addWidget(_info_label("Synthetic flat field for uncalibrated images."))
 
         self._vig_strength_spin = QDoubleSpinBox()
@@ -1325,8 +1400,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(vig_group)
 
         # --- Banding Reduction ---
-        band_group = QGroupBox("Banding Reduction")
-        band_layout = QVBoxLayout(band_group)
+        band_group = _Section("Banding Reduction")
+        band_layout = band_group.body
         band_layout.addWidget(
             _info_label("Remove horizontal/vertical banding artifacts common in CMOS sensors.")
         )
@@ -1382,8 +1457,8 @@ class ToolsPanel(QWidget):
         layout.setSpacing(8)
 
         # --- Color Calibration ---
-        cc_group = QGroupBox("Color Calibration")
-        cc_layout = QVBoxLayout(cc_group)
+        cc_group = _Section("Color Calibration")
+        cc_layout = cc_group.body
         cc_layout.addWidget(
             _info_label(
                 "Calibrate white balance using star photometry and background neutralization."
@@ -1413,8 +1488,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(cc_group)
 
         # --- Photometric Color Calibration (PCC) ---
-        pcc_group = QGroupBox("Photometric Color Calibration (PCC)")
-        pcc_layout = QVBoxLayout(pcc_group)
+        pcc_group = _Section("Photometric Color Calibration (PCC)")
+        pcc_layout = pcc_group.body
         pcc_layout.addWidget(
             _info_label(
                 "Plate-solve and use Gaia DR3 star catalog for accurate color calibration. "
@@ -1473,8 +1548,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(pcc_group)
 
         # --- Spectrophotometric Color Calibration (SPCC) ---
-        spcc_group = QGroupBox("Spectrophotometric Color Calibration (SPCC)")
-        spcc_layout = QVBoxLayout(spcc_group)
+        spcc_group = _Section("Spectrophotometric Color Calibration (SPCC)")
+        spcc_layout = spcc_group.body
         spcc_layout.addWidget(_info_label(
             "Uses actual filter transmission curves + Gaia star temperatures for highly "
             "accurate color calibration. Requires plate solve (PCC) to have been run first."
@@ -1498,8 +1573,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(spcc_group)
 
         # --- LRGB Combine ---
-        lrgb_group = QGroupBox("LRGB Combine")
-        lrgb_layout = QVBoxLayout(lrgb_group)
+        lrgb_group = _Section("LRGB Combine")
+        lrgb_layout = lrgb_group.body
         lrgb_layout.addWidget(
             _info_label(
                 "Merge a luminance (L) image with an RGB color image. "
@@ -1537,8 +1612,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(lrgb_group)
 
         # --- Channel Combine (RGB / SHO / HOO) ---
-        cc_group = QGroupBox("Combine Channels (RGB / SHO / HOO)")
-        cc_layout = QVBoxLayout(cc_group)
+        cc_group = _Section("Combine Channels (RGB / SHO / HOO)")
+        cc_layout = cc_group.body
         cc_layout.addWidget(
             _info_label(
                 "Combine separate mono Ha, OIII, SII, R, G, B images into a color composite. "
@@ -1555,8 +1630,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(cc_group)
 
         # --- SCNR ---
-        scnr_group = QGroupBox("SCNR (Green Noise)")
-        scnr_layout = QVBoxLayout(scnr_group)
+        scnr_group = _Section("SCNR (Green Noise)")
+        scnr_layout = scnr_group.body
         scnr_layout.addWidget(
             _info_label(
                 "Remove excess green cast from narrowband composites or light-polluted images."
@@ -1595,8 +1670,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(scnr_group)
 
         # --- Color Adjustment ---
-        color_group = QGroupBox("Color Adjustment")
-        color_layout = QVBoxLayout(color_group)
+        color_group = _Section("Color Adjustment")
+        color_layout = color_group.body
         color_layout.addWidget(_info_label("Adjust saturation, hue, and vibrance of the image."))
 
         self._saturation_slider = QSlider(Qt.Orientation.Horizontal)
@@ -1657,8 +1732,8 @@ class ToolsPanel(QWidget):
         layout.setSpacing(8)
 
         # --- Deconvolution ---
-        decon_group = QGroupBox("Deconvolution (Richardson-Lucy)")
-        decon_layout = QVBoxLayout(decon_group)
+        decon_group = _Section("Deconvolution (Richardson-Lucy)")
+        decon_layout = decon_group.body
         decon_layout.addWidget(
             _info_label(
                 "Sharpen images by reversing atmospheric and optical blurring using iterative deconvolution."
@@ -1681,6 +1756,35 @@ class ToolsPanel(QWidget):
         self._btn_measure_psf.clicked.connect(self.measure_psf.emit)
         fwhm_row.addWidget(self._btn_measure_psf)
         decon_layout.addLayout(fwhm_row)
+
+        # PSF results grid — hidden until Measure is run
+        self._psf_results_widget = QWidget()
+        self._psf_results_widget.setVisible(False)
+        psf_grid = QGridLayout(self._psf_results_widget)
+        psf_grid.setContentsMargins(4, 4, 4, 4)
+        psf_grid.setHorizontalSpacing(12)
+        psf_grid.setVerticalSpacing(2)
+        _cell_style = "color: #d4d4d4; font-size: 10px;"
+        _hdr_style = "color: #8b949e; font-size: 10px;"
+        _psf_labels = [
+            ("FWHM", "px"), ("FWHM X", "px"), ("FWHM Y", "px"),
+            ("Ellipticity", ""), ("Theta", "°"), ("Stars", ""), ("σ FWHM", "px"),
+        ]
+        self._psf_value_labels: dict[str, QLabel] = {}
+        for i, (name, unit) in enumerate(_psf_labels):
+            row_i, col_i = divmod(i, 2)
+            col_base = col_i * 3
+            hdr = QLabel(name)
+            hdr.setStyleSheet(_hdr_style)
+            val = QLabel("—")
+            val.setStyleSheet(_cell_style)
+            u_lbl = QLabel(unit)
+            u_lbl.setStyleSheet(_hdr_style)
+            psf_grid.addWidget(hdr, row_i, col_base)
+            psf_grid.addWidget(val, row_i, col_base + 1)
+            psf_grid.addWidget(u_lbl, row_i, col_base + 2)
+            self._psf_value_labels[name] = val
+        decon_layout.addWidget(self._psf_results_widget)
 
         self._psf_result_label = QLabel("")
         self._psf_result_label.setStyleSheet("color: #aaaaaa; font-size: 10px;")
@@ -1753,8 +1857,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(decon_group)
 
         # --- Noise Reduction ---
-        nr_group = QGroupBox("Noise Reduction")
-        nr_layout = QVBoxLayout(nr_group)
+        nr_group = _Section("Noise Reduction")
+        nr_layout = nr_group.body
         nr_layout.addWidget(
             _info_label("Reduce noise using Non-Local Means or wavelet thresholding.")
         )
@@ -1809,8 +1913,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(nr_group)
 
         # --- Star Reduction ---
-        sr_group = QGroupBox("Star Reduction")
-        sr_layout = QVBoxLayout(sr_group)
+        sr_group = _Section("Star Reduction")
+        sr_layout = sr_group.body
         sr_layout.addWidget(
             _info_label(
                 "Reduce star sizes using morphological erosion within an auto-generated star mask."
@@ -1849,8 +1953,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(sr_group)
 
         # --- Wavelet Sharpening ---
-        wav_group = QGroupBox("Wavelet Sharpening")
-        wav_layout = QVBoxLayout(wav_group)
+        wav_group = _Section("Wavelet Sharpening")
+        wav_layout = wav_group.body
         wav_layout.addWidget(
             _info_label(
                 "GPU-accelerated wavelet decomposition. Adjust per-scale weights to sharpen or smooth."
@@ -1914,8 +2018,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(wav_group)
 
         # --- MLT (Multi-Scale Linear Transform) ---
-        mlt_group = QGroupBox("MLT (Multi-Scale Linear Transform)")
-        mlt_layout = QVBoxLayout(mlt_group)
+        mlt_group = _Section("MLT (Multi-Scale Linear Transform)")
+        mlt_layout = mlt_group.body
         mlt_layout.addWidget(
             _info_label(
                 "Full per-band control with noise thresholding. "
@@ -1927,9 +2031,8 @@ class ToolsPanel(QWidget):
         band_names = ["Scale 1 (finest)", "Scale 2", "Scale 3", "Scale 4", "Scale 5", "Scale 6 (coarsest)"]
 
         for i, name in enumerate(band_names):
-            band_box = QGroupBox(name)
-            band_box.setStyleSheet("QGroupBox { font-size: 10px; }")
-            band_layout = QVBoxLayout(band_box)
+            band_box = _Section(name, compact=True, default_open=True)
+            band_layout = band_box.body
             band_layout.setSpacing(2)
             band_layout.setContentsMargins(6, 12, 6, 4)
 
@@ -1982,8 +2085,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(mlt_group)
 
         # --- Local Contrast ---
-        lc_group = QGroupBox("Local Contrast (CLAHE)")
-        lc_layout = QVBoxLayout(lc_group)
+        lc_group = _Section("Local Contrast (CLAHE)")
+        lc_layout = lc_group.body
         lc_layout.addWidget(_info_label("Enhance local contrast using CLAHE on luminance channel."))
 
         self._lc_clip_spin = QDoubleSpinBox()
@@ -2022,8 +2125,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(lc_group)
 
         # --- Morphology ---
-        morph_group = QGroupBox("Morphological Operations")
-        morph_layout = QVBoxLayout(morph_group)
+        morph_group = _Section("Morphological Operations")
+        morph_layout = morph_group.body
         morph_layout.addWidget(
             _info_label("Apply morphological operations for star shaping and mask refinement.")
         )
@@ -2053,8 +2156,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(morph_group)
 
         # --- Unsharp Mask ---
-        usm_group = QGroupBox("Unsharp Mask")
-        usm_layout = QVBoxLayout(usm_group)
+        usm_group = _Section("Unsharp Mask")
+        usm_layout = usm_group.body
         usm_layout.addWidget(_info_label("Classic sharpening with radius, amount, and threshold."))
 
         self._usm_radius_spin = QDoubleSpinBox()
@@ -2093,8 +2196,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(usm_group)
 
         # --- Median Filter ---
-        mf_group = QGroupBox("Median Filter")
-        mf_layout = QVBoxLayout(mf_group)
+        mf_group = _Section("Median Filter")
+        mf_layout = mf_group.body
         mf_layout.addWidget(_info_label("Noise reduction via median filtering."))
 
         self._mf_kernel_spin = QSpinBox()
@@ -2125,8 +2228,8 @@ class ToolsPanel(QWidget):
         layout.setSpacing(8)
 
         # --- AI Denoise ---
-        aid_group = QGroupBox("AI Denoise")
-        aid_layout = QVBoxLayout(aid_group)
+        aid_group = _Section("AI Denoise")
+        aid_layout = aid_group.body
         aid_layout.addWidget(
             _info_label("Deep learning noise reduction using a trained U-Net model.")
         )
@@ -2175,8 +2278,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(aid_group)
 
         # --- AI Sharpen ---
-        ais_group = QGroupBox("AI Sharpen")
-        ais_layout = QVBoxLayout(ais_group)
+        ais_group = _Section("AI Sharpen")
+        ais_layout = ais_group.body
         ais_layout.addWidget(
             _info_label("Deep learning sharpening using a trained U-Net model.")
         )
@@ -2201,8 +2304,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(ais_group)
 
         # --- StarNet Star Removal ---
-        sn_group = QGroupBox("StarNet Star Removal")
-        sn_layout = QVBoxLayout(sn_group)
+        sn_group = _Section("StarNet Star Removal")
+        sn_layout = sn_group.body
         sn_layout.addWidget(
             _info_label(
                 "Remove stars using StarNet++ (must be installed separately). "
@@ -2222,8 +2325,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(sn_group)
 
         # --- Smart Processor ---
-        sp_group = QGroupBox("Smart Processor")
-        sp_layout = QVBoxLayout(sp_group)
+        sp_group = _Section("Smart Processor")
+        sp_layout = sp_group.body
         sp_layout.addWidget(
             _info_label(
                 "AI-driven adaptive processing. Plate-solves your image, identifies "
@@ -2256,8 +2359,8 @@ class ToolsPanel(QWidget):
         layout.setSpacing(8)
 
         # --- Chromatic Aberration ---
-        ca_group = QGroupBox("Chromatic Aberration")
-        ca_layout = QVBoxLayout(ca_group)
+        ca_group = _Section("Chromatic Aberration")
+        ca_layout = ca_group.body
         ca_layout.addWidget(_info_label("Detect and correct lateral color fringing."))
 
         self._ca_auto_check = QCheckBox("Auto-detect from stars")
@@ -2298,8 +2401,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(ca_group)
 
         # --- Blink Comparator ---
-        blink_group = QGroupBox("Blink Comparator")
-        blink_layout = QVBoxLayout(blink_group)
+        blink_group = _Section("Blink Comparator")
+        blink_layout = blink_group.body
         blink_layout.addWidget(_info_label(
             "Flip rapidly between two images to spot alignment differences, star size changes, "
             "or processing artifacts. Press B while canvas is focused to toggle."
@@ -2359,8 +2462,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(blink_group)
 
         # --- Quick tools row ---
-        quick_group = QGroupBox("Tools")
-        quick_layout = QVBoxLayout(quick_group)
+        quick_group = _Section("Tools")
+        quick_layout = quick_group.body
         quick_row1 = QHBoxLayout()
         btn_stats = QPushButton("Image Statistics...")
         btn_stats.clicked.connect(self.show_image_statistics.emit)
@@ -2379,8 +2482,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(quick_group)
 
         # --- Narrowband ---
-        nb_group = QGroupBox("Narrowband Combining")
-        nb_layout = QVBoxLayout(nb_group)
+        nb_group = _Section("Narrowband Combining")
+        nb_layout = nb_group.body
         nb_layout.addWidget(
             _info_label(
                 "Combine Ha, OIII, and SII images into a color composite using palette mapping."
@@ -2392,8 +2495,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(nb_group)
 
         # --- Continuum Subtraction ---
-        cont_group = QGroupBox("Continuum Subtraction")
-        cont_layout = QVBoxLayout(cont_group)
+        cont_group = _Section("Continuum Subtraction")
+        cont_layout = cont_group.body
         cont_layout.addWidget(
             _info_label(
                 "Subtract broadband continuum from narrowband to isolate emission lines (Ha, OIII, SII)."
@@ -2428,8 +2531,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(cont_group)
 
         # --- Pixel Math ---
-        pm_group = QGroupBox("Pixel Math")
-        pm_layout = QVBoxLayout(pm_group)
+        pm_group = _Section("Pixel Math")
+        pm_layout = pm_group.body
         pm_layout.addWidget(
             _info_label("Apply mathematical expressions to pixel data (T, R, G, B, L variables).")
         )
@@ -2439,8 +2542,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(pm_group)
 
         # --- Channels ---
-        ch_group = QGroupBox("Channel Operations")
-        ch_layout = QVBoxLayout(ch_group)
+        ch_group = _Section("Channel Operations")
+        ch_layout = ch_group.body
         ch_layout.addWidget(
             _info_label("Split, extract, and manipulate individual image channels.")
         )
@@ -2459,8 +2562,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(ch_group)
 
         # --- HDR Composition ---
-        hdr_group = QGroupBox("HDR Composition")
-        hdr_layout = QVBoxLayout(hdr_group)
+        hdr_group = _Section("HDR Composition")
+        hdr_layout = hdr_group.body
         hdr_layout.addWidget(
             _info_label("Merge multiple exposures into a single high dynamic range image.")
         )
@@ -2470,8 +2573,8 @@ class ToolsPanel(QWidget):
         layout.addWidget(hdr_group)
 
         # --- Macros ---
-        macro_group = QGroupBox("Macros")
-        macro_layout = QVBoxLayout(macro_group)
+        macro_group = _Section("Macros")
+        macro_layout = macro_group.body
         macro_layout.addWidget(_info_label("Record processing steps and replay them on any image."))
 
         rec_row = QHBoxLayout()
@@ -2879,12 +2982,27 @@ class ToolsPanel(QWidget):
         self._blink_toggle_btn.setText("Start  [B]")
         self._blink_toggle_btn.blockSignals(False)
 
-    def set_psf_measurement(self, fwhm: float, ellipticity: float, n_stars: int) -> None:
-        """Update FWHM spin from a PSF measurement result."""
+    def set_psf_measurement(
+        self,
+        fwhm: float,
+        ellipticity: float,
+        n_stars: int,
+        fwhm_x: float = 0.0,
+        fwhm_y: float = 0.0,
+        theta: float = 0.0,
+        fwhm_std: float = 0.0,
+    ) -> None:
+        """Update FWHM spin and results grid from a PSF measurement result."""
         self._decon_fwhm_spin.setValue(round(fwhm, 2))
-        self._psf_result_label.setText(
-            f"Measured: FWHM={fwhm:.2f}px  ellip={ellipticity:.2f}  n={n_stars}"
-        )
+        self._psf_value_labels["FWHM"].setText(f"{fwhm:.2f}")
+        self._psf_value_labels["FWHM X"].setText(f"{fwhm_x:.2f}")
+        self._psf_value_labels["FWHM Y"].setText(f"{fwhm_y:.2f}")
+        self._psf_value_labels["Ellipticity"].setText(f"{ellipticity:.3f}")
+        self._psf_value_labels["Theta"].setText(f"{theta:.1f}")
+        self._psf_value_labels["Stars"].setText(str(n_stars))
+        self._psf_value_labels["σ FWHM"].setText(f"{fwhm_std:.2f}")
+        self._psf_results_widget.setVisible(True)
+        self._psf_result_label.setText("")
 
     def get_deconvolution_params(self) -> DeconvolutionParams | SpatialDeconvParams:
         if self._decon_spatial_check.isChecked():

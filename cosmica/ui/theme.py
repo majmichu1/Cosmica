@@ -1,5 +1,7 @@
 """Dark theme stylesheet for Cosmica — professional-grade dark theme."""
 
+from __future__ import annotations
+
 from pathlib import Path
 
 _ICONS_DIR = Path(__file__).resolve().parent.parent / "resources" / "icons"
@@ -8,7 +10,7 @@ _ICONS_DIR = Path(__file__).resolve().parent.parent / "resources" / "icons"
 ACCENT = "#2ea043"
 ACCENT_HOVER = "#3fb950"
 ACCENT_DARK = "#1a4d2e"
-BG_PRIMARY = "#0d1117"    # Deepest background
+BG_PRIMARY = "#0d1117"     # Deepest background
 BG_SECONDARY = "#161b22"   # Panels, sidebars
 BG_TERTIARY = "#21262d"    # Inputs, buttons
 BG_HOVER = "#30363d"       # Hover state
@@ -16,14 +18,24 @@ BORDER = "#30363d"         # Borders
 TEXT_PRIMARY = "#e6edf3"   # Primary text
 TEXT_SECONDARY = "#8b949e" # Secondary text, hints
 
+# Swatch options for accent color theming
+ACCENT_COLORS: dict[str, tuple[str, str, str]] = {
+    # name: (accent, accent_hover, accent_dark)
+    "green":  ("#2ea043", "#3fb950", "#1a4d2e"),
+    "blue":   ("#388bfd", "#58a6ff", "#0d3a6b"),
+    "purple": ("#8957e5", "#a371f7", "#3b1d6e"),
+    "gold":   ("#d29922", "#e3b341", "#6e4f00"),
+    "red":    ("#f85149", "#ff7b72", "#6e1c19"),
+}
+
 
 def _icon(name: str) -> str:
     """Resolve icon path."""
     return (_ICONS_DIR / f"{name}.svg").as_posix()
 
 
-def get_dark_theme() -> str:
-    """Return the complete dark theme stylesheet."""
+def _build_stylesheet(accent: str, accent_hover: str, accent_dark: str) -> str:
+    """Build the full QSS stylesheet with the given accent colors."""
     return f"""
 /* ═══════════════════════════════════════════════════════
    Cosmica Dark Theme — Professional Astrophotography UI
@@ -38,7 +50,7 @@ QMainWindow, QDialog {{
 QWidget {{
     background-color: {BG_PRIMARY};
     color: {TEXT_PRIMARY};
-    font-family: "Inter", "Segoe UI", "Roboto", "Ubuntu", sans-serif;
+    font-family: "Space Grotesk", "Inter", "Segoe UI", "Roboto", "Ubuntu", sans-serif;
     font-size: 13px;
 }}
 
@@ -47,13 +59,15 @@ QMenuBar {{
     background-color: {BG_SECONDARY};
     color: {TEXT_PRIMARY};
     border-bottom: 1px solid {BORDER};
-    padding: 2px 8px;
-    spacing: 4px;
+    padding: 0px 4px;
+    spacing: 2px;
+    min-height: 32px;
 }}
 
 QMenuBar::item {{
     padding: 4px 8px;
     border-radius: 4px;
+    font-size: 12px;
 }}
 
 QMenuBar::item:selected {{
@@ -61,7 +75,7 @@ QMenuBar::item:selected {{
 }}
 
 QMenuBar::item:pressed {{
-    background-color: {ACCENT_DARK};
+    background-color: {accent_dark};
 }}
 
 /* ── Dropdown Menus ─────────────────────────────────── */
@@ -76,6 +90,7 @@ QMenu {{
 QMenu::item {{
     padding: 6px 24px 6px 12px;
     border-radius: 4px;
+    font-size: 12px;
 }}
 
 QMenu::item:selected {{
@@ -95,6 +110,8 @@ QMenu::icon {{
 QMenu::shortcut {{
     color: {TEXT_SECONDARY};
     margin-left: 24px;
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", monospace;
+    font-size: 11px;
 }}
 
 /* ── Toolbars ───────────────────────────────────────── */
@@ -102,16 +119,25 @@ QToolBar {{
     background-color: {BG_SECONDARY};
     border: none;
     border-bottom: 1px solid {BORDER};
-    spacing: 2px;
-    padding: 4px;
+    spacing: 1px;
+    padding: 2px 6px;
+}}
+
+QToolBar::separator {{
+    width: 1px;
+    background-color: {BORDER};
+    margin: 4px 4px;
 }}
 
 QToolButton {{
     background-color: transparent;
     border: 1px solid transparent;
     border-radius: 4px;
-    padding: 6px 10px;
+    padding: 3px 6px;
     color: {TEXT_PRIMARY};
+    font-size: 13px;
+    min-width: 24px;
+    min-height: 22px;
 }}
 
 QToolButton:hover {{
@@ -120,21 +146,31 @@ QToolButton:hover {{
 }}
 
 QToolButton:pressed {{
-    background-color: {ACCENT_DARK};
+    background-color: {accent_dark};
 }}
 
 QToolButton:checked {{
-    background-color: {ACCENT_DARK};
-    border-color: {ACCENT};
+    background-color: {accent_dark};
+    border-color: {accent};
+    color: {accent};
+}}
+
+QToolButton:disabled {{
+    color: {TEXT_SECONDARY};
 }}
 
 /* ── Status Bar ─────────────────────────────────────── */
 QStatusBar {{
     background-color: {BG_SECONDARY};
     color: {TEXT_SECONDARY};
-    font-size: 12px;
+    font-size: 11px;
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", monospace;
     border-top: 1px solid {BORDER};
-    padding: 2px 8px;
+    padding: 1px 8px;
+}}
+
+QStatusBar::item {{
+    border: none;
 }}
 
 /* ── Dock Widgets ───────────────────────────────────── */
@@ -176,7 +212,7 @@ QTabBar::tab {{
 QTabBar::tab:selected {{
     background-color: {BG_PRIMARY};
     color: {TEXT_PRIMARY};
-    border-bottom: 2px solid {ACCENT};
+    border-bottom: 2px solid {accent};
 }}
 
 QTabBar::tab:hover:!selected {{
@@ -205,7 +241,7 @@ QTreeWidget, QListWidget, QTableWidget {{
     border: 1px solid {BORDER};
     border-radius: 4px;
     alternate-background-color: {BG_PRIMARY};
-    selection-background-color: {ACCENT_DARK};
+    selection-background-color: {accent_dark};
     selection-color: {TEXT_PRIMARY};
     outline: none;
     padding: 2px;
@@ -234,7 +270,7 @@ QHeaderView::section {{
 
 /* ── Buttons ────────────────────────────────────────── */
 QPushButton {{
-    background-color: {ACCENT};
+    background-color: {accent};
     color: #ffffff;
     border: none;
     border-radius: 6px;
@@ -244,11 +280,11 @@ QPushButton {{
 }}
 
 QPushButton:hover {{
-    background-color: {ACCENT_HOVER};
+    background-color: {accent_hover};
 }}
 
 QPushButton:pressed {{
-    background-color: {ACCENT_DARK};
+    background-color: {accent_dark};
 }}
 
 QPushButton:disabled {{
@@ -274,11 +310,11 @@ QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
     border: 1px solid {BORDER};
     border-radius: 6px;
     padding: 6px 10px;
-    selection-background-color: {ACCENT_DARK};
+    selection-background-color: {accent_dark};
 }}
 
 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
-    border-color: {ACCENT};
+    border-color: {accent};
     outline: none;
 }}
 
@@ -290,7 +326,7 @@ QComboBox::drop-down {{
 QComboBox QAbstractItemView {{
     background-color: {BG_SECONDARY};
     color: {TEXT_PRIMARY};
-    selection-background-color: {ACCENT_DARK};
+    selection-background-color: {accent_dark};
     border: 1px solid {BORDER};
     border-radius: 4px;
 }}
@@ -303,7 +339,7 @@ QSlider::groove:horizontal {{
 }}
 
 QSlider::handle:horizontal {{
-    background: {ACCENT};
+    background: {accent};
     width: 16px;
     height: 16px;
     margin: -6px 0;
@@ -312,11 +348,11 @@ QSlider::handle:horizontal {{
 }}
 
 QSlider::handle:horizontal:hover {{
-    background: {ACCENT_HOVER};
+    background: {accent_hover};
 }}
 
 QSlider::sub-page:horizontal {{
-    background: {ACCENT};
+    background: {accent};
     border-radius: 2px;
 }}
 
@@ -332,22 +368,22 @@ QProgressBar {{
 }}
 
 QProgressBar::chunk {{
-    background-color: {ACCENT};
+    background-color: {accent};
     border-radius: 4px;
 }}
 
 /* ── Scrollbars ─────────────────────────────────────── */
 QScrollBar:vertical {{
     background-color: {BG_PRIMARY};
-    width: 12px;
+    width: 8px;
     margin: 0;
-    border-radius: 6px;
+    border-radius: 4px;
 }}
 
 QScrollBar::handle:vertical {{
     background-color: {BG_HOVER};
     min-height: 20px;
-    border-radius: 6px;
+    border-radius: 4px;
     margin: 2px;
 }}
 
@@ -361,15 +397,15 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
 
 QScrollBar:horizontal {{
     background-color: {BG_PRIMARY};
-    height: 12px;
+    height: 8px;
     margin: 0;
-    border-radius: 6px;
+    border-radius: 4px;
 }}
 
 QScrollBar::handle:horizontal {{
     background-color: {BG_HOVER};
     min-width: 20px;
-    border-radius: 6px;
+    border-radius: 4px;
     margin: 2px;
 }}
 
@@ -405,7 +441,7 @@ QSplitter::handle:vertical {{
 }}
 
 QSplitter::handle:hover {{
-    background-color: {ACCENT};
+    background-color: {accent};
 }}
 
 /* ── Group Boxes ────────────────────────────────────── */
@@ -435,13 +471,13 @@ QCheckBox::indicator {{
 }}
 
 QCheckBox::indicator:checked {{
-    background-color: {ACCENT};
-    border-color: {ACCENT};
+    background-color: {accent};
+    border-color: {accent};
     image: url({_icon('check')});
 }}
 
 QCheckBox::indicator:hover {{
-    border-color: {ACCENT};
+    border-color: {accent};
 }}
 
 /* ── Text Edits ─────────────────────────────────────── */
@@ -450,7 +486,7 @@ QTextEdit, QPlainTextEdit {{
     color: {TEXT_PRIMARY};
     border: 1px solid {BORDER};
     border-radius: 4px;
-    selection-background-color: {ACCENT_DARK};
+    selection-background-color: {accent_dark};
     font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", monospace;
     font-size: 12px;
 }}
@@ -470,7 +506,59 @@ QPushButton#proButton:hover {{
     background-color: #000000;
     border: 1px solid {BORDER};
 }}
+
+/* ── Workflow Bar ───────────────────────────────────── */
+#WorkflowBar {{
+    background-color: {BG_SECONDARY};
+    border-bottom: 1px solid {BORDER};
+}}
+
+#WorkflowStep {{
+    background-color: transparent;
+    border: none;
+    border-radius: 0;
+    color: {TEXT_SECONDARY};
+    font-size: 11px;
+    padding: 4px 8px;
+    text-align: center;
+}}
+
+#WorkflowStep:hover {{
+    color: {TEXT_PRIMARY};
+    background-color: {BG_HOVER};
+}}
+
+/* ── Tweaks Panel ───────────────────────────────────── */
+#TweaksPanel {{
+    background-color: {BG_SECONDARY};
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+}}
 """
+
+
+def get_dark_theme() -> str:
+    """Return the complete dark theme stylesheet with default accent."""
+    return _build_stylesheet(ACCENT, ACCENT_HOVER, ACCENT_DARK)
+
+
+def set_accent(color_name: str) -> str:
+    """Return a stylesheet with the given accent color applied.
+
+    Parameters
+    ----------
+    color_name : str
+        One of the keys in ACCENT_COLORS ('green', 'blue', 'purple', 'gold', 'red')
+        OR a raw hex color string (e.g. '#388bfd').
+    """
+    if color_name in ACCENT_COLORS:
+        accent, accent_hover, accent_dark = ACCENT_COLORS[color_name]
+    else:
+        # Raw hex — derive hover/dark by darkening slightly
+        accent = color_name
+        accent_hover = color_name
+        accent_dark = color_name
+    return _build_stylesheet(accent, accent_hover, accent_dark)
 
 
 # Backward compatibility

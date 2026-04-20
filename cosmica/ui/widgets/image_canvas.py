@@ -7,7 +7,7 @@ import math
 import numpy as np
 from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QImage, QMouseEvent, QPainter, QPen, QPixmap, QWheelEvent
-from PyQt6.QtWidgets import QRubberBand, QWidget
+from PyQt6.QtWidgets import QLabel, QPushButton, QRubberBand, QWidget
 
 
 class ImageCanvas(QWidget):
@@ -18,6 +18,9 @@ class ImageCanvas(QWidget):
     sample_placed = pyqtSignal(float, float)       # image-space x, y
     sample_removed = pyqtSignal(float, float)      # image-space x, y (nearest)
     crop_rect_selected = pyqtSignal(int, int, int, int)  # x, y, w, h in image-space
+    undo_requested = pyqtSignal()
+    redo_requested = pyqtSignal()
+    export_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -58,6 +61,41 @@ class ImageCanvas(QWidget):
         self._crop_mode = False
         self._crop_rubber_band: QRubberBand | None = None
         self._crop_origin: QPoint = QPoint()
+
+        # Grid overlay
+        self._show_grid = False
+
+        # Canvas overlay widgets (child widgets paint on top automatically)
+        self._info_chip = QLabel(self)
+        self._info_chip.setStyleSheet(
+            "QLabel { background: rgba(13,17,23,180); color: #8b949e;"
+            " border: 1px solid #30363d; border-radius: 4px;"
+            " padding: 2px 8px; font-size: 11px; }"
+        )
+        self._info_chip.hide()
+
+        _ovr_style = (
+            "QPushButton { background: rgba(22,27,34,200); color: #e6edf3;"
+            " border: 1px solid #30363d; border-radius: 4px;"
+            " padding: 3px 10px; font-size: 11px; font-weight: 500; }"
+            " QPushButton:hover { background: rgba(48,54,61,220); }"
+        )
+        self._overlay_undo_btn = QPushButton("← Undo", self)
+        self._overlay_undo_btn.setStyleSheet(_ovr_style)
+        self._overlay_undo_btn.clicked.connect(self.undo_requested)
+
+        self._overlay_redo_btn = QPushButton("↷ Redo", self)
+        self._overlay_redo_btn.setStyleSheet(_ovr_style)
+        self._overlay_redo_btn.clicked.connect(self.redo_requested)
+
+        self._overlay_export_btn = QPushButton("↑ Export", self)
+        self._overlay_export_btn.setStyleSheet(
+            "QPushButton { background: rgba(46,160,67,200); color: #ffffff;"
+            " border: none; border-radius: 4px;"
+            " padding: 3px 10px; font-size: 11px; font-weight: 600; }"
+            " QPushButton:hover { background: rgba(63,185,80,220); }"
+        )
+        self._overlay_export_btn.clicked.connect(self.export_requested)
 
     # ── Public API ───────────────────────────────────────────────────────────
 
@@ -104,6 +142,35 @@ class ImageCanvas(QWidget):
         self._zoom = max(0.01, min(50.0, level))
         self.zoom_changed.emit(self._zoom)
         self.update()
+
+    def zoom_in(self):
+        self.zoom_to(self._zoom * 1.25)
+
+    def zoom_out(self):
+        self.zoom_to(self._zoom / 1.25)
+
+    def set_grid_visible(self, visible: bool):
+        self._show_grid = visible
+        self.update()
+
+    def set_image_info(self, filename: str, dims_str: str):
+        self._info_chip.setText(f"{filename}  ·  {dims_str}")
+        self._info_chip.adjustSize()
+        self._info_chip.show()
+        self._reposition_overlays()
+
+    def _reposition_overlays(self):
+        m = 8
+        self._info_chip.move(m, m)
+        bh = self._overlay_undo_btn.sizeHint().height()
+        bw_u = self._overlay_undo_btn.sizeHint().width()
+        bw_r = self._overlay_redo_btn.sizeHint().width()
+        y_bottom = self.height() - bh - m
+        self._overlay_undo_btn.move(m, y_bottom)
+        self._overlay_redo_btn.move(m + bw_u + 4, y_bottom)
+        exp_w = self._overlay_export_btn.sizeHint().width()
+        exp_h = self._overlay_export_btn.sizeHint().height()
+        self._overlay_export_btn.move(self.width() - exp_w - m, self.height() - exp_h - m)
 
     # ── Sample mode ──────────────────────────────────────────────────────────
 
@@ -200,6 +267,10 @@ class ImageCanvas(QWidget):
         full_w = pw / s if s > 0 else pw
         full_h = ph / s if s > 0 else ph
 
+        # Draw grid overlay
+        if self._show_grid:
+            self._draw_grid(painter, dst)
+
         # Draw WCS overlay
         if self._show_wcs_overlay and self._overlay_stars:
             self._draw_wcs_overlay(painter, dst, full_w, full_h)
@@ -213,6 +284,17 @@ class ImageCanvas(QWidget):
             self._draw_sample_points(painter, dst, full_w, full_h)
 
         painter.end()
+
+    def _draw_grid(self, painter: QPainter, dst: QRectF):
+        pen = QPen(QColor(255, 255, 255, 40), 1)
+        pen.setStyle(Qt.PenStyle.DotLine)
+        painter.setPen(pen)
+        steps = 4
+        for i in range(1, steps):
+            x = dst.left() + dst.width() * i / steps
+            y = dst.top() + dst.height() * i / steps
+            painter.drawLine(QPointF(x, dst.top()), QPointF(x, dst.bottom()))
+            painter.drawLine(QPointF(dst.left(), y), QPointF(dst.right(), y))
 
     def _draw_wcs_overlay(self, painter: QPainter, dst: QRectF, pw: int, ph: int):
         font = QFont()
@@ -389,6 +471,7 @@ class ImageCanvas(QWidget):
     def resizeEvent(self, event):
         if self._fit_to_window:
             self._fit_zoom()
+        self._reposition_overlays()
         super().resizeEvent(event)
 
     def _fit_zoom(self):

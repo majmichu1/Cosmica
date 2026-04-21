@@ -228,13 +228,18 @@ def warp_image_gpu(
 
     c, h, w = image.shape
 
-    # Convert pixel-space translations to normalised [-1, 1] coordinates
-    # required by affine_grid with align_corners=True
-    norm_matrix = matrix.copy()
-    if h > 1:
-        norm_matrix[1, 2] = matrix[1, 2] * 2.0 / (h - 1)
-    if w > 1:
-        norm_matrix[0, 2] = matrix[0, 2] * 2.0 / (w - 1)
+    # Convert the full pixel-space 2×3 affine matrix to normalised [-1, 1]
+    # coordinates required by affine_grid(align_corners=True).
+    # For non-square images the off-diagonal terms must be scaled by the
+    # aspect ratio; scaling only the translation components (as before) introduced
+    # shear distortion on rectangular images.
+    sx = 2.0 / (w - 1) if w > 1 else 1.0
+    sy = 2.0 / (h - 1) if h > 1 else 1.0
+    a = matrix
+    norm_matrix = np.array([
+        [a[0, 0], a[0, 1] * sy / sx, a[0, 0] + a[0, 1] * sy / sx + a[0, 2] * sx - 1.0],
+        [a[1, 0] * sx / sy, a[1, 1], a[1, 0] * sx / sy + a[1, 1] + a[1, 2] * sy - 1.0],
+    ], dtype=np.float32)
 
     theta = torch.from_numpy(norm_matrix).to(image.device).unsqueeze(0)  # [1, 2, 3]
     grid = functional.affine_grid(theta, (1, c, h, w), align_corners=True)

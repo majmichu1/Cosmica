@@ -62,6 +62,7 @@ from cosmica.core.histogram_transform import histogram_transform
 from cosmica.core.image_io import (
     FrameType,
     ImageData,
+    _guess_frame_type,
     auto_stretch_for_display_ref,
     load_image,
     save_image,
@@ -1420,11 +1421,17 @@ class MainWindow(QMainWindow):
             "Images (*.fit *.fits *.fts *.xisf *.tif *.tiff);;All (*)",
         )
         if paths:
+            type_counts: dict[str, int] = {}
             for p in paths:
-                self._project.add_frame(p, FrameType.FLAT)
+                ft = _guess_frame_type({}, Path(p))
+                if ft == FrameType.UNKNOWN:
+                    ft = FrameType.FLAT  # safe default for unrecognized calibration frames
+                self._project.add_frame(p, ft)
+                type_counts[ft.name] = type_counts.get(ft.name, 0) + 1
             self._project.save()
             self._project_panel.set_project(self._project)
-            self._log_panel.log(f"Imported {len(paths)} calibration frames", "success")
+            summary = ", ".join(f"{v} {k.lower()}" for k, v in type_counts.items())
+            self._log_panel.log(f"Imported {len(paths)} calibration frames: {summary}", "success")
 
     def _on_export_fits(self):
         if self._current_image is None:
@@ -1471,7 +1478,7 @@ class MainWindow(QMainWindow):
     def _on_open_docs(self):
         from PyQt6.QtCore import QUrl
         from PyQt6.QtGui import QDesktopServices
-        QDesktopServices.openUrl(QUrl("https://github.com/cosmica-app/cosmica"))
+        QDesktopServices.openUrl(QUrl("https://github.com/majmichu1/Cosmica"))
 
     def _on_buy_coffee(self):
         from PyQt6.QtCore import QUrl
@@ -2239,7 +2246,6 @@ class MainWindow(QMainWindow):
         n_aligned = len(aligned_lights)
 
         # *** Free aligned_lights from RAM and VRAM — stacking reads from disk ***
-        self._aligned_lights = []
         del aligned_lights
         import gc as _gc; _gc.collect()
         try:
@@ -2332,7 +2338,7 @@ class MainWindow(QMainWindow):
                     light_paths,
                     output_dir,
                     stk_params=params,
-                    on_done=lambda result: self._on_alignment_done(result),
+                    on_done=self._on_path_alignment_done,
                 )
                 return
 
@@ -2570,24 +2576,23 @@ class MainWindow(QMainWindow):
         if self._current_image is None:
             return
         params = self._tools_panel.get_stretch_params()
-        stretched = auto_stretch(self._current_image.data, params)
-        self._update_current_image(stretched, "Stretch applied")
-        if self._project:
-            self._project.add_history(
-                "Auto-Stretch",
-                {
-                    "midtone": params.midtone,
-                    "shadow_clip": params.shadow_clip,
-                },
+        _p = params
+
+        def _work(data, progress=None):
+            return auto_stretch(data, _p)
+
+        def _done(stretched):
+            self._update_current_image(stretched, "Stretch applied")
+            if self._project:
+                self._project.add_history(
+                    "Auto-Stretch", {"midtone": _p.midtone, "shadow_clip": _p.shadow_clip}
+                )
+            self._macro_recorder.record_step(
+                "auto_stretch", {"midtone": _p.midtone, "shadow_clip": _p.shadow_clip}
             )
-        self._macro_recorder.record_step(
-            "auto_stretch",
-            {
-                "midtone": params.midtone,
-                "shadow_clip": params.shadow_clip,
-            },
-        )
-        self._tools_panel.reset_stretch_params()
+            self._tools_panel.reset_stretch_params()
+
+        self._start_worker(_work, self._current_image.data, on_done=_done)
 
     def _on_stretch_preview(self):
         if self._current_image is None:
@@ -2737,7 +2742,6 @@ class MainWindow(QMainWindow):
     # ---------- Transform operations ----------
 
     @pyqtSlot()
-    @pyqtSlot()
     def _on_start_crop_draw(self):
         """Toggle interactive crop-draw mode on the canvas."""
         currently_active = getattr(self._canvas, '_crop_mode', False)
@@ -2833,23 +2837,22 @@ class MainWindow(QMainWindow):
         self._log_panel.log(
             f"Applying Unsharp Mask (r={params.radius}, a={params.amount})...", "info"
         )
-        result = unsharp_mask(self._current_image.data, params)
-        self._update_current_image(result, "Unsharp mask applied")
-        if self._project:
-            self._project.add_history(
-                "Unsharp Mask",
-                {
-                    "radius": params.radius,
-                    "amount": params.amount,
-                },
+        _p = params
+
+        def _work(data, progress=None):
+            return unsharp_mask(data, _p)
+
+        def _done(result):
+            self._update_current_image(result, "Unsharp mask applied")
+            if self._project:
+                self._project.add_history(
+                    "Unsharp Mask", {"radius": _p.radius, "amount": _p.amount}
+                )
+            self._macro_recorder.record_step(
+                "unsharp_mask", {"radius": _p.radius, "amount": _p.amount}
             )
-        self._macro_recorder.record_step(
-            "unsharp_mask",
-            {
-                "radius": params.radius,
-                "amount": params.amount,
-            },
-        )
+
+        self._start_worker(_work, self._current_image.data, on_done=_done)
 
     @pyqtSlot()
     def _on_run_median_filter(self):
@@ -2857,10 +2860,17 @@ class MainWindow(QMainWindow):
             return
         params = self._tools_panel.get_median_filter_params()
         self._log_panel.log(f"Applying Median Filter (k={params.kernel_size})...", "info")
-        result = median_filter(self._current_image.data, params)
-        self._update_current_image(result, "Median filter applied")
-        if self._project:
-            self._project.add_history("Median Filter", {"kernel_size": params.kernel_size})
+        _p = params
+
+        def _work(data, progress=None):
+            return median_filter(data, _p)
+
+        def _done(result):
+            self._update_current_image(result, "Median filter applied")
+            if self._project:
+                self._project.add_history("Median Filter", {"kernel_size": _p.kernel_size})
+
+        self._start_worker(_work, self._current_image.data, on_done=_done)
 
     @pyqtSlot()
     def _on_run_abe(self):
@@ -2888,16 +2898,19 @@ class MainWindow(QMainWindow):
             return
         params = self._tools_panel.get_vignette_params()
         self._log_panel.log("Applying vignette correction...", "info")
-        result = correct_vignette(self._current_image.data, params)
-        self._update_current_image(result, "Vignette correction applied")
-        if self._project:
-            self._project.add_history(
-                "Vignette Correction",
-                {
-                    "strength": params.strength,
-                    "falloff": params.falloff,
-                },
-            )
+        _p = params
+
+        def _work(data, progress=None):
+            return correct_vignette(data, _p)
+
+        def _done(result):
+            self._update_current_image(result, "Vignette correction applied")
+            if self._project:
+                self._project.add_history(
+                    "Vignette Correction", {"strength": _p.strength, "falloff": _p.falloff}
+                )
+
+        self._start_worker(_work, self._current_image.data, on_done=_done)
 
     @pyqtSlot()
     def _on_run_ca(self):
@@ -2908,10 +2921,17 @@ class MainWindow(QMainWindow):
             return
         params = self._tools_panel.get_ca_params()
         self._log_panel.log("Correcting chromatic aberration...", "info")
-        result = correct_chromatic_aberration(self._current_image.data, params)
-        self._update_current_image(result, "Chromatic aberration corrected")
-        if self._project:
-            self._project.add_history("CA Correction", {"auto": params.auto_detect})
+        _p = params
+
+        def _work(data, progress=None):
+            return correct_chromatic_aberration(data, _p)
+
+        def _done(result):
+            self._update_current_image(result, "Chromatic aberration corrected")
+            if self._project:
+                self._project.add_history("CA Correction", {"auto": _p.auto_detect})
+
+        self._start_worker(_work, self._current_image.data, on_done=_done)
 
     @pyqtSlot()
     def _on_show_statistics(self):
@@ -2987,24 +3007,17 @@ class MainWindow(QMainWindow):
         )
 
         def _cont_work(nb_data, bb_path_str, scale, progress=None):
-            bb_img = load_image(bb_path_str)
-            # Use first channel (or luminance) as broadband
-            if bb_img.data.ndim == 3:
-                import numpy as _np
-                bb_ch = _np.mean(bb_img.data, axis=0)
-            else:
-                bb_ch = bb_img.data
-            # Narrowband: if color, use luminance; if mono, use as-is
             import numpy as _np
-            if nb_data.ndim == 3:
-                nb_ch = _np.mean(nb_data, axis=0)
-            else:
-                nb_ch = nb_data
+            bb_img = load_image(bb_path_str)
+            bb_ch = _np.mean(bb_img.data, axis=0) if bb_img.data.ndim == 3 else bb_img.data
+            nb_ch = _np.mean(nb_data, axis=0) if nb_data.ndim == 3 else nb_data
             result_ch = continuum_subtraction(nb_ch, bb_ch, scale)
+            # Preserve original dimensionality: broadcast mono result to 3D if needed
+            if nb_data.ndim == 3:
+                return _np.stack([result_ch, result_ch, result_ch], axis=0)
             return result_ch
 
         def _on_cont_done(result_ch):
-
             self._update_current_image(result_ch, "Continuum subtraction applied")
 
         self._start_worker(
@@ -4031,10 +4044,7 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def _on_run_ai_denoise(self):
         if self._current_image is None:
-            return
-            self._log_panel.log(
-                "warning",
-            )
+            self._log_panel.log("No image loaded", "warning")
             return
         params = self._tools_panel.get_ai_denoise_params()
         self._log_panel.log("Running AI Denoise (GPU)...", "info")
@@ -4058,10 +4068,7 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def _on_run_ai_sharpen(self):
         if self._current_image is None:
-            return
-            self._log_panel.log(
-                "warning",
-            )
+            self._log_panel.log("No image loaded", "warning")
             return
         params = self._tools_panel.get_ai_sharpen_params()
         self._log_panel.log("Running AI Sharpen (GPU)...", "info")

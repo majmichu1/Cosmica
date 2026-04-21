@@ -187,17 +187,14 @@ def auto_stretch_for_display_ref(img: np.ndarray, ref: np.ndarray) -> np.ndarray
 
 def _normalize_fits_data(data: np.ndarray) -> np.ndarray:
     """Normalize FITS data to float32 in [0, 1]."""
-    data = data.astype(np.float32)
     if data.dtype.kind == "u":
-        # unsigned integer
         max_val = np.iinfo(data.dtype).max
-        return data / max_val
+        return (data / max_val).astype(np.float32)
     elif data.dtype.kind == "i":
-        # signed integer — offset
         info = np.iinfo(data.dtype)
-        return (data.astype(np.float32) - info.min) / (info.max - info.min)
+        return ((data.astype(np.float32) - info.min) / (info.max - info.min))
     else:
-        # float — check range
+        data = data.astype(np.float32)
         dmin, dmax = float(np.min(data)), float(np.max(data))
         if dmax <= 1.0 and dmin >= 0.0:
             return data

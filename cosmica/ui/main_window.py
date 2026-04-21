@@ -327,6 +327,8 @@ class MainWindow(QMainWindow):
 
         # Cached downscaled image for live preview (recomputed in _display_image)
         self._preview_small_cache: tuple | None = None  # (small_array, scale)
+        # Stretch reference used for the current display — None means use image itself
+        self._preview_stretch_ref_cache = None  # np.ndarray | None
 
         # Preview debounce timers
         self._stretch_preview_timer = QTimer()
@@ -1104,6 +1106,7 @@ class MainWindow(QMainWindow):
         self._canvas.sample_placed.connect(self._on_sample_placed)
         self._canvas.sample_removed.connect(self._on_sample_removed)
         self._canvas.crop_rect_selected.connect(self._on_crop_rect_selected)
+        self._canvas.crop_mode_changed.connect(self._tools_panel.set_crop_draw_active)
 
         # Preview signals
         tp.preview_requested.connect(self._on_preview_requested)
@@ -1516,6 +1519,9 @@ class MainWindow(QMainWindow):
 
     def _on_workflow_step_clicked(self, idx: int):
         """Switch to the tools panel tab corresponding to the workflow step."""
+        if idx == -1:
+            self._save_image()
+            return
         tp = self._tools_panel
         if hasattr(tp, "_tabs"):
             tp._tabs.setCurrentIndex(min(idx, tp._tabs.count() - 1))
@@ -1570,9 +1576,13 @@ class MainWindow(QMainWindow):
                 ref_hwc = _np.transpose(small_ref, (1, 2, 0)) if small_ref.ndim == 3 else _np.stack([small_ref] * 3, axis=-1)
             stretched = auto_stretch_for_display_ref(hwc, ref_hwc)
             rgb = _np.clip(stretched * 255, 0, 255).astype(_np.uint8)
+            # Cache the stretch reference so subsequent tool previews match the display brightness
+            self._preview_stretch_ref_cache = small_ref
         else:
             small_img = ImageData(data=small, header={})
             rgb = small_img.to_display(stretch=True)
+            # No external reference — use the image itself for preview stretching
+            self._preview_stretch_ref_cache = None
 
         self._canvas.set_image(rgb, image.data, display_scale=_scale)  # full-res data + scale for coord mapping
         fname = image.file_path.name if image.file_path else "Untitled"
@@ -1606,7 +1616,10 @@ class MainWindow(QMainWindow):
 
     def _push_undo(self, before: ImageData, after: ImageData, description: str):
         """Push an undo command and update the Undo/Redo action states."""
-        self._undo_stack.push(before, after, description)
+        self._undo_stack.push(
+            before, after, description,
+            before_display_ref=self._preview_stretch_ref_cache,
+        )
         self._update_undo_actions()
 
     def _update_undo_actions(self):
@@ -1620,13 +1633,16 @@ class MainWindow(QMainWindow):
 
     def _undo(self):
         if self._undo_stack.undo():
-            self._display_image(self._image_ref[0])
+            # Restore the exact stretch reference used when this state was first displayed
+            ref = self._undo_stack.current_display_ref()
+            self._display_image(self._image_ref[0], display_ref=ref)
             self._log_panel.log(f"Undid: {self._undo_stack.redo_text()}", "info")
             self._update_undo_actions()
 
     def _redo(self):
         if self._undo_stack.redo():
-            self._display_image(self._image_ref[0])
+            ref = self._undo_stack.current_display_ref()
+            self._display_image(self._image_ref[0], display_ref=ref)
             self._log_panel.log(f"Redid: {self._undo_stack.undo_text()}", "info")
             self._update_undo_actions()
 
@@ -1666,6 +1682,8 @@ class MainWindow(QMainWindow):
             desc = undo_desc if undo_desc else message
             self._push_undo(before, image, desc)
         self._display_image(image, display_ref=display_ref)
+        # Store the after-display ref in the undo command so redo can match brightness
+        self._undo_stack.set_last_after_display_ref(self._preview_stretch_ref_cache)
         self._log_panel.log(message, "success")
         self._update_image_status()
 
@@ -2082,7 +2100,13 @@ class MainWindow(QMainWindow):
             )
         else:
             # Raw project frames — stream from disk to avoid OOM
-            paths = self._get_light_paths()
+            if self._subframe_selected_paths:
+                paths = [Path(p) for p in self._subframe_selected_paths]
+                self._log_panel.log(
+                    f"Using {len(paths)} subframe-selected frames for alignment", "info"
+                )
+            else:
+                paths = self._get_light_paths()
             if not paths:
                 return
             params_dict = self._tools_panel.get_alignment_params()
@@ -2155,6 +2179,10 @@ class MainWindow(QMainWindow):
                 self._project_panel.refresh()
         else:
             self._aligned_paths = result_paths
+
+        # Clear subframe selection — stacking should now use the freshly aligned _aligned_paths
+        self._subframe_selected_paths = []
+        self._tools_panel.set_subframe_count(0, 0)
 
         # Display first aligned frame
         try:
@@ -2235,6 +2263,10 @@ class MainWindow(QMainWindow):
                 self._project_panel.refresh()
         else:
             self._aligned_paths = []
+
+        # Clear subframe selection — stacking should now use the freshly aligned _aligned_paths
+        self._subframe_selected_paths = []
+        self._tools_panel.set_subframe_count(0, 0)
 
         self._log_panel.log(
             f"Alignment complete: {n_aligned} frames aligned. Ready to stack.",
@@ -2632,13 +2664,23 @@ class MainWindow(QMainWindow):
         if result is None or result.size == 0:
             return
 
-        # Convert to HWC, use reference-based stretch so before/after brightness matches
+        # Convert to HWC.
+        # Use the same stretch reference as the display: if the display was anchored to
+        # the pre-op image (display_ref != None), the preview must use that same reference
+        # so left/right brightness matches. Otherwise use the image itself.
+        stretch_ref = self._preview_stretch_ref_cache  # None → use small itself
         if result.ndim == 2:
             after_hwc = np.stack([result, result, result], axis=-1)
-            ref_hwc = np.stack([small, small, small], axis=-1)
+            if stretch_ref is not None:
+                ref_hwc = np.stack([stretch_ref, stretch_ref, stretch_ref], axis=-1) if stretch_ref.ndim == 2 else np.transpose(stretch_ref, (1, 2, 0))
+            else:
+                ref_hwc = np.stack([small, small, small], axis=-1)
         else:
             after_hwc = np.transpose(result, (1, 2, 0))
-            ref_hwc = np.transpose(small, (1, 2, 0))
+            if stretch_ref is not None:
+                ref_hwc = np.stack([stretch_ref, stretch_ref, stretch_ref], axis=-1) if stretch_ref.ndim == 2 else np.transpose(stretch_ref, (1, 2, 0))
+            else:
+                ref_hwc = np.transpose(small, (1, 2, 0))
         after_disp = auto_stretch_for_display_ref(after_hwc, ref_hwc)
         after_rgb = np.clip(after_disp * 255, 0, 255).astype(np.uint8)
         self._canvas.set_after_image(after_rgb)
@@ -3208,19 +3250,17 @@ class MainWindow(QMainWindow):
         dialog.scores_ready.connect(self._on_subframe_scores_ready)
         dialog.exec()
 
-    @pyqtSlot(list)
-    def _on_subframe_selection_done(self, accepted_paths: list[str]):
+    @pyqtSlot(list, int)
+    def _on_subframe_selection_done(self, accepted_paths: list[str], n_total: int):
         """Receive accepted frame paths from SubframeDialog and feed them into stacking."""
         if not accepted_paths:
             return
         self._log_panel.log(
-            f"Subframe selector: {len(accepted_paths)} frames accepted — ready to stack",
+            f"Subframe selector: {len(accepted_paths)}/{n_total} frames accepted — ready to stack",
             "success",
         )
-        # Store as the active aligned-frame list so Run Stack picks them up.
         self._subframe_selected_paths = accepted_paths
-        # Update the tools panel stacking tab to reflect the new count.
-        self._tools_panel.set_subframe_count(len(accepted_paths))
+        self._tools_panel.set_subframe_count(len(accepted_paths), n_total)
 
     @pyqtSlot(list)
     def _on_subframe_scores_ready(self, scores) -> None:

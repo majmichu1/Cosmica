@@ -18,6 +18,7 @@ class ImageCanvas(QWidget):
     sample_placed = pyqtSignal(float, float)       # image-space x, y
     sample_removed = pyqtSignal(float, float)      # image-space x, y (nearest)
     crop_rect_selected = pyqtSignal(int, int, int, int)  # x, y, w, h in image-space
+    crop_mode_changed = pyqtSignal(bool)  # emitted when crop mode enters or exits
     undo_requested = pyqtSignal()
     redo_requested = pyqtSignal()
     export_requested = pyqtSignal()
@@ -238,6 +239,7 @@ class ImageCanvas(QWidget):
             if self._crop_rubber_band:
                 self._crop_rubber_band.hide()
         self.setCursor(Qt.CursorShape.CrossCursor if enabled else Qt.CursorShape.ArrowCursor)
+        self.crop_mode_changed.emit(enabled)
 
     # ── Paint ────────────────────────────────────────────────────────────────
 

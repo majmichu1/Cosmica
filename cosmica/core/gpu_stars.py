@@ -87,20 +87,36 @@ def detect_stars_gpu(
 
     H, W = image.shape
     patch_r = 5
-    img_cpu = image.cpu()
-    stars: list[Star] = []
-    for i in range(rows.shape[0]):
-        r_i = int(rows[i].item())
-        c_i = int(cols[i].item())
-        flux = float(fluxes[i].item())
-        r0, r1 = max(0, r_i - patch_r), min(H, r_i + patch_r + 1)
-        c0, c1 = max(0, c_i - patch_r), min(W, c_i + patch_r + 1)
-        patch = img_cpu[r0:r1, c0:c1]
-        area = float((patch > flux * 0.5).sum().item())
-        fwhm = 2.0 * (area / 3.14159) ** 0.5 if area > 0 else 3.0
-        stars.append(Star(x=float(c_i), y=float(r_i), flux=flux, fwhm=fwhm))
+    patch_size = 2 * patch_r + 1
 
-    return stars
+    # Extract all star patches in one GPU operation via unfold instead of per-star Python loop.
+    # F.unfold expects (1, 1, H, W) → output (1, patch_size², H*W); we squeeze to (patch_size², H*W).
+    padded = functional.pad(
+        image.unsqueeze(0).unsqueeze(0),
+        (patch_r, patch_r, patch_r, patch_r),
+        mode="constant", value=0.0,
+    )
+    patches = functional.unfold(padded, kernel_size=patch_size, stride=1).squeeze(0)
+    # (patch_size², H*W) — column star_idx gives the patch centered on that pixel
+
+    star_idx = (rows * W + cols).long()           # (N_stars,)
+    star_patches = patches[:, star_idx]            # (patch_size², N_stars)
+
+    # Area = pixels above half-maximum; FWHM from equivalent-circle diameter
+    area = (star_patches > fluxes.unsqueeze(0) * 0.5).float().sum(dim=0)
+    fwhm_vals = (2.0 * (area.clamp(min=1.0) / 3.14159).sqrt()).clamp(1.5, patch_r * 2.0)
+
+    # Single CPU transfer for all stars combined
+    rows_cpu   = rows.cpu().tolist()
+    cols_cpu   = cols.cpu().tolist()
+    fluxes_cpu = fluxes.cpu().tolist()
+    fwhm_cpu   = fwhm_vals.cpu().tolist()
+
+    return [
+        Star(x=float(cols_cpu[i]), y=float(rows_cpu[i]),
+             flux=float(fluxes_cpu[i]), fwhm=float(fwhm_cpu[i]))
+        for i in range(len(rows_cpu))
+    ]
 
 
 @torch.no_grad()
@@ -120,24 +136,25 @@ def match_stars_gpu(
     ref_pos = torch.tensor([[s.x, s.y] for s in ref_stars], device=dm.device)
     tgt_pos = torch.tensor([[s.x, s.y] for s in target_stars], device=dm.device)
 
-    # Pairwise squared distances (N_ref, N_tgt)
+    # Pairwise squared distances (N_ref, N_tgt) — computed on GPU
     diff = ref_pos.unsqueeze(1) - tgt_pos.unsqueeze(0)
     dist_sq = torch.sum(diff**2, dim=2)
 
-    dist_matrix = dist_sq.cpu().numpy()
+    # Only transfer two small vectors (N_ref each) instead of the full matrix
+    best_dist_sq, best_j = dist_sq.min(dim=1)
+    best_dist_sq_cpu = best_dist_sq.cpu().numpy()
+    best_j_cpu = best_j.cpu().numpy().astype(int)
+
     max_dist_sq = max_dist**2
+    ref_order = np.argsort([-s.flux for s in ref_stars])
 
     matches: list[tuple[Star, Star]] = []
     used_targets: set[int] = set()
-
-    # Match brightest ref stars first
-    ref_indices = np.argsort([-s.flux for s in ref_stars])
-    for i in ref_indices:
-        row = dist_matrix[i]
-        best_j = int(np.argmin(row))
-        if row[best_j] < max_dist_sq and best_j not in used_targets:
-            matches.append((ref_stars[i], target_stars[best_j]))
-            used_targets.add(best_j)
+    for i in ref_order:
+        j = int(best_j_cpu[i])
+        if best_dist_sq_cpu[i] < max_dist_sq and j not in used_targets:
+            matches.append((ref_stars[i], target_stars[j]))
+            used_targets.add(j)
 
     return matches
 

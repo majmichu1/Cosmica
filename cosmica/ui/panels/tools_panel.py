@@ -30,7 +30,7 @@ from cosmica.core.filters import UnsharpMaskParams
 from cosmica.core.histogram_transform import HistogramTransformParams
 from cosmica.core.local_contrast import LocalContrastParams
 from cosmica.core.morphology import MorphologyParams
-from cosmica.core.stacking import IntegrationMethod, RejectionMethod, StackingParams
+from cosmica.core.stacking import IntegrationMethod, RegistrationMode, RejectionMethod, StackingParams
 from cosmica.core.star_reduction import StarReductionParams
 from cosmica.core.stretch import ArcsinhStretchParams, GHSParams, StretchParams
 from cosmica.core.transforms import (
@@ -704,17 +704,30 @@ class ToolsPanel(QWidget):
         btns[1].clicked.connect(self.run_color_calibration.emit)
         lay.addWidget(cc)
 
-        # SPCC
-        spcc = CollapsibleSection("SPCC (Photometric)")
-        spcc.add_info("Spectrophotometric calibration using star spectra + filter database.")
+        # PCC — Photometric Color Calibration (plate solve + Gaia DR3)
+        pcc = CollapsibleSection("PCC (Photometric)")
+        pcc.add_info("Plate-solve + Gaia DR3 star catalog white balance.")
+        self._pcc_solver_combo = pcc.add_combo(
+            "Solver", ["Auto", "ASTAP", "Astrometry.net"]
+        )
+        self._pcc_ra_spin  = pcc.add_spin("RA hint (°)",  0.0, 360.0, 0.0, 0.001, 3)
+        self._pcc_dec_spin = pcc.add_spin("Dec hint (°)", -90.0, 90.0, 0.0, 0.001, 3)
+        pcc.add_info("Leave RA/Dec at 0 to read from FITS header.")
+        pcc.add_run("▶ Run PCC", self.run_pcc.emit)
+        lay.addWidget(pcc)
+
+        # SPCC — Spectrophotometric Color Calibration (sensor QE + filter curves)
+        spcc = CollapsibleSection("SPCC (Spectrophotometric)")
+        spcc.add_info("Sensor QE + filter transmission curves for precise white balance.")
         self._spcc_filter_combo  = spcc.add_combo(
             "Filter set", ["Broadband (L/R/G/B)", "Narrowband Ha/OIII/SII", "Custom"]
         )
         self._spcc_camera_combo  = spcc.add_combo(
-            "Camera", ["ZWO ASI2600MM", "QHY268M", "ZWO ASI533MC", "Other…"]
+            "Camera", ["ZWO ASI2600MM Pro", "QHY268M", "ZWO ASI533MC Pro"]
         )
         spcc.add_run("▶ Run SPCC", self.run_spcc.emit)
         lay.addWidget(spcc)
+        self._populate_spcc_cameras()
 
         # Narrowband
         nb = CollapsibleSection("Narrowband Tools")
@@ -1078,6 +1091,17 @@ class ToolsPanel(QWidget):
 
     # ── Internal helpers ──────────────────────────────────
 
+    def _populate_spcc_cameras(self) -> None:
+        """Load all cameras from the equipment database into the SPCC camera combo."""
+        try:
+            from cosmica.core.equipment import load_camera_database
+            cameras = load_camera_database()
+            self._spcc_camera_combo.clear()
+            for cam in cameras:
+                self._spcc_camera_combo.addItem(cam.name)
+        except Exception:
+            pass  # keep the hardcoded defaults if database fails to load
+
     def _fire_preview(self, tool_name: str, check: "QCheckBox") -> None:
         if check.isChecked():
             self.preview_requested.emit(tool_name)
@@ -1131,6 +1155,18 @@ class ToolsPanel(QWidget):
             if key in self._psf_result_labels:
                 self._psf_result_labels[key].setText(val)
 
+    def set_crop_draw_active(self, active: bool) -> None:
+        """Sync the Draw on Image button with the canvas crop mode state."""
+        self._btn_crop_draw.blockSignals(True)
+        self._btn_crop_draw.setChecked(active)
+        self._btn_crop_draw.blockSignals(False)
+
+    def set_crop_from_rect(self, x: int, y: int, w: int, h: int) -> None:
+        self._crop_x_spin.setValue(x)
+        self._crop_y_spin.setValue(y)
+        self._crop_w_spin.setValue(w)
+        self._crop_h_spin.setValue(h)
+
     def set_subframe_count(self, n_selected: int, n_total: int) -> None:
         if n_selected == 0:
             self._subframe_count_label.setText("No subframe selection active")
@@ -1151,19 +1187,20 @@ class ToolsPanel(QWidget):
 
     def get_stacking_params(self) -> StackingParams:
         rejection_map = {
-            "Sigma Clipping":      RejectionMethod.SIGMA_CLIP,
-            "Winsorized Sigma":    RejectionMethod.WINSORIZED,
-            "Linear Fit":         RejectionMethod.LINEAR_FIT,
-            "Percentile Clip":    RejectionMethod.PERCENTILE,
-            "ESD (Generalized)":  RejectionMethod.ESD,
-            "Min/Max":            RejectionMethod.MINMAX,
-            "None":               RejectionMethod.NONE,
+            "Sigma Clipping":     RejectionMethod.SIGMA_CLIP,
+            "Winsorized Sigma":   RejectionMethod.WINSORIZED_SIGMA,
+            "Linear Fit":        RejectionMethod.LINEAR_FIT,
+            "Percentile Clip":   RejectionMethod.PERCENTILE_CLIP,
+            "ESD (Generalized)": RejectionMethod.ESD,
+            "Min/Max":           RejectionMethod.MIN_MAX,
+            "None":              RejectionMethod.NONE,
         }
         integ_map = {
             "Average":          IntegrationMethod.AVERAGE,
             "Median":           IntegrationMethod.MEDIAN,
             "Weighted Average": IntegrationMethod.WEIGHTED_AVERAGE,
         }
+        kappa = float(self._kappa_spin.value())
         return StackingParams(
             rejection=rejection_map.get(
                 self._rejection_combo.currentText(), RejectionMethod.SIGMA_CLIP
@@ -1171,8 +1208,35 @@ class ToolsPanel(QWidget):
             integration=integ_map.get(
                 self._integration_combo.currentText(), IntegrationMethod.AVERAGE
             ),
-            kappa=self._kappa_spin.value(),
+            kappa_low=kappa,
+            kappa_high=kappa,
         )
+
+    def get_alignment_params(self) -> dict:
+        mode_map = {
+            "Star (1-Pass)":    RegistrationMode.STAR_1_PASS,
+            "Star (2-Pass)":    RegistrationMode.STAR_2_PASS,
+            "Triangle Match":   RegistrationMode.TRIANGLE,
+            "FFT Translation":  RegistrationMode.FFT_TRANSLATION,
+            "Comet":            RegistrationMode.COMET,
+        }
+        ref_map = {
+            "Auto (best quality)": -1,   # -1 = auto-select highest-variance frame
+            "First frame":          0,
+            "Last frame":          -2,   # -2 = last frame (special sentinel in stacking.py)
+            "Specific frame #":     0,
+        }
+        mode = mode_map.get(
+            self._reg_mode_combo.currentText(), RegistrationMode.STAR_2_PASS
+        )
+        ref_idx = ref_map.get(self._ref_frame_combo.currentText(), 0)
+        return {
+            "mode": mode,
+            "reference_frame_index": ref_idx,
+            "star_sensitivity": float(self._star_sens_spin.value()),
+            "max_shift": int(self._max_shift_spin.value()),
+            "ransac_threshold": float(self._ransac_thresh_spin.value()),
+        }
 
     def get_stretch_params(self) -> StretchParams:
         return StretchParams(
@@ -1227,19 +1291,21 @@ class ToolsPanel(QWidget):
         return CosmeticParams(
             hot_sigma=self._hot_sigma.value(),
             cold_sigma=self._cold_sigma.value(),
-            fix_dead=self._dead_pixel_check.isChecked(),
+            detect_dead=self._dead_pixel_check.isChecked(),
         )
 
     def get_vignette_params(self) -> VignetteParams:
         return VignetteParams(
-            amount=self._vignette_amount.value(),
+            strength=self._vignette_amount.value(),
             radius=self._vignette_radius.value(),
         )
 
     def get_banding_params(self) -> BandingParams:
+        direction = self._banding_dir_combo.currentText().lower()
         return BandingParams(
+            horizontal=(direction in ("horizontal", "both")),
+            vertical=(direction in ("vertical", "both")),
             amount=self._banding_amount.value(),
-            direction=self._banding_dir_combo.currentText().lower(),
         )
 
     def get_ai_denoise_params(self) -> AIDenoiseParams:
@@ -1290,7 +1356,6 @@ class ToolsPanel(QWidget):
     def get_star_reduction_params(self) -> StarReductionParams:
         return StarReductionParams(
             amount=self._star_reduction_amount.value() / 100.0,
-            method=self._star_reduction_method.currentText(),
         )
 
     def get_unsharp_mask_params(self) -> UnsharpMaskParams:
@@ -1307,9 +1372,15 @@ class ToolsPanel(QWidget):
         )
 
     def get_scnr_params(self) -> SCNRParams:
+        from cosmica.core.color_tools import SCNRMethod
+        method_map = {
+            "Average Neutral": SCNRMethod.AVERAGE_NEUTRAL,
+            "Maximum Neutral": SCNRMethod.MAXIMUM_NEUTRAL,
+        }
         return SCNRParams(
-            target=self._scnr_target_combo.currentText().lower(),
-            method=self._scnr_method_combo.currentText(),
+            method=method_map.get(
+                self._scnr_method_combo.currentText(), SCNRMethod.AVERAGE_NEUTRAL
+            ),
             amount=self._scnr_amount.value(),
         )
 
@@ -1379,23 +1450,37 @@ class ToolsPanel(QWidget):
     def get_abe_params(self) -> ABEParams:
         return ABEParams(
             grid_size=int(self._abe_grid_spin.value()),
-            model=self._abe_model_combo.currentText(),
-            degree=int(self._abe_degree_spin.value()),
-            kernel=self._abe_kernel_combo.currentText(),
-            mode=self._abe_mode_combo.currentText().lower(),
+            model_type=self._abe_model_combo.currentText(),
+            polynomial_degree=int(self._abe_degree_spin.value()),
+            rbf_kernel=self._abe_kernel_combo.currentText(),
+            correction_mode=self._abe_mode_combo.currentText().lower(),
         )
 
     def get_morphology_params(self) -> MorphologyParams:
         return MorphologyParams(
             operation=self._morph_op.currentText(),
-            kernel=self._morph_kernel.currentText(),
+            element=self._morph_kernel.currentText(),
             iterations=int(self._morph_iters.value()),
         )
 
     def get_color_calibration_params(self) -> ColorCalibrationParams:
-        return ColorCalibrationParams(
-            method=self._cc_method_combo.currentText(),
-        )
+        method_map = {
+            "Background reference": "average",
+            "Photometric (SPCC)": "G2V",
+            "Manual RGB": "custom",
+        }
+        white_ref = method_map.get(self._cc_method_combo.currentText(), "average")
+        return ColorCalibrationParams(white_reference=white_ref)
+
+    def get_pcc_params(self) -> dict:
+        solver_map = {"Auto": "auto", "ASTAP": "astap", "Astrometry.net": "astrometry_net"}
+        ra = float(self._pcc_ra_spin.value())
+        dec = float(self._pcc_dec_spin.value())
+        return {
+            "solver": solver_map.get(self._pcc_solver_combo.currentText(), "auto"),
+            "ra_hint": ra if ra != 0.0 else None,
+            "dec_hint": dec if dec != 0.0 else None,
+        }
 
     # ── Compatibility properties used by main_window ──────
     @property

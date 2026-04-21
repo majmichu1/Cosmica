@@ -1071,7 +1071,7 @@ def align_from_paths(
     # ── Align all other frames — prefetch IO hides disk latency ─────────────
     # While the GPU processes frame i, a background thread loads frame i+1.
     # This overlaps IO (slow) with GPU compute, typically 1.5-2× faster.
-    from concurrent.futures import Future, ThreadPoolExecutor
+    from concurrent.futures import Future, ThreadPoolExecutor as _TPE
 
     non_ref = [i for i in range(n) if i != ref_idx]
     gc_interval = 10  # run gc every N frames instead of every frame
@@ -1090,7 +1090,11 @@ def align_from_paths(
             log.warning("align_from_paths: failed to load %s: %s", paths[idx].name, exc)
             return idx, None
 
-    with ThreadPoolExecutor(max_workers=1) as pool:
+    # Separate write pool so FITS writes overlap with GPU processing of the next frame.
+    # max_workers=1 keeps writes sequential and memory usage bounded to ~2 frames.
+    write_pool = _TPE(max_workers=1)
+
+    with _TPE(max_workers=1) as pool:
         # Kick off the first prefetch before the loop starts
         prefetch: Future | None = pool.submit(_load, non_ref[0]) if non_ref else None
 
@@ -1195,14 +1199,19 @@ def align_from_paths(
 
             aligned_img = ImageData(data=res, header=frame.header.copy(), frame_type=frame.frame_type)
             out_p = output_dir / f"{filename_prefix}_{i + 1:05d}.fits"
-            _write_aligned_fits(aligned_img, out_p)
+            write_pool.submit(_write_aligned_fits, aligned_img, out_p)
             out_paths[i] = out_p
 
-            del frame, aligned_img, res
+            del frame, res
+            # aligned_img kept alive by write_pool until the write thread finishes
+            del aligned_img
             if t_img is not None:
                 del t_img
             if (loop_pos + 1) % gc_interval == 0:
                 gc.collect()
+
+    # Drain all pending FITS writes before returning
+    write_pool.shutdown(wait=True)
 
     del ref_img
     gc.collect()

@@ -115,6 +115,8 @@ class WorkflowBar(QWidget):
         tab = _STEP_TO_TAB.get(idx)
         if tab is not None:
             self.step_clicked.emit(tab)
+        elif idx == 6:
+            self.step_clicked.emit(-1)  # Export sentinel — no matching tab
         self.set_current(idx)
 
     def _refresh(self) -> None:

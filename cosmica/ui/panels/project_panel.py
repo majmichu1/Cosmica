@@ -76,7 +76,6 @@ class _FrameRow(QFrame):
     def __init__(self, entry, parent=None):
         super().__init__(parent)
         self._path = str(entry.path)
-        self.setFixedHeight(48)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._selected = False
         self._apply_style(False)
@@ -84,8 +83,8 @@ class _FrameRow(QFrame):
         self.customContextMenuRequested.connect(lambda _: self.context_requested.emit(self._path))
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 5, 8, 5)
-        layout.setSpacing(2)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(1)
 
         # Top row: filename + type badge
         top_row = QHBoxLayout()

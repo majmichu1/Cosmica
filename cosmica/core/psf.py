@@ -49,14 +49,44 @@ def _gaussian_2d(coords, amplitude, x0, y0, sigma_x, sigma_y, theta, offset):
     return offset + amplitude * np.exp(-(a * dx**2 + 2 * b * dx * dy + c * dy**2))
 
 
+def _radial_fwhm(cutout: np.ndarray, r: int) -> float | None:
+    """Measure FWHM via radial profile — robust fallback for clipped/stretched stars."""
+    cy, cx = r, r
+    bg = float(np.percentile(cutout, 10))
+    peak = float(cutout[cy, cx])
+    if peak - bg < 0.02:
+        return None
+    half_max = bg + (peak - bg) * 0.5
+
+    # Sample in 16 directions, find half-maximum crossing
+    angles = np.linspace(0, 2 * np.pi, 16, endpoint=False)
+    half_radii: list[float] = []
+    for theta in angles:
+        for rad in np.linspace(0.5, r - 0.5, 80):
+            iy = cy + rad * np.sin(theta)
+            ix = cx + rad * np.cos(theta)
+            yi, xi = int(round(iy)), int(round(ix))
+            if 0 <= yi < cutout.shape[0] and 0 <= xi < cutout.shape[1]:
+                if cutout[yi, xi] <= half_max:
+                    half_radii.append(rad)
+                    break
+
+    if len(half_radii) < 6:
+        return None
+    fwhm = float(np.median(half_radii)) * 2.0
+    if fwhm < 1.0 or fwhm > r:
+        return None
+    return fwhm
+
+
 def _fit_star_psf(
     image: np.ndarray,
     star: Star,
     cutout_radius: int = 12,
 ) -> tuple[float, float, float] | None:
-    """Fit a 2D Gaussian to a single star.
+    """Fit a 2D Gaussian to a single star; fall back to radial profile for clipped stars.
 
-    Returns (fwhm_x, fwhm_y, theta) or None if fitting fails.
+    Returns (fwhm_x, fwhm_y, theta) or None if all methods fail.
     """
     h, w = image.shape
     ix, iy = int(round(star.x)), int(round(star.y))
@@ -76,16 +106,20 @@ def _fit_star_psf(
     data = cutout.ravel()
 
     # Initial estimates
-    amp = float(cutout.max() - cutout.min())
-    offset = float(cutout.min())
-    cx = float(r)  # center of cutout
+    bg = float(np.percentile(cutout, 10))
+    peak = float(cutout.max())
+    amp = peak - bg
+    offset = bg
+    cx = float(r)
     cy = float(r)
     sigma_init = star.fwhm / 2.355 if star.fwhm > 0 else 2.0
 
+    # Amplitude bound: allow up to max+20% — clipped stars have amp underestimated
+    amp_max = max(amp * 2.0, 0.1)
     p0 = [amp, cx, cy, sigma_init, sigma_init, 0.0, offset]
     bounds = (
-        [0, cx - 3, cy - 3, 0.5, 0.5, -np.pi, -0.1],
-        [amp * 2, cx + 3, cy + 3, r, r, np.pi, 1.1],
+        [0, cx - 4, cy - 4, 0.5, 0.5, -np.pi, -0.1],
+        [amp_max, cx + 4, cy + 4, r, r, np.pi, 1.1],
     )
 
     try:
@@ -95,20 +129,25 @@ def _fit_star_psf(
             data,
             p0=p0,
             bounds=bounds,
-            maxfev=500,
+            maxfev=2000,
+            method="trf",
         )
         _, _, _, sigma_x, sigma_y, theta, _ = popt
 
         fwhm_x = abs(sigma_x) * 2.355
         fwhm_y = abs(sigma_y) * 2.355
 
-        # Sanity check: reject unreasonable fits
         if fwhm_x < 1.0 or fwhm_y < 1.0 or fwhm_x > cutout_radius or fwhm_y > cutout_radius:
-            return None
+            raise ValueError("unreasonable fit")
 
         return (fwhm_x, fwhm_y, float(theta))
 
     except (RuntimeError, ValueError):
+        # Gaussian fitting failed (common for clipped/stretched stars).
+        # Fall back to radial half-maximum profile measurement.
+        fwhm = _radial_fwhm(cutout, r)
+        if fwhm is not None:
+            return (fwhm, fwhm, 0.0)
         return None
 
 

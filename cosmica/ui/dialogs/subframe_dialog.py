@@ -12,8 +12,8 @@ from concurrent.futures import as_completed as futures_as_completed
 from pathlib import Path
 
 import numpy as np
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QColor, QImage, QPixmap
+from PyQt6.QtCore import Qt, QPoint, QThread, pyqtSignal
+from PyQt6.QtGui import QColor, QCursor, QImage, QPixmap
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -42,21 +42,37 @@ _THUMB_SIZE = 80   # px — thumbnail column width/height
 
 
 def _make_thumbnail(path: str, size: int = _THUMB_SIZE) -> QPixmap:
-    """Load an image, auto-stretch, and return a square QPixmap thumbnail."""
+    """Load an image, auto-stretch, and return a square QPixmap thumbnail.
+
+    Downscales to 256px *before* stretching so auto_stretch runs on a tiny
+    array — typically 20–50× faster than stretching the full image.
+    """
     try:
         from cosmica.core.image_io import load_image
         from cosmica.core.stretch import StretchParams, auto_stretch
         img = load_image(path)
-        data = img.data
+        data = img.data.astype(np.float32)
+
+        # Fast downscale to at most 256px before expensive stretch
+        _MAX = 256
+        h, w = data.shape[-2], data.shape[-1]
+        if max(h, w) > _MAX:
+            factor = _MAX / max(h, w)
+            new_h, new_w = max(1, int(h * factor)), max(1, int(w * factor))
+            # Sliced sub-sampling — no scipy/torch needed, instant
+            ry = max(1, h // new_h)
+            rx = max(1, w // new_w)
+            data = data[..., ::ry, ::rx][..., :new_h, :new_w]
+
         stretched = auto_stretch(data, StretchParams())
         if stretched.ndim == 2:
             rgb = np.stack([stretched] * 3, axis=-1)
         else:
             rgb = np.transpose(stretched, (1, 2, 0))
         rgb8 = (np.clip(rgb, 0, 1) * 255).astype(np.uint8)
-        h, w = rgb8.shape[:2]
-        s = min(h, w)
-        y0, x0 = (h - s) // 2, (w - s) // 2
+        h2, w2 = rgb8.shape[:2]
+        s = min(h2, w2)
+        y0, x0 = (h2 - s) // 2, (w2 - s) // 2
         crop = np.ascontiguousarray(rgb8[y0:y0+s, x0:x0+s])
         qimg = QImage(crop.tobytes(), s, s, s * 3, QImage.Format.Format_RGB888)
         pix = QPixmap.fromImage(qimg)
@@ -67,6 +83,48 @@ def _make_thumbnail(path: str, size: int = _THUMB_SIZE) -> QPixmap:
         pix = QPixmap(size, size)
         pix.fill(QColor(40, 40, 40))
         return pix
+
+
+class _ThumbLabel(QLabel):
+    """Thumbnail cell widget that pops up a larger preview on hover."""
+
+    _POPUP_SIZE = 300
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._pixmap_full: QPixmap | None = None
+        self._popup: QLabel | None = None
+
+    def set_full_pixmap(self, pix: QPixmap) -> None:
+        self._pixmap_full = pix
+
+    def enterEvent(self, event):
+        if self._pixmap_full is not None:
+            popup = QLabel(self.window())
+            popup.setWindowFlags(Qt.WindowType.ToolTip)
+            scaled = self._pixmap_full.scaled(
+                self._POPUP_SIZE, self._POPUP_SIZE,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            popup.setPixmap(scaled)
+            popup.setStyleSheet(
+                "QLabel { background: #0d1117; border: 1px solid #30363d; padding: 4px; }"
+            )
+            popup.adjustSize()
+            # Position near cursor, shifted so it doesn't cover the cell
+            pos = QCursor.pos()
+            popup.move(pos.x() + 16, pos.y() + 16)
+            popup.show()
+            self._popup = popup
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        if self._popup is not None:
+            self._popup.close()
+            self._popup = None
+        super().leaveEvent(event)
 
 
 class _NumericItem(QTableWidgetItem):
@@ -128,7 +186,7 @@ class _ScoreWorker(QThread):
 class SubframeDialog(QDialog):
     """Dialog for scoring and selecting subframes with thumbnail previews."""
 
-    accepted_frames = pyqtSignal(list)  # list[str] of accepted file paths
+    accepted_frames = pyqtSignal(list, int)  # list[str] of accepted paths, total n_paths
     scores_ready = pyqtSignal(list)     # list[SubframeScore] — all scored frames
 
     # Column indices
@@ -252,6 +310,12 @@ class SubframeDialog(QDialog):
         load_dir_btn.setToolTip("Load all FITS files from a folder")
         load_dir_btn.clicked.connect(self._load_folder)
         btn_row.addWidget(load_dir_btn)
+
+        self._clear_all_btn = QPushButton("Clear All")
+        self._clear_all_btn.setToolTip("Remove all loaded frames and reset the table")
+        self._clear_all_btn.setEnabled(False)
+        self._clear_all_btn.clicked.connect(self._clear_all_frames)
+        btn_row.addWidget(self._clear_all_btn)
 
         self._score_btn = QPushButton("Score All Frames")
         self._score_btn.setEnabled(False)
@@ -440,11 +504,22 @@ class SubframeDialog(QDialog):
         if paths:
             self._set_paths(paths)
 
+    def _clear_all_frames(self):
+        self._paths = []
+        self._scores = []
+        self._manual_overrides.clear()
+        self._table.setRowCount(0)
+        self._score_btn.setEnabled(False)
+        self._clear_all_btn.setEnabled(False)
+        self._frame_count_label.setText("No frames loaded")
+        self._summary_label.setText("")
+
     def _set_paths(self, paths: list[str]):
         self._paths = paths
         self._scores = []
         self._manual_overrides.clear()
         self._score_btn.setEnabled(True)
+        self._clear_all_btn.setEnabled(True)
         self._summary_label.setText("")
         n = len(paths)
         self._frame_count_label.setText(f"{n} frame{'s' if n != 1 else ''} loaded")
@@ -453,9 +528,8 @@ class SubframeDialog(QDialog):
         for row, path in enumerate(paths):
             ph = QPixmap(_THUMB_SIZE, _THUMB_SIZE)
             ph.fill(QColor(30, 30, 30))
-            lbl = QLabel()
+            lbl = _ThumbLabel()
             lbl.setPixmap(ph)
-            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._table.setCellWidget(row, self._COL_THUMB, lbl)
             name_item = QTableWidgetItem(Path(path).name)
             name_item.setForeground(QColor(160, 160, 160))
@@ -524,10 +598,15 @@ class SubframeDialog(QDialog):
     def _on_thumbnail(self, row: int, pix: QPixmap):
         if row >= self._table.rowCount():
             return
-        label = QLabel()
-        label.setPixmap(pix)
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._table.setCellWidget(row, self._COL_THUMB, label)
+        existing = self._table.cellWidget(row, self._COL_THUMB)
+        if isinstance(existing, _ThumbLabel):
+            existing.setPixmap(pix)
+            existing.set_full_pixmap(pix)
+        else:
+            label = _ThumbLabel()
+            label.setPixmap(pix)
+            label.set_full_pixmap(pix)
+            self._table.setCellWidget(row, self._COL_THUMB, label)
 
     def _on_scored(self, scores: list[SubframeScore]):
         self.scores_ready.emit(scores)
@@ -637,5 +716,5 @@ class SubframeDialog(QDialog):
         accepted_paths = self._current_accepted_paths()
         accepted = [s.file_path for s in self._scores if s.file_path in accepted_paths]
         if accepted:
-            self.accepted_frames.emit(accepted)
+            self.accepted_frames.emit(accepted, len(self._paths))
             self.accept()

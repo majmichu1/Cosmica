@@ -215,15 +215,30 @@ def _rl_channel(
             estimate = estimate * correction
             estimate = torch.clamp(estimate, 0, 1)
 
-    # Deringing: blend edges with original to reduce ringing artifacts
+    # Deringing: detect pixels where RL introduced oscillations (undershoots/overshoots
+    # relative to the local neighborhood of the original) and blend them back.
     with torch.no_grad():
         if params.deringing:
-            diff = estimate - t_img
-            dy = torch.diff(diff, dim=0, prepend=diff[:1, :])
-            dx = torch.diff(diff, dim=1, prepend=diff[:, :1])
-            edge_strength = torch.sqrt(dx**2 + dy**2)
-            edge_strength = edge_strength / (edge_strength.max() + 1e-10)
-            blend = torch.clamp(edge_strength * params.deringing_amount * 3, 0, 1)
+            import torch.nn.functional as F  # noqa: PLC0415
+
+            # Local neighborhood max/min of original captures the expected signal range
+            ks = 9
+            pad = ks // 2
+            orig_4d = t_img.unsqueeze(0).unsqueeze(0)
+            local_max = F.max_pool2d(orig_4d, kernel_size=ks, stride=1, padding=pad).squeeze()
+            local_min = -F.max_pool2d(-orig_4d, kernel_size=ks, stride=1, padding=pad).squeeze()
+
+            # Where result overshoots or undershoots the original neighborhood → ringing
+            overshoot = torch.clamp(estimate - local_max, 0, 1)
+            undershoot = torch.clamp(local_min - estimate, 0, 1)
+            artifact_mask = torch.clamp(overshoot + undershoot, 0, 1)
+
+            # Dilate mask so blending covers the full ring width, not just its tip
+            artifact_mask = F.max_pool2d(
+                artifact_mask.unsqueeze(0).unsqueeze(0), kernel_size=7, stride=1, padding=3
+            ).squeeze()
+
+            blend = artifact_mask * params.deringing_amount
             estimate = estimate * (1 - blend) + t_img * blend
 
     result = estimate.cpu().numpy() if estimate.device.type != "cpu" else estimate.numpy()

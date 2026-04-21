@@ -9,11 +9,11 @@ block_cipher = None
 torch_datas = collect_data_files('torch', include_py_files=False)
 # Collect astropy data
 astropy_datas = collect_data_files('astropy')
-# App resources and bundled model
+# App resources and bundled model — paths are relative to spec file location
 extra_datas = [
-    ('cosmica/resources', 'cosmica/resources'),
-    ('cosmica/ai/models/cosmica_denoise_v1.pt', 'cosmica/ai/models'),
-    ('cosmica/ai/models', 'cosmica/ai/models'),
+    (str(Path('cosmica') / 'resources'), str(Path('cosmica') / 'resources')),
+    (str(Path('cosmica') / 'ai' / 'models' / 'cosmica_denoise_v1.pt'),
+     str(Path('cosmica') / 'ai' / 'models')),
 ]
 
 hidden_imports = [

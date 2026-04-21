@@ -27,7 +27,10 @@ def _noop_progress(fraction: float, message: str) -> None:
     pass
 
 
-# Base URL for model downloads (placeholder — set to actual CDN in production)
+# Directory where bundled models ship with the package
+_BUNDLED_MODELS_DIR = Path(__file__).parent / "models"
+
+# Base URL for model downloads (used for large models not bundled in the package)
 MODEL_CDN_BASE = "https://models.cosmica.app/v1"
 
 
@@ -52,11 +55,11 @@ class ModelInfo:
 MODEL_REGISTRY: dict[ModelType, ModelInfo] = {
     ModelType.DENOISE: ModelInfo(
         model_type=ModelType.DENOISE,
-        filename="cosmica_denoise_n2s_v1.pt",
+        filename="cosmica_denoise_v1.pt",
         version="1.0.0",
         sha256="0c357c0309bdfbcbf1e52d74167de1331b3d4c433ca542d4b1aebcf4d0355b9a",
         size_bytes=7749069,
-        description="Noise2Self U-Net denoiser for astronomical images",
+        description="Cosmica AI Denoiser v1 — Noise2Self U-Net for astronomical images",
     ),
     ModelType.SHARPEN: ModelInfo(
         model_type=ModelType.SHARPEN,
@@ -91,10 +94,16 @@ class ModelManager:
         return self._models_dir
 
     def get_model_path(self, model_type: ModelType) -> Path:
-        """Get the local path for a model file."""
+        """Get the local path for a model file.
+
+        Checks the bundled package models first, then the user cache dir.
+        """
         info = MODEL_REGISTRY.get(model_type)
         if info is None:
             raise ValueError(f"Unknown model type: {model_type}")
+        bundled = _BUNDLED_MODELS_DIR / info.filename
+        if bundled.exists():
+            return bundled
         return self._models_dir / info.filename
 
     def get_info(self, model_type: ModelType) -> ModelInfo | None:
@@ -103,22 +112,17 @@ class ModelManager:
 
     def get_cache_path(self, model_type: ModelType) -> Path | None:
         """Get the local path to a cached model, or None if not found."""
-        # Check registry path first
         path = self.get_model_path(model_type)
         if path.exists():
             return path
         return None
 
     def is_available(self, model_type: ModelType) -> bool:
-        """Check if a model is downloaded and ready to use."""
-        # Check model in managed directory
-        path = self.get_model_path(model_type)
-        if path.exists():
-            return True
-        return False
+        """Check if a model is available (bundled or downloaded)."""
+        return self.get_model_path(model_type).exists()
 
     def needs_download(self, model_type: ModelType) -> bool:
-        """Check if a model needs to be downloaded or updated."""
+        """Check if a model needs to be downloaded."""
         return not self.is_available(model_type)
 
     def download_model(

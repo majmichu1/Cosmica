@@ -49,8 +49,10 @@ htmlcov/
 license_cache.json
 credentials.json
 
-# AI models (too large for git)
-cosmica/ai/models/*.pt
+# AI models — large training checkpoints excluded, bundled release models tracked
+cosmica/ai/models/checkpoint_*.pt
+cosmica/ai/models/best_n2s_model.pt
+cosmica/ai/models/cosmica_denoise_n2s_v1.pt
 cosmica/ai/models/*.pth
 cosmica/ai/models/*.onnx
 cosmica/ai/training_data/*.dat

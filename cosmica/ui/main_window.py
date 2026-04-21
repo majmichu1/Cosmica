@@ -1645,7 +1645,9 @@ class MainWindow(QMainWindow):
         geometric=True for ops that only change image extent (crop/rotate/flip/resize):
         those should re-stretch from the result's own statistics, not the pre-op reference.
         """
-        self._on_preview_cancelled()    # clear any live split preview before replacing image
+        # If a live preview is running, keep it alive and re-trigger after update
+        pending_preview = self._pending_preview_tool
+
         self._canvas.capture_before()   # save current render for Before/After compare
         before = self._current_image
         # For pixel-value operations, anchor the display stretch to the pre-op image so
@@ -1664,6 +1666,12 @@ class MainWindow(QMainWindow):
         self._display_image(image, display_ref=display_ref)
         self._log_panel.log(message, "success")
         self._update_image_status()
+
+        if pending_preview is not None:
+            # Re-run preview on the newly applied image (updates right side of split)
+            self._preview_timer.start()
+        else:
+            self._on_preview_cancelled()
 
     def _update_image_status(self):
         """Refresh the status bar image info labels."""

@@ -1209,10 +1209,11 @@ class ToolsPanel(QWidget):
         self._ht_midtone_slider.setValue(0.5)
         self._ht_white_spin.setValue(1.0)
 
-    def get_background_params(self) -> BackgroundParams:
+    def get_background_params(self, manual_points: list | None = None) -> BackgroundParams:
         return BackgroundParams(
             grid_size=int(self._bg_grid_spin.value()),
-            poly_order=int(self._bg_order_spin.value()),
+            polynomial_order=int(self._bg_order_spin.value()),
+            manual_points=manual_points or [],
         )
 
     def get_background_neutralization_params(self) -> BackgroundNeutralizationParams:
@@ -1246,8 +1247,7 @@ class ToolsPanel(QWidget):
         return AIDenoiseParams(
             strength=self._ai_denoise_strength.value(),
             tile_size=tile_map.get(self._ai_tile_combo.currentText(), 256),
-            protect_stars=self._ai_star_protect.isChecked(),
-            tiled=self._ai_tiled_check.isChecked(),
+            protect_stars=0.8 if self._ai_star_protect.isChecked() else 0.0,
         )
 
     def get_deconvolution_params(self) -> "DeconvolutionParams | SpatialDeconvParams":
@@ -1272,11 +1272,19 @@ class ToolsPanel(QWidget):
         self._deconv_psf_spin.setValue(round(fwhm, 1))
 
     def get_denoise_params(self) -> DenoiseParams:
+        from cosmica.core.denoise import DenoiseMethod
+        method_map = {
+            "NLM (Non-Local Means)": DenoiseMethod.NLM,
+            "Wavelet Denoise": DenoiseMethod.WAVELET,
+            "TGV Denoise": DenoiseMethod.WAVELET,
+            "Median Filter": DenoiseMethod.WAVELET,
+        }
+        method = method_map.get(self._denoise_method_combo.currentText(), DenoiseMethod.WAVELET)
         return DenoiseParams(
-            method=self._denoise_method_combo.currentText(),
-            amount=self._denoise_amount.value(),
-            luminance=self._denoise_lum.value(),
-            chrominance=self._denoise_chrom.value(),
+            method=method,
+            strength=self._denoise_amount.value(),
+            detail_preservation=self._denoise_lum.value(),
+            chrominance_only=(self._denoise_chrom.value() > 0.5),
         )
 
     def get_star_reduction_params(self) -> StarReductionParams:
@@ -1326,9 +1334,11 @@ class ToolsPanel(QWidget):
         )
 
     def get_wavelet_params(self) -> WaveletParams:
+        n = int(self._wavelet_layers.value())
+        weights = [s.value() for s in self._wavelet_layer_sliders[:n]]
         return WaveletParams(
-            n_layers=int(self._wavelet_layers.value()),
-            layer_amounts=[s.value() for s in self._wavelet_layer_sliders],
+            n_scales=n,
+            scale_weights=weights,
         )
 
     def get_crop_params(self) -> CropParams:

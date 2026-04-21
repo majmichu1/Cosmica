@@ -262,28 +262,28 @@ class ImageCanvas(QWidget):
         )
         src = QRectF(0, 0, pw, ph)
 
-        if self._view_mode == "before" and self._pixmap_before is not None:
-            bw, bh = self._pixmap_before.width(), self._pixmap_before.height()
-            painter.drawPixmap(dst, self._pixmap_before, QRectF(0, 0, bw, bh))
-        elif self._view_mode == "split" and self._pixmap_before is not None:
-            split_x = dst.left() + dst.width() * self._split_position
-            painter.setClipRect(QRectF(dst.left(), dst.top(), split_x - dst.left(), dst.height()))
-            bw, bh = self._pixmap_before.width(), self._pixmap_before.height()
-            painter.drawPixmap(dst, self._pixmap_before, QRectF(0, 0, bw, bh))
-            painter.setClipRect(QRectF(split_x, dst.top(), dst.right() - split_x, dst.height()))
-            painter.drawPixmap(dst, self._pixmap, src)
-            painter.setClipping(False)
-            painter.setPen(QPen(Qt.GlobalColor.white, 2))
-            painter.drawLine(QPointF(split_x, dst.top()), QPointF(split_x, dst.bottom()))
-        elif self._split_mode and self._pixmap_after is not None:
-            # Stretch-preview split: pixmap=before, pixmap_after=after
+        if self._pixmap_after is not None:
+            # Live tool preview: current image left, preview result right (highest priority)
             split_x = dst.left() + dst.width() * self._split_position
             painter.setClipRect(QRectF(dst.left(), dst.top(), split_x - dst.left(), dst.height()))
             painter.drawPixmap(dst, self._pixmap, src)
             aw, ah = self._pixmap_after.width(), self._pixmap_after.height()
-            src_after = QRectF(0, 0, aw, ah)
             painter.setClipRect(QRectF(split_x, dst.top(), dst.right() - split_x, dst.height()))
-            painter.drawPixmap(dst, self._pixmap_after, src_after)
+            painter.drawPixmap(dst, self._pixmap_after, QRectF(0, 0, aw, ah))
+            painter.setClipping(False)
+            painter.setPen(QPen(Qt.GlobalColor.white, 2))
+            painter.drawLine(QPointF(split_x, dst.top()), QPointF(split_x, dst.bottom()))
+        elif self._view_mode == "before" and self._pixmap_before is not None:
+            bw, bh = self._pixmap_before.width(), self._pixmap_before.height()
+            painter.drawPixmap(dst, self._pixmap_before, QRectF(0, 0, bw, bh))
+        elif self._view_mode == "split" and self._pixmap_before is not None:
+            # Before/After toolbar split: before left, current right
+            split_x = dst.left() + dst.width() * self._split_position
+            painter.setClipRect(QRectF(dst.left(), dst.top(), split_x - dst.left(), dst.height()))
+            bw, bh = self._pixmap_before.width(), self._pixmap_before.height()
+            painter.drawPixmap(dst, self._pixmap_before, QRectF(0, 0, bw, bh))
+            painter.setClipRect(QRectF(split_x, dst.top(), dst.right() - split_x, dst.height()))
+            painter.drawPixmap(dst, self._pixmap, src)
             painter.setClipping(False)
             painter.setPen(QPen(Qt.GlobalColor.white, 2))
             painter.drawLine(QPointF(split_x, dst.top()), QPointF(split_x, dst.bottom()))

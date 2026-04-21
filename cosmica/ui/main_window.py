@@ -2687,6 +2687,9 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def _on_preview_cancelled(self):
         """Clear the split preview and restore normal view."""
+        self._pending_preview_tool = None
+        self._preview_timer.stop()
+        self._stretch_preview_timer.stop()
         self._canvas.set_view_mode("after")
         self._canvas.clear_after_image()
         self._preview_indicator.setText("")
@@ -2895,10 +2898,10 @@ class MainWindow(QMainWindow):
             if result is None or result.n_stars_used == 0:
                 self._log_panel.log("PSF measurement failed: no stars found", "warning")
                 return
-            self._tools_panel.set_psf_measurement(
-                result.fwhm, result.ellipticity, result.n_stars_used,
-                fwhm_x=result.fwhm_x, fwhm_y=result.fwhm_y,
-                theta=result.theta, fwhm_std=result.fwhm_std,
+            self._tools_panel.set_psf_result(
+                result.fwhm, result.fwhm_x, result.fwhm_y,
+                result.ellipticity, result.theta,
+                result.n_stars_used, result.fwhm_std,
             )
             self._tools_panel.set_psf_fwhm(result.fwhm)
             self._log_panel.log(

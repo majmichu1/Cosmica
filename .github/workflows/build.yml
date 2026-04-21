@@ -1,0 +1,140 @@
+name: Build Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Install dependencies
+        run: poetry install --without dev
+
+      - name: Install PyInstaller
+        run: poetry run pip install pyinstaller
+
+      - name: Build Windows exe
+        run: poetry run pyinstaller cosmica.spec --clean --noconfirm
+
+      - name: Zip dist folder
+        run: Compress-Archive -Path dist\Cosmica -DestinationPath Cosmica-windows-x64.zip
+        shell: pwsh
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Cosmica-windows-x64.zip
+
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1 libglib2.0-0 libxcb-xinerama0 \
+            libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 fuse
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Install dependencies
+        run: poetry install --without dev
+
+      - name: Install PyInstaller
+        run: poetry run pip install pyinstaller
+
+      - name: Build Linux binary
+        run: poetry run pyinstaller cosmica.spec --clean --noconfirm
+
+      - name: Create AppImage
+        run: |
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool-x86_64.AppImage
+
+          mkdir -p AppDir/usr/bin AppDir/usr/lib
+          cp -r dist/Cosmica/* AppDir/usr/bin/
+
+          cat > AppDir/cosmica.desktop << 'EOF'
+          [Desktop Entry]
+          Name=Cosmica
+          Exec=Cosmica
+          Icon=cosmica
+          Type=Application
+          Categories=Graphics;
+          EOF
+
+          cat > AppDir/AppRun << 'EOF'
+          #!/bin/bash
+          HERE="$(dirname "$(readlink -f "${0}")")"
+          exec "${HERE}/usr/bin/Cosmica" "$@"
+          EOF
+          chmod +x AppDir/AppRun
+
+          ARCH=x86_64 ./appimagetool-x86_64.AppImage AppDir Cosmica-linux-x86_64.AppImage
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Cosmica-linux-x86_64.AppImage
+
+  build-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Install dependencies
+        run: poetry install --without dev
+
+      - name: Install PyInstaller
+        run: poetry run pip install pyinstaller
+
+      - name: Build macOS app
+        run: poetry run pyinstaller cosmica.spec --clean --noconfirm
+
+      - name: Create DMG
+        run: |
+          brew install create-dmg
+          create-dmg \
+            --volname "Cosmica" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --app-drop-link 450 185 \
+            "Cosmica-macos-arm64.dmg" \
+            "dist/Cosmica.app"
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Cosmica-macos-arm64.dmg

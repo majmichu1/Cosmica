@@ -237,8 +237,8 @@ def warp_image_gpu(
     sy = 2.0 / (h - 1) if h > 1 else 1.0
     a = matrix
     norm_matrix = np.array([
-        [a[0, 0], a[0, 1] * sy / sx, a[0, 0] + a[0, 1] * sy / sx + a[0, 2] * sx - 1.0],
-        [a[1, 0] * sx / sy, a[1, 1], a[1, 0] * sx / sy + a[1, 1] + a[1, 2] * sy - 1.0],
+        [a[0, 0], a[0, 1] * sx / sy, a[0, 0] + a[0, 1] * sx / sy + a[0, 2] * sx - 1.0],
+        [a[1, 0] * sy / sx, a[1, 1], a[1, 0] * sy / sx + a[1, 1] + a[1, 2] * sy - 1.0],
     ], dtype=np.float32)
 
     theta = torch.from_numpy(norm_matrix).to(image.device).unsqueeze(0)  # [1, 2, 3]

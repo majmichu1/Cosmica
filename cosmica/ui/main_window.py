@@ -3577,19 +3577,21 @@ class MainWindow(QMainWindow):
             return
         params = self._tools_panel.get_color_calibration_params()
         self._log_panel.log("Running color calibration...", "info")
-        result = color_calibrate(self._current_image.data, params)
-        factors = result.correction_factors
-        self._update_current_image(
-            result.data,
-            f"Color calibration complete (R={factors[0]:.3f}, G={factors[1]:.3f}, B={factors[2]:.3f})",
-        )
-        if self._project:
-            self._project.add_history(
-                "Color Calibration",
-                {
-                    "factors": list(factors),
-                },
+        _p = params
+
+        def _work(data, progress=None):
+            return color_calibrate(data, _p)
+
+        def _done(result):
+            factors = result.correction_factors
+            self._update_current_image(
+                result.data,
+                f"Color calibration complete (R={factors[0]:.3f}, G={factors[1]:.3f}, B={factors[2]:.3f})",
             )
+            if self._project:
+                self._project.add_history("Color Calibration", {"factors": list(factors)})
+
+        self._start_worker(_work, self._current_image.data, on_done=_done)
 
     @pyqtSlot()
     def _on_run_pcc(self):
@@ -3765,16 +3767,19 @@ class MainWindow(QMainWindow):
 
         params = self._tools_panel.get_denoise_params()
         self._log_panel.log(f"Running noise reduction ({params.method.name})...", "info")
-        result = denoise(self._current_image.data, params)
-        self._update_current_image(result, f"Noise reduction complete ({params.method.name})")
-        if self._project:
-            self._project.add_history(
-                "Denoise",
-                {
-                    "method": params.method.name,
-                    "strength": params.strength,
-                },
-            )
+        _p = params
+
+        def _work(data, progress=None):
+            return denoise(data, _p)
+
+        def _done(result):
+            self._update_current_image(result, f"Noise reduction complete ({_p.method.name})")
+            if self._project:
+                self._project.add_history(
+                    "Denoise", {"method": _p.method.name, "strength": _p.strength}
+                )
+
+        self._start_worker(_work, self._current_image.data, on_done=_done)
 
     @pyqtSlot()
     def _on_run_star_reduction(self):
@@ -4008,24 +4013,23 @@ class MainWindow(QMainWindow):
             return
         params = self._tools_panel.get_morphology_params()
         self._log_panel.log(f"Running morphology ({params.operation.name})...", "info")
-        result = morphology_transform(self._current_image.data, params)
-        self._update_current_image(result, f"Morphology {params.operation.name} complete")
-        if self._project:
-            self._project.add_history(
-                "Morphology",
-                {
-                    "operation": params.operation.name,
-                    "kernel_size": params.kernel_size,
-                },
+        _p = params
+
+        def _work(data, progress=None):
+            return morphology_transform(data, _p)
+
+        def _done(result):
+            self._update_current_image(result, f"Morphology {_p.operation.name} complete")
+            if self._project:
+                self._project.add_history(
+                    "Morphology", {"operation": _p.operation.name, "kernel_size": _p.kernel_size}
+                )
+            self._macro_recorder.record_step(
+                "morphology",
+                {"operation": _p.operation.name, "kernel_size": _p.kernel_size, "iterations": _p.iterations},
             )
-        self._macro_recorder.record_step(
-            "morphology",
-            {
-                "operation": params.operation.name,
-                "kernel_size": params.kernel_size,
-                "iterations": params.iterations,
-            },
-        )
+
+        self._start_worker(_work, self._current_image.data, on_done=_done)
 
     def _show_hdr_dialog(self):
         from cosmica.ui.dialogs.hdr_dialog import HDRDialog

@@ -103,28 +103,12 @@ jobs:
         run: |
           wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
-
           mkdir -p AppDir/usr/bin
           cp -r dist/Cosmica/* AppDir/usr/bin/
-
           cp cosmica/resources/icons/*.png AppDir/cosmica.png 2>/dev/null || touch AppDir/cosmica.png
-
-          cat > AppDir/cosmica.desktop << 'DESKTOP'
-[Desktop Entry]
-Name=Cosmica
-Exec=Cosmica
-Icon=cosmica
-Type=Application
-Categories=Graphics;
-DESKTOP
-
-          cat > AppDir/AppRun << 'APPRUN'
-#!/bin/bash
-HERE="$(dirname "$(readlink -f "${0}")")"
-exec "${HERE}/usr/bin/Cosmica" "$@"
-APPRUN
+          printf '[Desktop Entry]\nName=Cosmica\nExec=Cosmica\nIcon=cosmica\nType=Application\nCategories=Graphics;\n' > AppDir/cosmica.desktop
+          printf '#!/bin/bash\nHERE="$(dirname "$(readlink -f "${0}")")"\nexec "${HERE}/usr/bin/Cosmica" "$@"\n' > AppDir/AppRun
           chmod +x AppDir/AppRun
-
           ARCH=x86_64 ./appimagetool-x86_64.AppImage --no-appstream AppDir Cosmica-x86_64.AppImage
 
       - name: Upload to Release

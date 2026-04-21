@@ -1,5 +1,8 @@
 """Cosmica - Professional Astrophotography Image Processing"""
 
+import os
+os.environ.setdefault('FLEXIBLAS', 'netlib')
+
 import sys
 
 

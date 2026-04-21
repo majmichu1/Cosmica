@@ -25,6 +25,8 @@ hidden_imports = [
     'torch.backends.cudnn', 'torch.backends.cuda',
     # numpy / scipy / astropy
     'numpy', 'scipy', 'scipy.ndimage', 'scipy.optimize', 'scipy.signal',
+    'scipy.special._cdflib',
+    'numpy.core._dtype_ctypes',
     'astropy', 'astropy.io.fits', 'astropy.wcs', 'astropy.stats',
     # image libs
     'cv2', 'PIL', 'PIL.Image', 'tifffile', 'rawpy',
@@ -48,10 +50,12 @@ a = Analysis(
     runtime_hooks=[],
     excludes=[
         'tkinter', 'matplotlib', 'notebook', 'IPython',
-        # CUDA binaries are huge and not needed in the build environment;
-        # the app detects and uses the user's local GPU at runtime via torch.
-        'torch.cuda._lazy_init', 'torch.backends.cuda',
-        'torch.backends.cudnn', 'torch.backends.mkldnn',
+        # Drop bundled NVIDIA libs (~6GB) — app uses system CUDA drivers at runtime
+        'nvidia', 'nvidia.cudnn', 'nvidia.cublas', 'nvidia.cuda_runtime',
+        'nvidia.cuda_nvrtc', 'nvidia.cuda_cupti', 'nvidia.cufft',
+        'nvidia.curand', 'nvidia.cusolver', 'nvidia.cusparse',
+        'nvidia.nccl', 'nvidia.nvtx', 'nvidia.nvjitlink',
+        'torch.cuda._lazy_init', 'torch.backends.mkldnn',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

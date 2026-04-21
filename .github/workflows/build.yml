@@ -55,3 +55,75 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: Cosmica-windows-x64.zip
+
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /usr/lib/jvm /opt/hostedtoolcache/CodeQL \
+            /usr/share/swift /usr/local/.ghcup
+          sudo docker image prune -af || true
+          df -h
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libgl1 libglib2.0-0 libxcb-xinerama0 libxkbcommon-x11-0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 fuse libflexiblas-dev
+
+      - name: Install CPU-only torch
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu --no-cache-dir
+
+      - name: Install Poetry
+        run: pip install --no-cache-dir poetry
+
+      - name: Install dependencies
+        run: poetry install --no-interaction
+
+      - name: Install PyInstaller
+        run: pip install --no-cache-dir pyinstaller
+
+      - name: Build Linux binary
+        run: pyinstaller cosmica.spec --clean --noconfirm
+
+      - name: Create AppImage
+        run: |
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool-x86_64.AppImage
+
+          mkdir -p AppDir/usr/bin
+          cp -r dist/Cosmica/* AppDir/usr/bin/
+
+          cat > AppDir/cosmica.desktop << 'DESKTOP'
+          [Desktop Entry]
+          Name=Cosmica
+          Exec=Cosmica
+          Icon=cosmica
+          Type=Application
+          Categories=Graphics;
+          DESKTOP
+
+          cat > AppDir/AppRun << 'APPRUN'
+          #!/bin/bash
+          HERE="$(dirname "$(readlink -f "${0}")")"
+          exec "${HERE}/usr/bin/Cosmica" "$@"
+          APPRUN
+          chmod +x AppDir/AppRun
+
+          ARCH=x86_64 ./appimagetool-x86_64.AppImage AppDir Cosmica-linux-x86_64.AppImage
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Cosmica-linux-x86_64.AppImage

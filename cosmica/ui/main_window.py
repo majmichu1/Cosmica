@@ -2601,16 +2601,23 @@ class MainWindow(QMainWindow):
     def _do_stretch_preview(self):
         if self._current_image is None:
             return
+        import numpy as np
         small, _scale = self._downscale_for_preview(self._current_image.data)
         params = self._tools_panel.get_stretch_params()
         stretched = auto_stretch(small, params)
         if stretched.size == 0:
             return
-        # auto_stretch output is already a final display-ready stretch;
-        # re-apply display stretch the same way _display_image does so the
-        # preview matches exactly what Apply would show.
-        tmp = ImageData(data=stretched, header={})
-        after_rgb = tmp.to_display(stretch=True)
+        # Mirror the Apply display path exactly:
+        #   Apply → auto_stretch_for_display_ref(stretched_result, before.data)
+        # Use current image (small) as the "before" reference — same as what Apply would use.
+        if stretched.ndim == 3:
+            after_hwc = np.transpose(stretched, (1, 2, 0))
+            ref_hwc   = np.transpose(small,     (1, 2, 0))
+        else:
+            after_hwc = np.stack([stretched, stretched, stretched], axis=-1)
+            ref_hwc   = np.stack([small,     small,     small],     axis=-1)
+        after_disp = auto_stretch_for_display_ref(after_hwc, ref_hwc)
+        after_rgb  = np.clip(after_disp * 255, 0, 255).astype(np.uint8)
         self._canvas.set_after_image(after_rgb)
         self._canvas.set_split_mode(True)
 
@@ -2664,23 +2671,15 @@ class MainWindow(QMainWindow):
         if result is None or result.size == 0:
             return
 
-        # Convert to HWC.
-        # Use the same stretch reference as the display: if the display was anchored to
-        # the pre-op image (display_ref != None), the preview must use that same reference
-        # so left/right brightness matches. Otherwise use the image itself.
-        stretch_ref = self._preview_stretch_ref_cache  # None → use small itself
+        # Convert to HWC. Always use small (current image) as the stretch reference
+        # so the preview reflects what the tool does to the current image — avoids
+        # black previews caused by stale bright refs from previous operations.
         if result.ndim == 2:
             after_hwc = np.stack([result, result, result], axis=-1)
-            if stretch_ref is not None:
-                ref_hwc = np.stack([stretch_ref, stretch_ref, stretch_ref], axis=-1) if stretch_ref.ndim == 2 else np.transpose(stretch_ref, (1, 2, 0))
-            else:
-                ref_hwc = np.stack([small, small, small], axis=-1)
+            ref_hwc = np.stack([small, small, small], axis=-1) if small.ndim == 2 else np.transpose(small, (1, 2, 0))
         else:
             after_hwc = np.transpose(result, (1, 2, 0))
-            if stretch_ref is not None:
-                ref_hwc = np.stack([stretch_ref, stretch_ref, stretch_ref], axis=-1) if stretch_ref.ndim == 2 else np.transpose(stretch_ref, (1, 2, 0))
-            else:
-                ref_hwc = np.transpose(small, (1, 2, 0))
+            ref_hwc = np.stack([small, small, small], axis=-1) if small.ndim == 2 else np.transpose(small, (1, 2, 0))
         after_disp = auto_stretch_for_display_ref(after_hwc, ref_hwc)
         after_rgb = np.clip(after_disp * 255, 0, 255).astype(np.uint8)
         self._canvas.set_after_image(after_rgb)

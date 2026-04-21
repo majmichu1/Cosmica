@@ -93,8 +93,8 @@ jobs:
       - name: Install dependencies
         run: poetry install --no-interaction
 
-      - name: Install PyInstaller
-        run: pip install --no-cache-dir pyinstaller
+      - name: Install PyInstaller and PyQt6
+        run: pip install --no-cache-dir pyinstaller PyQt6
 
       - name: Build Linux binary
         run: pyinstaller cosmica.spec --clean --noconfirm

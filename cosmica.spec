@@ -37,7 +37,7 @@ hidden_imports = [
     'cosmica.ai.models.unet',
     # misc
     'platformdirs', 'requests', 'packaging',
-] + collect_submodules('cosmica')
+] + collect_submodules('cosmica') + collect_submodules('PyQt6')
 
 a = Analysis(
     ['cosmica/__main__.py'],

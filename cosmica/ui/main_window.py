@@ -205,6 +205,7 @@ class _CosmicaLogo(QWidget):
     def __init__(self, size: int = 18, parent=None):
         super().__init__(parent)
         self.setFixedSize(size, size)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
     def paintEvent(self, event):
         from PyQt6.QtCore import QPointF, QRectF
@@ -384,6 +385,7 @@ class MainWindow(QMainWindow):
 
         # ── Left corner widget: logo + version badge ──────────────────────────
         left_corner = QWidget()
+        left_corner.setStyleSheet("background: transparent;")
         left_layout = QHBoxLayout(left_corner)
         left_layout.setContentsMargins(8, 0, 8, 0)
         left_layout.setSpacing(6)
@@ -2559,10 +2561,7 @@ class MainWindow(QMainWindow):
         if self._current_image is None:
             return
         if not self._tools_panel.split_preview_enabled:
-            self._stretch_preview_timer.stop()
-            self._canvas.set_split_mode(False)
-            self._canvas.clear_after_image()
-            self._preview_indicator.setText("")
+            self._on_preview_cancelled()
             return
         self._preview_indicator.setText("● Live Preview: Auto Stretch")
         self._stretch_preview_timer.start()
@@ -2890,9 +2889,18 @@ class MainWindow(QMainWindow):
         from cosmica.core.psf import measure_psf
 
         self._log_panel.log("Measuring PSF from stars…", "info")
+        _cutout = int(self._tools_panel._psf_cutout_spin.value())
+        _force_cpu = self._tools_panel._psf_force_cpu.isChecked()
 
         def _psf_work(data, progress=None):
-            return measure_psf(data)
+            # Use lower min_flux so measurement works on stretched images too
+            return measure_psf(
+                data,
+                cutout_radius=_cutout,
+                force_cpu=_force_cpu,
+                min_flux=0.05,
+                max_flux=0.99,
+            )
 
         def _on_psf_done(result):
             if result is None or result.n_stars_used == 0:

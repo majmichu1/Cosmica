@@ -160,17 +160,19 @@ def measure_psf(
     # scipy.optimize.curve_fit uses Fortran MINPACK (iterative, complex control flow,
     # tiny ~25×25 px patches) which is already near-optimal on CPU and can't be
     # efficiently batched on GPU.
+    # Use 3-sigma threshold so PSF measurement works on both linear and
+    # stretched images (5-sigma misses stars when background is lifted by stretch)
     if not force_cpu:
         dm = get_device_manager()
         try:
             with torch.no_grad():
                 t_gray = torch.from_numpy(gray).to(dm.device)
-                stars_list = detect_stars_gpu(t_gray, max_stars=max_stars * 3, threshold_sigma=5.0)
+                stars_list = detect_stars_gpu(t_gray, max_stars=max_stars * 3, threshold_sigma=3.0)
         except Exception:
-            sf = detect_stars(gray, max_stars=max_stars * 3, sigma_threshold=5.0)
+            sf = detect_stars(gray, max_stars=max_stars * 3, sigma_threshold=3.0)
             stars_list = sf.stars
     else:
-        sf = detect_stars(gray, max_stars=max_stars * 3, sigma_threshold=5.0)
+        sf = detect_stars(gray, max_stars=max_stars * 3, sigma_threshold=3.0)
         stars_list = sf.stars
 
     # Filter to bright but unsaturated stars

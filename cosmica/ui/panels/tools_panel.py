@@ -749,7 +749,7 @@ class ToolsPanel(QWidget):
             "Method", ["Richardson-Lucy", "Blind (Spatial)", "Wiener"]
         )
         self._deconv_psf_spin   = dec.add_spin("PSF FWHM (px)", 0.5, 20.0, 3.0, 0.1, 1)
-        self._deconv_iter       = dec.add_slider("Iterations", 50, 5, 200, 1, 0)
+        self._deconv_iter       = dec.add_slider("Iterations", 30, 1, 200, 1, 0)
         self._deconv_reg        = dec.add_spin("Regularization", 0.0, 0.1, 0.001, 0.001, 4)
         self._deconv_deringing  = dec.add_check("Deringing protection", True)
         self._deconv_dering_amt = dec.add_slider("Deringing amount", 0.5, 0.0, 1.0, 0.05, 2)

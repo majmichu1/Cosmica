@@ -46,7 +46,13 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['tkinter', 'matplotlib', 'notebook', 'IPython'],
+    excludes=[
+        'tkinter', 'matplotlib', 'notebook', 'IPython',
+        # CUDA binaries are huge and not needed in the build environment;
+        # the app detects and uses the user's local GPU at runtime via torch.
+        'torch.cuda._lazy_init', 'torch.backends.cuda',
+        'torch.backends.cudnn', 'torch.backends.mkldnn',
+    ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,

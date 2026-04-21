@@ -8,11 +8,26 @@ on:
 permissions:
   contents: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PYTHONOPTIMIZE: 1
+
 jobs:
   build-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Free disk space
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force "C:\Program Files\dotnet" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\Program Files\Microsoft SQL Server" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\Program Files (x86)\Microsoft SDKs" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "C:\Android" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "$env:USERPROFILE\.nuget" -ErrorAction SilentlyContinue
+          Write-Host "Disk space after cleanup:"
+          Get-PSDrive C | Select-Object Used, Free
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -20,20 +35,26 @@ jobs:
           python-version: '3.11'
 
       - name: Install Poetry
-        run: pip install poetry
+        run: pip install --no-cache-dir poetry
 
-      - name: Install dependencies
-        run: poetry install --without dev
+      - name: Install CPU-only torch first (saves ~3GB vs CUDA wheel)
+        run: |
+          pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install dependencies (skip torch from poetry, already installed)
+        run: poetry install --without dev --no-interaction
+        env:
+          POETRY_INSTALLER_NO_BINARY: torch
 
       - name: Install PyInstaller
-        run: poetry run pip install pyinstaller
+        run: pip install --no-cache-dir pyinstaller
 
       - name: Build Windows exe
-        run: poetry run pyinstaller cosmica.spec --clean --noconfirm
+        run: pyinstaller cosmica.spec --clean --noconfirm
 
       - name: Zip dist folder
-        run: Compress-Archive -Path dist\Cosmica -DestinationPath Cosmica-windows-x64.zip
         shell: pwsh
+        run: Compress-Archive -Path dist\Cosmica -DestinationPath Cosmica-windows-x64.zip
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
@@ -45,6 +66,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /usr/lib/jvm /opt/hostedtoolcache/CodeQL \
+            /usr/share/swift /usr/local/.ghcup
+          sudo docker image prune -af || true
+          df -h
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -52,45 +81,52 @@ jobs:
 
       - name: Install system deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libgl1 libglib2.0-0 libxcb-xinerama0 \
-            libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
-            libxcb-randr0 libxcb-render-util0 libxcb-shape0 fuse
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libgl1 libglib2.0-0 libxcb-xinerama0 libxkbcommon-x11-0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 fuse
 
       - name: Install Poetry
-        run: pip install poetry
+        run: pip install --no-cache-dir poetry
+
+      - name: Install CPU-only torch first (saves ~3GB vs CUDA wheel)
+        run: |
+          pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
       - name: Install dependencies
-        run: poetry install --without dev
+        run: poetry install --without dev --no-interaction
+        env:
+          POETRY_INSTALLER_NO_BINARY: torch
 
       - name: Install PyInstaller
-        run: poetry run pip install pyinstaller
+        run: pip install --no-cache-dir pyinstaller
 
       - name: Build Linux binary
-        run: poetry run pyinstaller cosmica.spec --clean --noconfirm
+        run: pyinstaller cosmica.spec --clean --noconfirm
 
       - name: Create AppImage
         run: |
           wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
 
-          mkdir -p AppDir/usr/bin AppDir/usr/lib
+          mkdir -p AppDir/usr/bin
           cp -r dist/Cosmica/* AppDir/usr/bin/
 
-          cat > AppDir/cosmica.desktop << 'EOF'
+          cat > AppDir/cosmica.desktop << 'DESKTOP'
           [Desktop Entry]
           Name=Cosmica
           Exec=Cosmica
           Icon=cosmica
           Type=Application
           Categories=Graphics;
-          EOF
+          DESKTOP
 
-          cat > AppDir/AppRun << 'EOF'
+          cat > AppDir/AppRun << 'APPRUN'
           #!/bin/bash
           HERE="$(dirname "$(readlink -f "${0}")")"
           exec "${HERE}/usr/bin/Cosmica" "$@"
-          EOF
+          APPRUN
           chmod +x AppDir/AppRun
 
           ARCH=x86_64 ./appimagetool-x86_64.AppImage AppDir Cosmica-linux-x86_64.AppImage
@@ -111,16 +147,22 @@ jobs:
           python-version: '3.11'
 
       - name: Install Poetry
-        run: pip install poetry
+        run: pip install --no-cache-dir poetry
+
+      - name: Install CPU-only torch first (saves ~3GB vs CUDA wheel)
+        run: |
+          pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
       - name: Install dependencies
-        run: poetry install --without dev
+        run: poetry install --without dev --no-interaction
+        env:
+          POETRY_INSTALLER_NO_BINARY: torch
 
       - name: Install PyInstaller
-        run: poetry run pip install pyinstaller
+        run: pip install --no-cache-dir pyinstaller
 
       - name: Build macOS app
-        run: poetry run pyinstaller cosmica.spec --clean --noconfirm
+        run: pyinstaller cosmica.spec --clean --noconfirm
 
       - name: Create DMG
         run: |

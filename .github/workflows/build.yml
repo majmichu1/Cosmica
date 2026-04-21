@@ -105,23 +105,39 @@ jobs:
           mkdir -p AppDir/usr/bin
           cp -r dist/Cosmica/* AppDir/usr/bin/
 
+          # Icon: use existing SVG converted to PNG, or generate a 256x256 placeholder
+          if command -v convert &>/dev/null && ls cosmica/resources/icons/*.svg &>/dev/null 2>&1; then
+            convert -background none -resize 256x256 cosmica/resources/icons/settings.svg AppDir/cosmica.png 2>/dev/null || true
+          fi
+          if [ ! -f AppDir/cosmica.png ]; then
+            sudo apt-get install -y --no-install-recommends python3-pil 2>/dev/null || true
+            python3 -c "
+from PIL import Image, ImageDraw
+img = Image.new('RGBA', (256, 256), (15, 20, 35, 255))
+d = ImageDraw.Draw(img)
+d.ellipse([40, 40, 216, 216], outline=(100, 160, 255, 255), width=8)
+d.ellipse([100, 100, 156, 156], fill=(100, 160, 255, 255))
+img.save('AppDir/cosmica.png')
+" 2>/dev/null || touch AppDir/cosmica.png
+          fi
+
           cat > AppDir/cosmica.desktop << 'DESKTOP'
-          [Desktop Entry]
-          Name=Cosmica
-          Exec=Cosmica
-          Icon=cosmica
-          Type=Application
-          Categories=Graphics;
-          DESKTOP
+[Desktop Entry]
+Name=Cosmica
+Exec=Cosmica
+Icon=cosmica
+Type=Application
+Categories=Graphics;
+DESKTOP
 
           cat > AppDir/AppRun << 'APPRUN'
-          #!/bin/bash
-          HERE="$(dirname "$(readlink -f "${0}")")"
-          exec "${HERE}/usr/bin/Cosmica" "$@"
-          APPRUN
+#!/bin/bash
+HERE="$(dirname "$(readlink -f "${0}")")"
+exec "${HERE}/usr/bin/Cosmica" "$@"
+APPRUN
           chmod +x AppDir/AppRun
 
-          ARCH=x86_64 ./appimagetool-x86_64.AppImage AppDir Cosmica-linux-x86_64.AppImage
+          ARCH=x86_64 ./appimagetool-x86_64.AppImage --no-appstream AppDir Cosmica-linux-x86_64.AppImage
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2

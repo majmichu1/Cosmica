@@ -20,9 +20,11 @@ hidden_imports = [
     # PyQt6
     'PyQt6.QtCore', 'PyQt6.QtGui', 'PyQt6.QtWidgets', 'PyQt6.QtOpenGL',
     'PyQt6.QtOpenGLWidgets', 'PyQt6.QtPrintSupport',
-    # PyTorch
+    # PyTorch — all backends must be present; torch/__init__.py imports them unconditionally
     'torch', 'torch.nn', 'torch.nn.functional', 'torch.cuda',
-    'torch.backends.cudnn', 'torch.backends.cuda',
+    'torch.backends', 'torch.backends.cuda', 'torch.backends.cudnn',
+    'torch.backends.mkldnn', 'torch.backends.mkl', 'torch.backends.openmp',
+    'torch.cuda._lazy_init',
     # numpy / scipy / astropy
     'numpy', 'scipy', 'scipy.ndimage', 'scipy.optimize', 'scipy.signal',
     'scipy.special._cdflib',
@@ -55,7 +57,8 @@ a = Analysis(
         'nvidia.cuda_nvrtc', 'nvidia.cuda_cupti', 'nvidia.cufft',
         'nvidia.curand', 'nvidia.cusolver', 'nvidia.cusparse',
         'nvidia.nccl', 'nvidia.nvtx', 'nvidia.nvjitlink',
-        'torch.cuda._lazy_init', 'torch.backends.mkldnn',
+        # torch.backends.mkldnn and torch.cuda._lazy_init must NOT be excluded —
+        # torch/__init__.py imports them unconditionally at startup.
 
         # --- AGRESYWNE ODCHUDZANIE LINUKSA (< 2GB limit) ---
         'PyQt5', 'PySide2', 'PySide6', 'wx',  # Nieużywane frameworki UI

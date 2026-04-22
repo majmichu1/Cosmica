@@ -27,7 +27,9 @@ Cosmica is a professional astrophotography image processing application built as
 
 > **Note:** AI models are currently in training. The first release ships with traditional algorithm fallbacks. AI features will be added in a future update after testing.
 
-- **AI Denoise** — Noise2Self trained on real astro images (model training in progress)
+  **AI Denoise** has been added in the newest version and in the **first release**
+
+- **AI Denoise** — Noise2Self trained on real astro images (model ready)
 - **AI Sharpen** — Neural deconvolution (architecture ready, training pending)
 - **Star Removal** — StarNet-like starless image generation (planned)
 

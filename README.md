@@ -15,7 +15,7 @@
 
 
 ## 📥 Download (Alpha Release)
-You don't need to install Python to use Cosmica. Download the standalone, ready-to-use versions:
+You don't need to install Python to use Cosmica. Download the standalone, ready-to-use versions (The AppImage is a portable **CPU-only** version. For full NVIDIA GPU acceleration, please install via Poetry):
 
 * **Windows:** [Download .exe (v0.1.9-alpha)](https://github.com/majmichu1/Cosmica/releases/latest)
 * **Linux:** [Download .AppImage (v0.1.9-alpha)](https://github.com/majmichu1/Cosmica/releases/latest)

@@ -12,7 +12,7 @@ Please report security vulnerabilities by opening a private discussion or emaili
 
 **Do NOT open a public issue** for security vulnerabilities.
 
-We will respond within 48 hours and work with you to resolve the issue.
+We will respond ASP and work with you to resolve the issue.
 
 ## Security Considerations
 

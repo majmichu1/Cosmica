@@ -56,6 +56,14 @@ a = Analysis(
         'nvidia.curand', 'nvidia.cusolver', 'nvidia.cusparse',
         'nvidia.nccl', 'nvidia.nvtx', 'nvidia.nvjitlink',
         'torch.cuda._lazy_init', 'torch.backends.mkldnn',
+
+        # --- AGRESYWNE ODCHUDZANIE LINUKSA (< 2GB limit) ---
+        'PyQt5', 'PySide2', 'PySide6', 'wx',  # Nieużywane frameworki UI
+        'scipy.datasets', # Zbędne gigabajty danych testowych
+        'botocore', 'boto3', 'awscli', # Śmieci z chmury
+        'triton', # Potężny kompilator GPU, na Linuksie potrafi ważyć setki MB
+        'transformers', 'huggingface_hub', 'tensorboard', # Narzędzia ML, których nie używasz wprost
+        'sympy', 'networkx', # Często dociągane przez torcha, a niepotrzebne przy prostej inferencji
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

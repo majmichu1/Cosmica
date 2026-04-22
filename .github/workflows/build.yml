@@ -32,9 +32,6 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install CPU-only torch
-        run: pip install torch --index-url https://download.pytorch.org/whl/cpu --no-cache-dir
-
       - name: Install Poetry
         run: pip install --no-cache-dir poetry
 
@@ -42,6 +39,9 @@ jobs:
         run: |
           poetry config virtualenvs.create false
           poetry install --no-interaction
+
+      - name: DESTROY FAT PYTORCH AND FORCE CPU (CRITICAL FOR SIZE)
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu --force-reinstall --no-cache-dir
 
       - name: Install PyInstaller
         run: pip install --no-cache-dir pyinstaller
@@ -86,9 +86,6 @@ jobs:
             libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
             libxcb-render-util0 libxcb-shape0 fuse libopenblas-dev
 
-      - name: Install CPU-only torch
-        run: pip install torch --index-url https://download.pytorch.org/whl/cpu --no-cache-dir
-
       - name: Install Poetry
         run: pip install --no-cache-dir poetry
 
@@ -96,6 +93,9 @@ jobs:
         run: |
           poetry config virtualenvs.create false
           poetry install --no-interaction
+
+      - name: DESTROY FAT PYTORCH AND FORCE CPU (CRITICAL FOR SIZE)
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu --force-reinstall --no-cache-dir
 
       - name: Install PyInstaller and PyQt6
         run: pip install --no-cache-dir pyinstaller PyQt6
